@@ -17,7 +17,7 @@ export interface DomainsBaseOptions {
   homeDir?: string;
 }
 
-export interface RemoveDomainOptions extends DomainsBaseOptions {
+export interface DeleteDomainOptions extends DomainsBaseOptions {
   yes?: boolean;
   confirm?: (question: string, defaultYes?: boolean) => Promise<boolean>;
 }
@@ -152,9 +152,9 @@ export async function addPenDomain(
   return { defaultUrl, domains, pen, project, auth };
 }
 
-export async function removePenDomain(
+export async function deletePenDomain(
   host: string,
-  options: RemoveDomainOptions = {},
+  options: DeleteDomainOptions = {},
 ): Promise<DomainsCommandResult | null> {
   const cleanHost = host.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
   if (!cleanHost) {
@@ -166,9 +166,9 @@ export async function removePenDomain(
 
   if (!options.yes) {
     if (!interactive) {
-      throw new Error('Refusing to remove domain in non-interactive mode without --yes.');
+      throw new Error('Refusing to delete domain in non-interactive mode without --yes.');
     }
-    const ok = await confirmImpl(`Remove custom domain ${fmt.cyan(cleanHost)}?`, false);
+    const ok = await confirmImpl(`Delete custom domain ${fmt.cyan(cleanHost)}?`, false);
     if (!ok) {
       console.log('Aborted.');
       return null;
@@ -194,7 +194,7 @@ export async function removePenDomain(
   if (options.json) {
     outputDomainsJson(defaultUrl, remaining);
   } else {
-    console.log(`${fmt.green('✓')} Removed custom domain ${fmt.cyan(cleanHost)}.\n`);
+    console.log(`${fmt.green('✓')} Deleted custom domain ${fmt.cyan(cleanHost)}.\n`);
     renderDomains(remaining, defaultUrl);
   }
 
@@ -237,13 +237,13 @@ export function registerDomainsCommand(program: Command): void {
     });
 
   domainsCmd
-    .command('remove <host>')
-    .alias('rm')
-    .description('Remove a custom domain from this Pen’s deployment')
+    .command('delete <host>')
+    .aliases(['del', 'rm'])
+    .description('Delete a custom domain from this Pen’s deployment')
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Output default deployed URL and remaining domains as JSON')
     .action(async (host: string, options: { yes?: boolean; json?: boolean }, command: Command) => {
-      await removePenDomain(host, {
+      await deletePenDomain(host, {
         yes: options.yes,
         json: options.json,
         explicitProfile: getGlobalProfileOption(command),

@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { addPenDomain, listPenDomains, removePenDomain } from '../src/commands/domains.js';
+import { addPenDomain, deletePenDomain, listPenDomains } from '../src/commands/domains.js';
 import { saveProfileToFile } from '../src/config/auth.js';
 import { writeProjectConfig } from '../src/config/project.js';
 import type { Pen, PenDomain } from '../src/types.js';
@@ -291,8 +291,8 @@ describe('cdpn domains command', () => {
       assert.ok(addOut.includes(`Default URL: ${DEFAULT_DEPLOY_URL}`), `Unexpected add output:\n${addOut}`);
       assert.ok(addOut.includes('www.example.com'), `Unexpected add output:\n${addOut}`);
 
-      const { output: rmOut } = await captureLogs(() =>
-        removePenDomain('www.example.com', {
+      const { output: delOut } = await captureLogs(() =>
+        deletePenDomain('www.example.com', {
           cwd: tmpDir,
           baseUrl,
           homeDir: tmpHome,
@@ -302,9 +302,9 @@ describe('cdpn domains command', () => {
         }),
       );
 
-      assert.ok(rmOut.includes('Removed custom domain www.example.com'), `Unexpected remove output:\n${rmOut}`);
-      assert.ok(rmOut.includes(`Default URL: ${DEFAULT_DEPLOY_URL}`), `Unexpected remove output:\n${rmOut}`);
-      assert.ok(rmOut.includes('No custom domains configured for this Pen.'), `Unexpected remove output:\n${rmOut}`);
+      assert.ok(delOut.includes('Deleted custom domain www.example.com'), `Unexpected delete output:\n${delOut}`);
+      assert.ok(delOut.includes(`Default URL: ${DEFAULT_DEPLOY_URL}`), `Unexpected delete output:\n${delOut}`);
+      assert.ok(delOut.includes('No custom domains configured for this Pen.'), `Unexpected delete output:\n${delOut}`);
     } finally {
       await cleanup();
     }

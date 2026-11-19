@@ -121,6 +121,26 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       /missing required argument 'url'/i,
     );
 
+    const { stdout: domainsHelp } = await execFileAsync(process.execPath, [
+      path.join(distDir, 'cli.js'),
+      'domains',
+      '--help',
+    ]);
+    assert.ok(domainsHelp.includes('delete'), 'Expected domains help to list delete subcommand');
+    assert.equal(domainsHelp.includes('remove'), false, 'Expected domains help not to list remove subcommand');
+    for (const sub of ['delete', 'del', 'rm']) {
+      const { stdout: subHelp } = await execFileAsync(process.execPath, [
+        path.join(distDir, 'cli.js'),
+        'domains',
+        sub,
+        '--help',
+      ]);
+      assert.ok(
+        subHelp.includes('Usage: cdpn domains delete'),
+        `Expected "domains ${sub}" to resolve to "domains delete"`,
+      );
+    }
+
     const { stdout: openHelp } = await execFileAsync(process.execPath, [
       path.join(distDir, 'cli.js'),
       'open',
