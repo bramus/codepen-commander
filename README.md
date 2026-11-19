@@ -132,7 +132,7 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn domains [list]` | Show the default deployed URL, custom domains, verification status, and required DNS records |
 | `cdpn domains add <host>` | Attach a custom domain to the Pen's deployment |
 | `cdpn domains remove <host> [--yes]` | Remove a custom domain |
-| `cdpn open [--preview \| --live]` | Open the Pen's editor, preview, or live deployed URL in your browser |
+| `cdpn open [--preview \| --deploy]` | Open the Pen's editor, preview, or deployed URL in your browser (prompts to choose when multiple domains exist; `--live` is an alias for `--deploy`) |
 | `cdpn list [--search ...] [--templates] [--deployed] [--editor V2\|Classic]` | List and search your Pens (or Templates) on CodePen (alias: `cdpn ls`) |
 | `cdpn versions [--limit <n>]` | List saved versions with build status, labels, and markers (`head`, `local`, `deployed`) |
 | `cdpn rollback [version-id] [-m <label>] [--yes]` | Restore an older saved version to head and sync files locally |

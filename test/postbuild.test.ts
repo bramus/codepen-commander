@@ -121,6 +121,15 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       /missing required argument 'url'/i,
     );
 
+    const { stdout: openHelp } = await execFileAsync(process.execPath, [
+      path.join(distDir, 'cli.js'),
+      'open',
+      '--help',
+    ]);
+    assert.ok(openHelp.includes('--deploy'), 'Expected open help to include --deploy');
+    assert.ok(openHelp.includes('--live'), 'Expected open help to include --live');
+    assert.ok(openHelp.includes('--preview'), 'Expected open help to include --preview');
+
     const { stdout: authHelp } = await execFileAsync(process.execPath, [
       path.join(distDir, 'cli.js'),
       'auth',
