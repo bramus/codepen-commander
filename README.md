@@ -102,13 +102,13 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn auth logout [profile] [--all]` | Remove a specific profile or delete `~/.cdpn` completely |
 | `cdpn pull [url] [folder] [--force]` | Pull a Pen into a new folder (prompts if omitted), or update the current synced folder |
 | `cdpn status [--json]` | Show active profile, file diffs (added/modified/deleted), remote head, build & deployment status |
-| `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait]` | Push local changes (text & binary + deletions), wait for build, and sync compiler patches back |
-| `cdpn deploy [--no-push] [--version <id>] [--force]` | Push local changes and deploy to CodePen Hosting |
+| `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait]` | Push local changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (checks `index.html`, asks account, title, and visibility) |
+| `cdpn deploy [--no-push] [--version <id>] [--force]` | Push local changes (creating a Pen first if unlinked) and deploy to CodePen Hosting |
 | `cdpn undeploy [--yes]` | Take down the live deployment (Pen & versions remain intact) |
 | `cdpn domains [list]` | List custom domains, verification status, and required DNS records |
 | `cdpn domains add <host>` | Attach a custom domain to the Pen's deployment |
 | `cdpn domains remove <host> [--yes]` | Remove a custom domain |
-| `cdpn new [folder] [--title ...] [--access ...] [--starter]` | Create a new 2.0 Pen from local files or CodePen starter files |
+| `cdpn new [folder] [--title ...] [--access ...] [--starter] [--force]` | Create a new 2.0 Pen from local files (checks `index.html`, defaults title to `<title>`, asks visibility) or CodePen starter files |
 | `cdpn open [--preview \| --live]` | Open the Pen's editor, preview, or live deployed URL in your browser |
 | `cdpn list [--search ...] [--deployed] [--editor V2\|Classic]` | List and search your Pens on CodePen (alias: `cdpn ls`) |
 | `cdpn versions [--limit <n>]` | List saved versions with build status, labels, and markers (`head`, `local`, `deployed`) |

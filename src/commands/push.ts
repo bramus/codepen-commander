@@ -2,11 +2,13 @@ import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
 import {
   buildSyncedFileMap,
-  requireProject,
+  findProject,
+  PROJECT_CONFIG_FILENAME,
   writeProjectConfig,
   type ProjectLocation,
 } from '../config/project.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
+import { createPenFromDirectory } from './create-pen.js';
 import { computeSyncDiff, hasDiffChanges } from '../sync/diff.js';
 import { scanLocalFiles } from '../sync/fs.js';
 import { applyCompilerPatchesToDisk } from '../sync/materialize.js';
@@ -18,6 +20,9 @@ export interface PushOptions {
   force?: boolean;
   dryRun?: boolean;
   wait?: boolean;
+  title?: string;
+  access?: string;
+  password?: string;
 }
 
 export interface PushExecutionResult {
@@ -199,19 +204,50 @@ export async function executePush(
 export function registerPushCommand(program: Command): void {
   program
     .command('push')
-    .description('Push local file changes (including additions & deletions) to CodePen')
+    .description('Push local file changes to CodePen (or push an unlinked demo folder as a new Pen)')
     .option('-m, --label <label>', 'Label for the saved version (max 80 chars)')
-    .option('-f, --force', 'Overwrite remote head even if it moved since last sync')
+    .option('-f, --force', 'Overwrite remote head if moved (or skip missing index.html prompt on first push)')
     .option('--dry-run', 'Build proposed changes without saving them to the Pen head')
     .option('--no-wait', 'Return as soon as files are saved without waiting for the build')
+    .option('-t, --title <title>', 'Title for the new Pen when pushing an unlinked folder for the first time')
+    .option('--access <level>', 'Privacy for a new Pen: Public, Private, Protected, or Collaborators')
+    .option('--password <password>', 'Password for a new Protected Pen (min 8 chars)')
     .action(async (options: PushOptions, command: Command) => {
       if (options.label && options.label.length > 80) {
         throw new Error('Version label must be at most 80 characters.');
       }
 
-      const project = await requireProject();
+      const explicitProfile = getGlobalProfileOption(command);
+      const project = await findProject(process.cwd());
+
+      // First-time push: no .cdpn.json found -> push local folder as a brand-new CodePen 2.0 Pen
+      if (!project) {
+        if (options.dryRun) {
+          throw new Error(
+            `No ${PROJECT_CONFIG_FILENAME} found. --dry-run is only supported for an existing synced Pen.`,
+          );
+        }
+
+        console.log(
+          fmt.dim(`No ${PROJECT_CONFIG_FILENAME} found — pushing this local folder as a new CodePen 2.0 Pen.`),
+        );
+        await createPenFromDirectory({
+          targetDir: process.cwd(),
+          folderDisplay: '.',
+          hasExplicitFolder: false,
+          explicitProfile,
+          title: options.title,
+          access: options.access,
+          password: options.password,
+          force: options.force,
+          wait: options.wait,
+          requireLocalFiles: true,
+        });
+        return;
+      }
+
       const auth = await resolveCommandAuth({
-        explicitProfile: getGlobalProfileOption(command),
+        explicitProfile,
         project,
       });
       const client = new CodePenClient({ apiKey: auth.apiKey });

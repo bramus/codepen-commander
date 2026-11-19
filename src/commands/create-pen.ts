@@ -1,0 +1,356 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { CodePenClient } from '../api/client.js';
+import type { ResolvedAuth } from '../config/auth.js';
+import {
+  buildSyncedFileMap,
+  hasProjectConfigInDir,
+  PROJECT_CONFIG_FILENAME,
+  suggestFolderName,
+  writeProjectConfig,
+  type ProjectLocation,
+} from '../config/project.js';
+import { isDirectoryNonEmpty, scanLocalFiles, type LocalFile } from '../sync/fs.js';
+import { syncRemoteFilesToDisk } from '../sync/materialize.js';
+import type { BinaryUploadPart, Build, Pen, PenAccess, PenFileRequest } from '../types.js';
+import { fmt, printBuildSummary, shortId } from '../utils/format.js';
+import { extractHtmlTitle } from '../utils/html.js';
+import {
+  isInteractive,
+  promptConfirm,
+  promptSecret,
+  promptSelect,
+  promptText,
+  type SelectOption,
+} from '../utils/prompts.js';
+import { resolveCommandAuth } from './auth-context.js';
+
+const VALID_ACCESS = new Set(['public', 'private', 'protected', 'collaborators']);
+
+export function normalizeAccess(raw?: string): PenAccess | undefined {
+  if (!raw) return undefined;
+  const lower = raw.trim().toLowerCase();
+  if (!VALID_ACCESS.has(lower)) {
+    throw new Error(`Invalid access level "${raw}". Use: Public, Private, Protected, or Collaborators.`);
+  }
+  return (lower[0]!.toUpperCase() + lower.slice(1)) as PenAccess;
+}
+
+export interface CreatePenFlowOptions {
+  /** Target local directory (defaults to cwd). */
+  targetDir: string;
+  /** Display label for the folder in user-facing output. */
+  folderDisplay: string;
+  /** Whether the user explicitly passed a folder argument. */
+  hasExplicitFolder?: boolean;
+  /** Explicit `--profile <name>` flag value. */
+  explicitProfile?: string;
+  /** Pre-supplied Pen title (skips title prompt if provided). */
+  title?: string;
+  description?: string;
+  tags?: string[];
+  /** Pre-supplied Pen access level (skips visibility prompt if provided). */
+  access?: string;
+  /** Pre-supplied password (for Protected Pens). */
+  password?: string;
+  template?: boolean;
+  /** Create with CodePen starter files instead of uploading local files. */
+  starter?: boolean;
+  /** Require local files to exist (true for `cdpn push` / `cdpn deploy`, false for `cdpn new`). */
+  requireLocalFiles?: boolean;
+  /** Skip confirmation when `index.html` is missing. */
+  force?: boolean;
+  /** Wait for initial build to settle (defaults to true). */
+  wait?: boolean;
+  /** Injectable API base URL (for testing). */
+  baseUrl?: string;
+  /** Injectable interactivity flag (for testing). */
+  interactive?: boolean;
+  /** Injectable env map (for testing). */
+  env?: NodeJS.ProcessEnv;
+  /** Injectable home dir (for testing). */
+  homeDir?: string;
+  /** Injectable prompts (for testing). */
+  prompts?: {
+    confirm?: (question: string, defaultYes?: boolean) => Promise<boolean>;
+    text?: (question: string, defaultValue?: string) => Promise<string>;
+    select?: <T extends string>(
+      question: string,
+      options: SelectOption<T>[],
+      defaultIndex?: number,
+    ) => Promise<T>;
+    secret?: (question: string) => Promise<string>;
+  };
+}
+
+export interface CreatePenFlowResult {
+  pen: Pen;
+  versionId: string | null;
+  build: Build | null;
+  auth: ResolvedAuth;
+  project: ProjectLocation;
+}
+
+export function printMissingIndexHtmlWarning(targetDir: string, fileCount: number): void {
+  const headline = '  WARNING: No index.html found in this folder!  ';
+  const border = '═'.repeat(headline.length);
+  console.log('');
+  console.log(fmt.yellow(fmt.bold(`╔${border}╗`)));
+  console.log(fmt.yellow(fmt.bold(`║${headline}║`)));
+  console.log(fmt.yellow(fmt.bold(`╚${border}╝`)));
+  console.log(
+    fmt.yellow(
+      `CodePen expects an index.html file at the root of your demo.\n` +
+        `Double-check that you are in the right folder before pushing:\n` +
+        `  Folder: ${targetDir} (${fileCount} file(s) found)`,
+    ),
+  );
+  console.log('');
+}
+
+/**
+ * Shared first-time Pen creation flow used by `cdpn push` (in an unlinked folder),
+ * `cdpn deploy` (in an unlinked folder), and `cdpn new`.
+ *
+ * When uploading local files for the first time:
+ * 1. Checks for `/index.html`; if absent, displays a prominent warning and asks for confirmation.
+ * 2. Resolves or asks which CodePen account/profile to push to (when multiple keys are in `~/.cdpn`).
+ * 3. Asks for a title (pre-filled from `index.html`'s `<title>` when available).
+ * 4. Asks for visibility (`Public` default, `Private`, `Protected`, or `Collaborators`).
+ */
+export async function createPenFromDirectory(
+  options: CreatePenFlowOptions,
+): Promise<CreatePenFlowResult | null> {
+  const interactive = options.interactive ?? isInteractive();
+  const confirmImpl = options.prompts?.confirm ?? promptConfirm;
+  const textImpl = options.prompts?.text ?? promptText;
+  const selectImpl = options.prompts?.select ?? promptSelect;
+  const secretImpl = options.prompts?.secret ?? promptSecret;
+
+  let access = normalizeAccess(options.access);
+  if (access === 'Protected' && options.password !== undefined && options.password.length < 8) {
+    throw new Error('Protected Pens require --password with at least 8 characters.');
+  }
+  if (access === 'Protected' && !options.password && !interactive) {
+    throw new Error('Protected Pens require --password with at least 8 characters.');
+  }
+
+  let targetDir = path.resolve(options.targetDir);
+  let folderDisplay = options.folderDisplay;
+
+  if (await hasProjectConfigInDir(targetDir)) {
+    throw new Error(
+      `${targetDir} already contains ${PROJECT_CONFIG_FILENAME}. Use \`cdpn push\` to update the existing Pen or specify a different folder.`,
+    );
+  }
+
+  const hasExistingFiles = await isDirectoryNonEmpty(targetDir);
+  const uploadLocalFiles = hasExistingFiles && !options.starter;
+
+  let scanned: Map<string, LocalFile> = new Map();
+  if (uploadLocalFiles) {
+    scanned = await scanLocalFiles(targetDir);
+  }
+
+  if (options.requireLocalFiles && scanned.size === 0) {
+    throw new Error(
+      `No ${PROJECT_CONFIG_FILENAME} found and no syncable files in ${targetDir}.\n` +
+        'Run `cdpn pull <url>` to download an existing Pen or `cdpn new --starter` to create a blank Pen.',
+    );
+  }
+
+  const actuallyUploadingLocal = uploadLocalFiles && scanned.size > 0;
+  const indexFile = actuallyUploadingLocal ? scanned.get('/index.html') : undefined;
+
+  // 1. Check for index.html before pushing a local demo for the first time
+  if (actuallyUploadingLocal && !indexFile) {
+    printMissingIndexHtmlWarning(targetDir, scanned.size);
+    if (!options.force) {
+      if (!interactive) {
+        throw new Error(
+          `No index.html found in ${targetDir}. Pass --force to push this folder without an index.html.`,
+        );
+      }
+      const ok = await confirmImpl(
+        'Are you sure you want to push this folder without an index.html?',
+        false,
+      );
+      if (!ok) {
+        console.log('Aborted.');
+        return null;
+      }
+    }
+  }
+
+  // 2. Ask which account/profile to push to (only prompts if multiple keys exist in ~/.cdpn)
+  const auth = await resolveCommandAuth({
+    explicitProfile: options.explicitProfile,
+    promptMessage: 'Which CodePen account/profile would you like to push to?',
+    interactive,
+    env: options.env,
+    homeDir: options.homeDir,
+    selectProfile: selectImpl,
+  });
+  const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
+
+  // 3. Determine title (defaulting to index.html's <title> when present)
+  const htmlTitle =
+    indexFile && !indexFile.isBinary && indexFile.textContent
+      ? extractHtmlTitle(indexFile.textContent)
+      : null;
+  const fallbackTitle = path.basename(targetDir) || 'Untitled';
+  const defaultTitle = htmlTitle ?? fallbackTitle;
+
+  let title = options.title?.trim();
+  if (!title) {
+    if (interactive) {
+      title = (await textImpl('Pen title', defaultTitle)).trim() || defaultTitle;
+    } else if (actuallyUploadingLocal) {
+      title = defaultTitle;
+    }
+  }
+
+  // 4. Ask for visibility (Public by default, Private, Protected, or Collaborators)
+  if (!access) {
+    if (interactive) {
+      access = await selectImpl<PenAccess>(
+        'Pen visibility:',
+        [
+          { value: 'Public', label: 'Public', description: 'visible to everyone (default)' },
+          { value: 'Private', label: 'Private', description: 'visible only to you / your team' },
+          {
+            value: 'Protected',
+            label: 'Protected',
+            description: 'password-protected (min 8 characters)',
+          },
+          {
+            value: 'Collaborators',
+            label: 'Collaborators',
+            description: 'visible only to you and collaborators',
+          },
+        ],
+        0,
+      );
+    } else {
+      access = 'Public';
+    }
+  }
+
+  let password = options.password;
+  if (access === 'Protected' && (!password || password.length < 8)) {
+    if (!interactive) {
+      throw new Error('Protected Pens require --password with at least 8 characters.');
+    }
+    for (;;) {
+      password = await secretImpl('Password for Protected Pen (min 8 characters)');
+      if (password.length >= 8) break;
+      console.log(fmt.yellow('Password must be at least 8 characters.'));
+    }
+  }
+
+  const textFiles: PenFileRequest[] = [];
+  const binaryFiles: BinaryUploadPart[] = [];
+
+  if (actuallyUploadingLocal) {
+    for (const [filePath, lf] of scanned) {
+      if (lf.isBinary && lf.buffer.length > 0) {
+        binaryFiles.push({ path: filePath, content: lf.buffer });
+      } else {
+        textFiles.push({ path: filePath, content: lf.textContent ?? '' });
+      }
+    }
+  }
+
+  const shouldWait = options.wait !== false;
+
+  console.log(
+    actuallyUploadingLocal
+      ? `\nCreating new Pen from ${textFiles.length + binaryFiles.length} local file(s)…`
+      : '\nCreating new CodePen 2.0 Pen with starter files…',
+  );
+
+  const created = await client.createPen(
+    {
+      ...(title ? { title } : {}),
+      ...(options.description ? { description: options.description } : {}),
+      ...(options.tags && options.tags.length > 0 ? { tags: options.tags } : {}),
+      access,
+      ...(password ? { password } : {}),
+      ...(options.template ? { template: true } : {}),
+      ...(actuallyUploadingLocal ? { files: textFiles } : {}),
+      wait: shouldWait ? 45 : 0,
+    },
+    binaryFiles,
+  );
+
+  let finalBuild = created.build ?? null;
+  if (finalBuild && shouldWait) {
+    finalBuild = await client.settleBuild(finalBuild);
+    printBuildSummary(finalBuild);
+  }
+
+  // If `cdpn new` was invoked with no folder in an empty directory, allow choosing a subfolder
+  if (!options.hasExplicitFolder && !actuallyUploadingLocal && interactive) {
+    const defaultName = suggestFolderName(created);
+    const chosen = await textImpl('Local folder to save Pen into', defaultName);
+    if (chosen && chosen !== '.') {
+      targetDir = path.resolve(process.cwd(), chosen);
+      folderDisplay = chosen;
+    }
+  }
+
+  await fs.mkdir(targetDir, { recursive: true });
+
+  const finalVersionId = finalBuild?.version_id ?? created.saved_version?.id ?? null;
+  const remoteFiles = finalVersionId
+    ? (await client.getVersion(finalVersionId)).files ?? (await client.getPenFiles(created.id))
+    : await client.getPenFiles(created.id);
+
+  const materialized = await syncRemoteFilesToDisk({
+    client,
+    rootDir: targetDir,
+    remoteFiles,
+    pruneRemoved: false,
+  });
+
+  const config = {
+    url: created.urls.editor,
+    pen_id: created.id,
+    ...(auth.profile ? { profile: auth.profile } : {}),
+    last_synced_version_id: finalVersionId,
+    editor: created.editor,
+    files: buildSyncedFileMap(remoteFiles, materialized.localSha256ByPath),
+  };
+  const configPath = await writeProjectConfig(targetDir, config);
+
+  if (finalBuild?.status === 'Failed') {
+    console.log(
+      `\n${fmt.yellow('!')} Created Pen ${fmt.bold(created.title || 'Untitled')} ${fmt.dim(`(${created.id})`)}, but the initial build failed.`,
+    );
+    process.exitCode = 1;
+  } else {
+    console.log(
+      `\n${fmt.green('✓')} Created Pen ${fmt.bold(created.title || 'Untitled')} ${fmt.dim(`(${created.id})`)}`,
+    );
+  }
+  if (auth.profile) {
+    console.log(`  Profile:    ${fmt.cyan(auth.profile)}`);
+  }
+  console.log(`  Visibility: ${created.access}`);
+  console.log(`  Folder:     ${fmt.cyan(folderDisplay)}`);
+  console.log(`  Editor:     ${fmt.cyan(created.urls.editor)}`);
+  console.log(`  Preview:    ${fmt.cyan(created.urls.preview)}`);
+  console.log(`  Version:    ${fmt.dim(shortId(finalVersionId))}`);
+
+  return {
+    pen: created,
+    versionId: finalVersionId,
+    build: finalBuild,
+    auth,
+    project: {
+      rootDir: targetDir,
+      configPath,
+      config,
+    },
+  };
+}
