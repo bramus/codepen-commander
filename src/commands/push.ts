@@ -234,14 +234,12 @@ export function registerPushCommand(program: Command): void {
         await createPenFromDirectory({
           targetDir: process.cwd(),
           folderDisplay: '.',
-          hasExplicitFolder: false,
           explicitProfile,
           title: options.title,
           access: options.access,
           password: options.password,
           force: options.force,
           wait: options.wait,
-          requireLocalFiles: true,
         });
         return;
       }

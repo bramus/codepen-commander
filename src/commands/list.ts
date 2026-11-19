@@ -9,6 +9,7 @@ export interface ListOptions {
   access?: string;
   deployed?: boolean;
   notDeployed?: boolean;
+  templates?: boolean;
   tags?: string;
   editor?: string;
   sort?: string;
@@ -29,6 +30,7 @@ export function registerListCommand(program: Command): void {
     .option('--access <levels>', 'Comma-separated access levels: Public,Private,Protected,Collaborators')
     .option('--deployed', 'Show only deployed Pens')
     .option('--not-deployed', 'Show only non-deployed Pens')
+    .option('--templates', 'Show only Pens marked as templates')
     .option('--tags <tags>', 'Comma-separated tags (up to 3)')
     .option('--editor <type>', 'Filter by editor: V2 or Classic')
     .option('--sort <field>', 'Sort by: created, updated, popularity, or title', 'updated')
@@ -64,6 +66,7 @@ export function registerListCommand(program: Command): void {
       }
 
       const deployed = options.deployed ? true : options.notDeployed ? false : undefined;
+      const template = options.templates ? true : undefined;
 
       const auth = await resolveCommandAuth({
         explicitProfile: getGlobalProfileOption(command),
@@ -80,6 +83,7 @@ export function registerListCommand(program: Command): void {
         search_term: options.search,
         access: options.access,
         deployed,
+        template,
         tags: options.tags,
         editor,
       });
@@ -105,11 +109,12 @@ export function registerListCommand(program: Command): void {
       const rows = sliced.map((pen) => {
         const editorBadge = pen.editor === 'V2' ? fmt.green('V2') : fmt.dim('Classic');
         const deployBadge = pen.deployment ? fmt.cyan('live') : fmt.dim('—');
+        const accessLabel = pen.template ? `${pen.access} ${fmt.dim('(template)')}` : pen.access;
         const title = (pen.title || 'Untitled').slice(0, 36);
         return [
           fmt.bold(title),
           editorBadge,
-          pen.access,
+          accessLabel,
           deployBadge,
           fmt.dim(formatDate(pen.updated_at)),
           fmt.cyan(pen.urls.editor),

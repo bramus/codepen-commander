@@ -217,6 +217,15 @@ export interface PenCreateRequest {
   wait?: number;
 }
 
+export interface PenForkRequest {
+  title?: string;
+  description?: string;
+  tags?: string[];
+  access?: PenAccess;
+  password?: string;
+  wait?: number;
+}
+
 export interface PenUpdateRequest {
   title?: string;
   description?: string;

@@ -53,3 +53,15 @@ export function extractHtmlTitle(html: string): string | null {
   const decoded = decodeHtmlEntities(match[1]).replace(/\s+/g, ' ').trim();
   return decoded || null;
 }
+
+/**
+ * Escapes HTML special characters for safe interpolation inside text nodes and attributes.
+ */
+export function escapeHtml(input: string): string {
+  return input
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}

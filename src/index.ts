@@ -39,10 +39,19 @@ export {
   PROJECT_CONFIG_FILENAME,
   readProjectConfig,
   requireProject,
+  slugifyTitle,
   suggestFolderName,
   writeProjectConfig,
 } from './config/project.js';
 export type { ProjectLocation } from './config/project.js';
+export {
+  buildStarterFiles,
+  getPresetFilePaths,
+  normalizeScaffoldPreset,
+  parseCustomFileList,
+  VALID_SCAFFOLD_PRESETS,
+} from './commands/scaffold.js';
+export type { ScaffoldPreset } from './commands/scaffold.js';
 export { computeSyncDiff, detectLocalChangesFromBaseline, hasDiffChanges } from './sync/diff.js';
 export type { ComputeDiffOptions, DiffItem, SyncDiff } from './sync/diff.js';
 export {
@@ -57,5 +66,5 @@ export {
 export type { LocalFile } from './sync/fs.js';
 export { applyCompilerPatchesToDisk, syncRemoteFilesToDisk } from './sync/materialize.js';
 export type { MaterializeResult } from './sync/materialize.js';
-export { extractHtmlTitle } from './utils/html.js';
+export { escapeHtml, extractHtmlTitle } from './utils/html.js';
 export type * from './types.js';

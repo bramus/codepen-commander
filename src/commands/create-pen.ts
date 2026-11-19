@@ -6,11 +6,10 @@ import {
   buildSyncedFileMap,
   hasProjectConfigInDir,
   PROJECT_CONFIG_FILENAME,
-  suggestFolderName,
   writeProjectConfig,
   type ProjectLocation,
 } from '../config/project.js';
-import { isDirectoryNonEmpty, scanLocalFiles, type LocalFile } from '../sync/fs.js';
+import { scanLocalFiles } from '../sync/fs.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { BinaryUploadPart, Build, Pen, PenAccess, PenFileRequest } from '../types.js';
 import { fmt, printBuildSummary, shortId } from '../utils/format.js';
@@ -36,13 +35,84 @@ export function normalizeAccess(raw?: string): PenAccess | undefined {
   return (lower[0]!.toUpperCase() + lower.slice(1)) as PenAccess;
 }
 
+export interface VisibilityPromptCallbacks {
+  select?: <T extends string>(
+    question: string,
+    options: SelectOption<T>[],
+    defaultIndex?: number,
+  ) => Promise<T>;
+  secret?: (question: string) => Promise<string>;
+}
+
+/**
+ * Validates or interactively prompts for Pen visibility (`Public` default, `Private`,
+ * `Protected`, or `Collaborators`) and password when `Protected` is chosen.
+ */
+export async function resolveVisibilityAndPassword(options: {
+  rawAccess?: string;
+  rawPassword?: string;
+  interactive: boolean;
+  prompts?: VisibilityPromptCallbacks;
+}): Promise<{ access: PenAccess; password?: string }> {
+  const selectImpl = options.prompts?.select ?? promptSelect;
+  const secretImpl = options.prompts?.secret ?? promptSecret;
+
+  let access = normalizeAccess(options.rawAccess);
+  if (access === 'Protected' && options.rawPassword !== undefined && options.rawPassword.length < 8) {
+    throw new Error('Protected Pens require --password with at least 8 characters.');
+  }
+  if (access === 'Protected' && !options.rawPassword && !options.interactive) {
+    throw new Error('Protected Pens require --password with at least 8 characters.');
+  }
+
+  if (!access) {
+    if (options.interactive) {
+      access = await selectImpl<PenAccess>(
+        'Pen visibility:',
+        [
+          { value: 'Public', label: 'Public', description: 'visible to everyone (default)' },
+          { value: 'Private', label: 'Private', description: 'visible only to you / your team' },
+          {
+            value: 'Protected',
+            label: 'Protected',
+            description: 'password-protected (min 8 characters)',
+          },
+          {
+            value: 'Collaborators',
+            label: 'Collaborators',
+            description: 'visible only to you and collaborators',
+          },
+        ],
+        0,
+      );
+    } else {
+      access = 'Public';
+    }
+  }
+
+  let password = options.rawPassword;
+  if (access === 'Protected' && (!password || password.length < 8)) {
+    if (!options.interactive) {
+      throw new Error('Protected Pens require --password with at least 8 characters.');
+    }
+    for (;;) {
+      password = await secretImpl('Password for Protected Pen (min 8 characters)');
+      if (password.length >= 8) break;
+      console.log(fmt.yellow('Password must be at least 8 characters.'));
+    }
+  }
+
+  return {
+    access,
+    ...(access === 'Protected' && password ? { password } : {}),
+  };
+}
+
 export interface CreatePenFlowOptions {
   /** Target local directory (defaults to cwd). */
   targetDir: string;
   /** Display label for the folder in user-facing output. */
   folderDisplay: string;
-  /** Whether the user explicitly passed a folder argument. */
-  hasExplicitFolder?: boolean;
   /** Explicit `--profile <name>` flag value. */
   explicitProfile?: string;
   /** Pre-supplied Pen title (skips title prompt if provided). */
@@ -54,10 +124,6 @@ export interface CreatePenFlowOptions {
   /** Pre-supplied password (for Protected Pens). */
   password?: string;
   template?: boolean;
-  /** Create with CodePen starter files instead of uploading local files. */
-  starter?: boolean;
-  /** Require local files to exist (true for `cdpn push` / `cdpn deploy`, false for `cdpn new`). */
-  requireLocalFiles?: boolean;
   /** Skip confirmation when `index.html` is missing. */
   force?: boolean;
   /** Wait for initial build to settle (defaults to true). */
@@ -109,10 +175,9 @@ export function printMissingIndexHtmlWarning(targetDir: string, fileCount: numbe
 }
 
 /**
- * Shared first-time Pen creation flow used by `cdpn push` (in an unlinked folder),
- * `cdpn deploy` (in an unlinked folder), and `cdpn new`.
+ * First-time Pen creation flow used by `cdpn push` and `cdpn deploy` when invoked inside
+ * an unlinked local demo folder:
  *
- * When uploading local files for the first time:
  * 1. Checks for `/index.html`; if absent, displays a prominent warning and asks for confirmation.
  * 2. Resolves or asks which CodePen account/profile to push to (when multiple keys are in `~/.cdpn`).
  * 3. Asks for a title (pre-filled from `index.html`'s `<title>` when available).
@@ -125,45 +190,37 @@ export async function createPenFromDirectory(
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
   const textImpl = options.prompts?.text ?? promptText;
   const selectImpl = options.prompts?.select ?? promptSelect;
-  const secretImpl = options.prompts?.secret ?? promptSecret;
 
-  let access = normalizeAccess(options.access);
-  if (access === 'Protected' && options.password !== undefined && options.password.length < 8) {
+  // Validate --access / --password early before prompting or scanning
+  const prevalidatedAccess = normalizeAccess(options.access);
+  if (prevalidatedAccess === 'Protected' && options.password !== undefined && options.password.length < 8) {
     throw new Error('Protected Pens require --password with at least 8 characters.');
   }
-  if (access === 'Protected' && !options.password && !interactive) {
+  if (prevalidatedAccess === 'Protected' && !options.password && !interactive) {
     throw new Error('Protected Pens require --password with at least 8 characters.');
   }
 
-  let targetDir = path.resolve(options.targetDir);
-  let folderDisplay = options.folderDisplay;
+  const targetDir = path.resolve(options.targetDir);
+  const folderDisplay = options.folderDisplay;
 
   if (await hasProjectConfigInDir(targetDir)) {
     throw new Error(
-      `${targetDir} already contains ${PROJECT_CONFIG_FILENAME}. Use \`cdpn push\` to update the existing Pen or specify a different folder.`,
+      `${targetDir} already contains ${PROJECT_CONFIG_FILENAME}. Use \`cdpn push\` to update the existing Pen.`,
     );
   }
 
-  const hasExistingFiles = await isDirectoryNonEmpty(targetDir);
-  const uploadLocalFiles = hasExistingFiles && !options.starter;
-
-  let scanned: Map<string, LocalFile> = new Map();
-  if (uploadLocalFiles) {
-    scanned = await scanLocalFiles(targetDir);
-  }
-
-  if (options.requireLocalFiles && scanned.size === 0) {
+  const scanned = await scanLocalFiles(targetDir);
+  if (scanned.size === 0) {
     throw new Error(
       `No ${PROJECT_CONFIG_FILENAME} found and no syncable files in ${targetDir}.\n` +
-        'Run `cdpn pull <url>` to download an existing Pen or `cdpn new --starter` to create a blank Pen.',
+        'Run `cdpn pull <url>` to download an existing Pen or `cdpn new` to scaffold a brand-new Pen.',
     );
   }
 
-  const actuallyUploadingLocal = uploadLocalFiles && scanned.size > 0;
-  const indexFile = actuallyUploadingLocal ? scanned.get('/index.html') : undefined;
+  const indexFile = scanned.get('/index.html');
 
   // 1. Check for index.html before pushing a local demo for the first time
-  if (actuallyUploadingLocal && !indexFile) {
+  if (!indexFile) {
     printMissingIndexHtmlWarning(targetDir, scanned.size);
     if (!options.force) {
       if (!interactive) {
@@ -205,69 +262,33 @@ export async function createPenFromDirectory(
   if (!title) {
     if (interactive) {
       title = (await textImpl('Pen title', defaultTitle)).trim() || defaultTitle;
-    } else if (actuallyUploadingLocal) {
+    } else {
       title = defaultTitle;
     }
   }
 
   // 4. Ask for visibility (Public by default, Private, Protected, or Collaborators)
-  if (!access) {
-    if (interactive) {
-      access = await selectImpl<PenAccess>(
-        'Pen visibility:',
-        [
-          { value: 'Public', label: 'Public', description: 'visible to everyone (default)' },
-          { value: 'Private', label: 'Private', description: 'visible only to you / your team' },
-          {
-            value: 'Protected',
-            label: 'Protected',
-            description: 'password-protected (min 8 characters)',
-          },
-          {
-            value: 'Collaborators',
-            label: 'Collaborators',
-            description: 'visible only to you and collaborators',
-          },
-        ],
-        0,
-      );
-    } else {
-      access = 'Public';
-    }
-  }
-
-  let password = options.password;
-  if (access === 'Protected' && (!password || password.length < 8)) {
-    if (!interactive) {
-      throw new Error('Protected Pens require --password with at least 8 characters.');
-    }
-    for (;;) {
-      password = await secretImpl('Password for Protected Pen (min 8 characters)');
-      if (password.length >= 8) break;
-      console.log(fmt.yellow('Password must be at least 8 characters.'));
-    }
-  }
+  const { access, password } = await resolveVisibilityAndPassword({
+    rawAccess: options.access,
+    rawPassword: options.password,
+    interactive,
+    prompts: options.prompts,
+  });
 
   const textFiles: PenFileRequest[] = [];
   const binaryFiles: BinaryUploadPart[] = [];
 
-  if (actuallyUploadingLocal) {
-    for (const [filePath, lf] of scanned) {
-      if (lf.isBinary && lf.buffer.length > 0) {
-        binaryFiles.push({ path: filePath, content: lf.buffer });
-      } else {
-        textFiles.push({ path: filePath, content: lf.textContent ?? '' });
-      }
+  for (const [filePath, lf] of scanned) {
+    if (lf.isBinary && lf.buffer.length > 0) {
+      binaryFiles.push({ path: filePath, content: lf.buffer });
+    } else {
+      textFiles.push({ path: filePath, content: lf.textContent ?? '' });
     }
   }
 
   const shouldWait = options.wait !== false;
 
-  console.log(
-    actuallyUploadingLocal
-      ? `\nCreating new Pen from ${textFiles.length + binaryFiles.length} local file(s)…`
-      : '\nCreating new CodePen 2.0 Pen with starter files…',
-  );
+  console.log(`\nCreating new Pen from ${textFiles.length + binaryFiles.length} local file(s)…`);
 
   const created = await client.createPen(
     {
@@ -277,7 +298,7 @@ export async function createPenFromDirectory(
       access,
       ...(password ? { password } : {}),
       ...(options.template ? { template: true } : {}),
-      ...(actuallyUploadingLocal ? { files: textFiles } : {}),
+      files: textFiles,
       wait: shouldWait ? 45 : 0,
     },
     binaryFiles,
@@ -287,16 +308,6 @@ export async function createPenFromDirectory(
   if (finalBuild && shouldWait) {
     finalBuild = await client.settleBuild(finalBuild);
     printBuildSummary(finalBuild);
-  }
-
-  // If `cdpn new` was invoked with no folder in an empty directory, allow choosing a subfolder
-  if (!options.hasExplicitFolder && !actuallyUploadingLocal && interactive) {
-    const defaultName = suggestFolderName(created);
-    const chosen = await textImpl('Local folder to save Pen into', defaultName);
-    if (chosen && chosen !== '.') {
-      targetDir = path.resolve(process.cwd(), chosen);
-      folderDisplay = chosen;
-    }
   }
 
   await fs.mkdir(targetDir, { recursive: true });

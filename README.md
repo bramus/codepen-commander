@@ -89,6 +89,27 @@ Every synced Pen folder contains a `.cdpn.json` file at its root:
 
 You can also add an optional `.cdpnignore` file in a Pen folder to exclude extra local files from syncing (`.cdpn.json`, `.cdpnignore`, `.git`, `node_modules`, and `.DS_Store` are ignored automatically).
 
+## Scaffolding & Templates (`cdpn new`)
+
+`cdpn new [folder]` is dedicated to scaffolding a brand-new CodePen 2.0 Pen into a new or empty local folder (for pushing an existing local demo folder, run `cdpn push` inside that folder instead).
+
+CodePen stores your reusable scaffolds as **Templates** (any Pen marked with `template: true` on CodePen or via `cdpn info --template true` / `cdpn new --as-template`), in addition to CodePen's built-in 2.0 starter files. When you run `cdpn new` interactively, it fetches your account's Templates from CodePen and lets you pick what your scaffold looks like:
+
+- **CodePen default starter** (`--scaffold starter`) — CodePen's built-in 2.0 starter files
+- **Your CodePen Templates** (`--template <id|url|title>`) — copies all files (including `.codepen/pen.config.json`, Blocks, and binary assets) from any of your CodePen Templates into a clean, independent 2.0 Pen
+- **Built-in minimal presets** — `--scaffold html-css`, `--scaffold html-css-js`, or `--scaffold blank`
+- **Custom starter files** — `--files index.html,style.css` (auto-links included stylesheets & scripts inside `index.html`)
+- **Any existing Pen or local folder** — `--from <pen-url-or-id-or-dir>` (clean copy) or `--fork <pen-url-or-id>` (CodePen fork)
+
+```bash
+cdpn new my-demo                                 # Interactive picker (includes your CodePen Templates)
+cdpn new my-demo --template "CSS Demo Base"      # Scaffold from a CodePen Template by title, ID, or URL
+cdpn new my-demo --scaffold html-css             # Minimal index.html + style.css
+cdpn new my-demo --files index.html,src/app.ts   # Custom starter files
+cdpn new my-demo --from ./my-local-starter       # Copy from a local folder or another Pen
+cdpn new my-starter --as-template                # Create a new reusable Template on CodePen
+```
+
 ## Commands
 
 All commands accept the global `--profile <name>` flag to override the active profile.
@@ -100,6 +121,7 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn auth list` | List stored profiles in `~/.cdpn` (alias: `cdpn auth ls`) |
 | `cdpn auth default [profile]` | Set the default profile in `~/.cdpn` |
 | `cdpn auth logout [profile] [--all]` | Remove a specific profile or delete `~/.cdpn` completely |
+| `cdpn new [folder] [--template ...] [--scaffold ...] [--files ...] [--from ...] [--fork ...] [--as-template]` | Scaffold a brand-new 2.0 Pen into a new or empty folder from CodePen Templates, built-in presets, custom files, or another Pen/folder |
 | `cdpn pull [url] [folder] [--force]` | Pull a Pen into a new folder (prompts if omitted), or update the current synced folder |
 | `cdpn status [--json]` | Show active profile, file diffs (added/modified/deleted), remote head, build & deployment status |
 | `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait]` | Push local changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (checks `index.html`, asks account, title, and visibility) |
@@ -108,12 +130,11 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn domains [list]` | List custom domains, verification status, and required DNS records |
 | `cdpn domains add <host>` | Attach a custom domain to the Pen's deployment |
 | `cdpn domains remove <host> [--yes]` | Remove a custom domain |
-| `cdpn new [folder] [--title ...] [--access ...] [--starter] [--force]` | Create a new 2.0 Pen from local files (checks `index.html`, defaults title to `<title>`, asks visibility) or CodePen starter files |
 | `cdpn open [--preview \| --live]` | Open the Pen's editor, preview, or live deployed URL in your browser |
-| `cdpn list [--search ...] [--deployed] [--editor V2\|Classic]` | List and search your Pens on CodePen (alias: `cdpn ls`) |
+| `cdpn list [--search ...] [--templates] [--deployed] [--editor V2\|Classic]` | List and search your Pens (or Templates) on CodePen (alias: `cdpn ls`) |
 | `cdpn versions [--limit <n>]` | List saved versions with build status, labels, and markers (`head`, `local`, `deployed`) |
 | `cdpn rollback [version-id] [-m <label>] [--yes]` | Restore an older saved version to head and sync files locally |
-| `cdpn info [--title ...] [--tags ...] [--access ...]` | View or update Pen metadata |
+| `cdpn info [--title ...] [--tags ...] [--access ...] [--template true\|false]` | View or update Pen metadata |
 | `cdpn settings [--auto-deploy ...] [--indent-with ...]` | View or update Pen editor & deployment settings |
 
 ## Development & Publishing

@@ -325,6 +325,19 @@ describe('CodePenClient & sync integration against local 127.0.0.1 mock API', ()
         return;
       }
 
+      if (req.method === 'POST' && url.pathname === `/v2/pens/${PEN_ID}/fork`) {
+        const body = JSON.parse(rawBody.toString('utf8')) as { title?: string; access?: Pen['access'] };
+        const forked: Pen = {
+          ...samplePen(),
+          id: 'forked-pen-id',
+          title: body.title ?? samplePen().title,
+          access: body.access ?? samplePen().access,
+        };
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(forked));
+        return;
+      }
+
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
     });
@@ -454,5 +467,10 @@ describe('CodePenClient & sync integration against local 127.0.0.1 mock API', ()
     assert.equal(domains[0]?.dns[0]?.value, 'custom.codepen.app');
 
     await client.undeployPen(PEN_ID);
+
+    const forked = await client.forkPen(PEN_ID, { title: 'Forked Copy', access: 'Public' });
+    assert.equal(forked.id, 'forked-pen-id');
+    assert.equal(forked.title, 'Forked Copy');
+    assert.equal(forked.access, 'Public');
   });
 });

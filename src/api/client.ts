@@ -13,6 +13,7 @@ import type {
   PenCreateRequest,
   PenDomain,
   PenFile,
+  PenForkRequest,
   PenSettings,
   PenUpdateRequest,
   SettingsUpdateRequest,
@@ -261,6 +262,12 @@ export class CodePenClient {
     return this.requestJson<Pen>('POST', '/v2/pens', {
       query: wait !== undefined ? { wait } : undefined,
       formData: form,
+    });
+  }
+
+  public async forkPen(penIdOrUrl: string, payload: PenForkRequest = {}): Promise<Pen> {
+    return this.requestJson<Pen>('POST', `/v2/pens/${encodePenId(penIdOrUrl)}/fork`, {
+      json: payload,
     });
   }
 

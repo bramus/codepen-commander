@@ -213,23 +213,31 @@ export function normalizePenReference(rawInput: string): { apiIdentifier: string
 }
 
 /**
+ * Converts a Pen title into a safe directory-name slug, or returns null for empty / "Untitled".
+ */
+export function slugifyTitle(rawTitle: string | undefined | null): string | null {
+  const title = (rawTitle ?? '').trim();
+  if (!title || title.toLowerCase() === 'untitled') {
+    return null;
+  }
+  const slug = title
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+  if (!slug || slug === '.' || slug === '..') {
+    return null;
+  }
+  return slug;
+}
+
+/**
  * Produces a safe default local folder name for a Pen based on its title or ID.
  */
 export function suggestFolderName(pen: Pick<Pen, 'id' | 'title'>): string {
-  const title = (pen.title ?? '').trim();
-  if (title && title.toLowerCase() !== 'untitled') {
-    const slug = title
-      .normalize('NFKD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 64);
-    if (slug && slug !== '.' && slug !== '..') {
-      return slug;
-    }
-  }
-  return pen.id.replace(/[^A-Za-z0-9_-]/g, '-');
+  return slugifyTitle(pen.title) ?? pen.id.replace(/[^A-Za-z0-9_-]/g, '-');
 }
 
 const RESERVED_CODEPEN_SEGMENTS = new Set([

@@ -213,7 +213,6 @@ describe('first-time local demo push & HTML title extraction', () => {
       const result = await createPenFromDirectory({
         targetDir: tmpDemo,
         folderDisplay: '.',
-        requireLocalFiles: true,
         baseUrl,
         env: {},
         homeDir: tmpHome,
@@ -255,7 +254,6 @@ describe('first-time local demo push & HTML title extraction', () => {
           createPenFromDirectory({
             targetDir: tmpDemo,
             folderDisplay: '.',
-            requireLocalFiles: true,
             baseUrl,
             env: {},
             homeDir: tmpHome,
@@ -294,7 +292,6 @@ describe('first-time local demo push & HTML title extraction', () => {
       const result = await createPenFromDirectory({
         targetDir: tmpDemo,
         folderDisplay: '.',
-        requireLocalFiles: true,
         baseUrl,
         env: {},
         homeDir: tmpHome,
@@ -358,7 +355,6 @@ describe('first-time local demo push & HTML title extraction', () => {
       const result = await createPenFromDirectory({
         targetDir: tmpDemo,
         folderDisplay: '.',
-        requireLocalFiles: true,
         baseUrl,
         env: {},
         homeDir: tmpHome,
