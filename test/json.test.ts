@@ -568,10 +568,10 @@ describe('command --json output against mock CodePen API', () => {
           interactive: false,
         }),
       );
-      const newJson = JSON.parse(newOut) as JsonEnvelope<{ pen: Pen; template: string | null }>;
+      const newJson = JSON.parse(newOut) as JsonEnvelope<{ pen: Pen; template: string }>;
       assert.equal(newJson.status.code, 201);
       assert.equal(newJson.contents.pen.title, 'Fresh JSON Pen');
-      assert.equal(newJson.contents.template, null);
+      assert.equal(newJson.contents.template, 'CodePen default starter');
       assert.equal(newOut.includes(TEST_API_KEY), false);
     } finally {
       failNextBuild = false;

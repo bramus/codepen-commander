@@ -17,8 +17,9 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     const distPkg = JSON.parse(distPkgRaw) as Record<string, unknown>;
 
     assert.equal(distPkg.name, 'cdpn');
-    assert.equal(distPkg.main, './index.js');
-    assert.equal(distPkg.types, './index.d.ts');
+    assert.equal('main' in distPkg, false);
+    assert.equal('types' in distPkg, false);
+    assert.equal('exports' in distPkg, false);
     assert.deepEqual(distPkg.bin, { cdpn: 'cli.js' });
     assert.equal('scripts' in distPkg, false);
     assert.equal('devDependencies' in distPkg, false);
@@ -27,14 +28,44 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     // Essential files copied into ./dist
     assert.ok((await fs.stat(path.join(distDir, 'README.md'))).isFile());
     assert.ok((await fs.stat(path.join(distDir, 'LICENSE'))).isFile());
-    assert.ok((await fs.stat(path.join(distDir, 'index.js'))).isFile());
-    assert.ok((await fs.stat(path.join(distDir, 'index.d.ts'))).isFile());
 
     const cliStat = await fs.stat(path.join(distDir, 'cli.js'));
     assert.ok(cliStat.isFile());
     if (process.platform !== 'win32') {
       assert.ok((cliStat.mode & 0o111) !== 0, 'dist/cli.js should be executable');
     }
+
+    // Verify ./dist stays lightweight: only compiled .js files + package.json, README.md, LICENSE
+    async function walkDist(dir: string): Promise<string[]> {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      const files: string[] = [];
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          files.push(...(await walkDist(full)));
+        } else {
+          files.push(path.relative(distDir, full));
+        }
+      }
+      return files;
+    }
+    const distFiles = await walkDist(distDir);
+    assert.deepEqual(
+      distFiles.filter((f) => f.endsWith('.map')),
+      [],
+      'dist/ should not contain .map files',
+    );
+    assert.deepEqual(
+      distFiles.filter((f) => f.endsWith('.ts')),
+      [],
+      'dist/ should not contain .ts or .d.ts files',
+    );
+    const allowedNonJs = new Set(['package.json', 'README.md', 'LICENSE']);
+    assert.deepEqual(
+      distFiles.filter((f) => !f.endsWith('.js') && !allowedNonJs.has(f)),
+      [],
+      'dist/ should only contain .js files plus package.json, README.md, and LICENSE',
+    );
 
     // Verify npm publish from ./dist produces no bin auto-correction warnings
     const { stderr } = await execFileAsync('npm', ['publish', '--dry-run'], { cwd: distDir });
