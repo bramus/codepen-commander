@@ -129,7 +129,7 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait]` | Push local changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (checks `index.html`, asks account, title, and visibility) |
 | `cdpn deploy [--no-push] [--version <id>] [--force]` | Push local changes (creating a Pen first if unlinked) and deploy to CodePen Hosting |
 | `cdpn undeploy [--yes]` | Take down the live deployment (Pen & versions remain intact) |
-| `cdpn domains [list]` | List custom domains, verification status, and required DNS records |
+| `cdpn domains [list]` | Show the default deployed URL, custom domains, verification status, and required DNS records |
 | `cdpn domains add <host>` | Attach a custom domain to the Pen's deployment |
 | `cdpn domains remove <host> [--yes]` | Remove a custom domain |
 | `cdpn open [--preview \| --live]` | Open the Pen's editor, preview, or live deployed URL in your browser |
