@@ -18,6 +18,7 @@ import { isDirectoryNonEmpty } from '../sync/fs.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { Pen } from '../types.js';
 import { fmt, shortId } from '../utils/format.js';
+import { CliError, printJsonResponse } from '../utils/json.js';
 import {
   isInteractive,
   promptConfirm,
@@ -36,6 +37,7 @@ import {
 
 export interface CloneCliOptions {
   force?: boolean;
+  json?: boolean;
 }
 
 export interface ClonePenCommandOptions {
@@ -45,6 +47,8 @@ export interface ClonePenCommandOptions {
   folderArg?: string;
   /** Overwrite files if the target directory already exists and is not empty. */
   force?: boolean;
+  /** Output clone result as JSON. */
+  json?: boolean;
   /** Working directory for resolving relative paths (defaults to `process.cwd()`). */
   cwd?: string;
   /** Explicit `--profile <name>` flag value. */
@@ -137,7 +141,7 @@ async function ensureCloneTargetReady(
   try {
     const stat = await fs.lstat(targetDir);
     if (!stat.isDirectory()) {
-      throw new Error(`Target path ${targetDir} already exists and is not a directory.`);
+      throw new CliError(409, `Target path ${targetDir} already exists and is not a directory.`);
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -153,7 +157,8 @@ async function ensureCloneTargetReady(
 
   if ((nonEmpty || hasExistingConfig) && !options.force) {
     if (!options.interactive) {
-      throw new Error(
+      throw new CliError(
+        409,
         `Target directory ${targetDir} is not empty. Pass --force to overwrite.`,
       );
     }
@@ -183,7 +188,8 @@ export async function clonePenCommand(
   options: ClonePenCommandOptions,
 ): Promise<ClonePenResult | null> {
   const cwd = path.resolve(options.cwd ?? process.cwd());
-  const interactive = options.interactive ?? isInteractive();
+  const jsonMode = Boolean(options.json);
+  const interactive = (options.interactive ?? isInteractive()) && !jsonMode;
   const force = Boolean(options.force);
   const textImpl = options.prompts?.text ?? promptText;
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
@@ -249,6 +255,7 @@ export async function clonePenCommand(
   let client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
 
   if (
+    !jsonMode &&
     !options.explicitProfile &&
     auth.source === 'file' &&
     auth.profile &&
@@ -258,7 +265,9 @@ export async function clonePenCommand(
     console.log(fmt.dim(`Using profile "${auth.profile}" (matches Pen owner).`));
   }
 
-  console.log(`Fetching Pen ${fmt.cyan(apiIdentifier)}…`);
+  if (!jsonMode) {
+    console.log(`Fetching Pen ${fmt.cyan(apiIdentifier)}…`);
+  }
   let pen: Pen;
   try {
     pen = await client.getPen(apiIdentifier);
@@ -309,7 +318,9 @@ export async function clonePenCommand(
         homeDir: options.homeDir,
       });
       client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
-      console.log(fmt.dim(`Using profile "${matchedStoredProfile}" (matches Pen owner).`));
+      if (!jsonMode) {
+        console.log(fmt.dim(`Using profile "${matchedStoredProfile}" (matches Pen owner).`));
+      }
     }
   }
 
@@ -319,11 +330,13 @@ export async function clonePenCommand(
   );
 
   if (isOwnedByAnotherUser && penOwner && currentUsername) {
-    console.log(
-      fmt.yellow(
-        `\nThis Pen belongs to ${fmt.bold(penOwner)} (your current account is ${fmt.bold(currentUsername)}).`,
-      ),
-    );
+    if (!jsonMode) {
+      console.log(
+        fmt.yellow(
+          `\nThis Pen belongs to ${fmt.bold(penOwner)} (your current account is ${fmt.bold(currentUsername)}).`,
+        ),
+      );
+    }
 
     if (interactive) {
       const shouldFork = await confirmImpl(
@@ -397,17 +410,35 @@ export async function clonePenCommand(
   });
 
   if (isOwnedByAnotherUser) {
-    console.log(
-      `\n${fmt.green('✓')} Cloned ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} into ${fmt.cyan(targetFolderDisplay)} ${fmt.dim('(unlinked local copy)')}`,
-    );
-    console.log(`  Source:  ${fmt.dim(originalUrl ?? pen.urls.editor)}`);
-    console.log(`  Files:   ${result.writtenPaths.length} downloaded`);
-    console.log(
-      fmt.yellow(
-        `\nNote: No ${PROJECT_CONFIG_FILENAME} was created because this Pen belongs to ${penOwner}, not ${currentUsername}.\n` +
-          `Run \`cdpn push\` inside ${targetFolderDisplay} later to publish it as a new Pen under your account, or \`cdpn fork ${originalUrl ?? pen.urls.editor}\` to fork it on CodePen.`,
-      ),
-    );
+    if (jsonMode) {
+      printJsonResponse(
+        200,
+        `Cloned ${pen.title || 'Untitled'} into ${targetFolderDisplay} (unlinked local copy).`,
+        {
+          pen,
+          linked: false,
+          forked: false,
+          profile: auth.profile,
+          folder: targetFolderDisplay,
+          root_dir: targetDir,
+          config_path: null,
+          version_id: pen.saved_version?.id ?? null,
+          written_paths: result.writtenPaths,
+        },
+      );
+    } else {
+      console.log(
+        `\n${fmt.green('✓')} Cloned ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} into ${fmt.cyan(targetFolderDisplay)} ${fmt.dim('(unlinked local copy)')}`,
+      );
+      console.log(`  Source:  ${fmt.dim(originalUrl ?? pen.urls.editor)}`);
+      console.log(`  Files:   ${result.writtenPaths.length} downloaded`);
+      console.log(
+        fmt.yellow(
+          `\nNote: No ${PROJECT_CONFIG_FILENAME} was created because this Pen belongs to ${penOwner}, not ${currentUsername}.\n` +
+            `Run \`cdpn push\` inside ${targetFolderDisplay} later to publish it as a new Pen under your account, or \`cdpn fork ${originalUrl ?? pen.urls.editor}\` to fork it on CodePen.`,
+        ),
+      );
+    }
 
     return {
       pen,
@@ -431,24 +462,42 @@ export async function clonePenCommand(
   };
   const configPath = await writeProjectConfig(targetDir, config);
 
-  console.log(
-    `\n${fmt.green('✓')} Cloned ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} into ${fmt.cyan(targetFolderDisplay)}`,
-  );
-  if (auth.profile) {
-    console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
-  }
-  console.log(`  Files:   ${result.writtenPaths.length} downloaded`);
-  if (pen.saved_version) {
-    console.log(`  Version: ${fmt.dim(shortId(pen.saved_version.id))}`);
-  }
-  console.log(`  Config:  ${fmt.dim(path.join(targetFolderDisplay, PROJECT_CONFIG_FILENAME))}`);
-
-  if (pen.editor === 'Classic') {
-    console.log(
-      fmt.yellow(
-        '\nNote: This is a Classic Pen (read-only through CodePen API v2). You can clone and pull files, but pushing and deploying require a CodePen 2.0 Pen.',
-      ),
+  if (jsonMode) {
+    printJsonResponse(
+      200,
+      `Cloned ${pen.title || 'Untitled'} into ${targetFolderDisplay}.`,
+      {
+        pen,
+        linked: true,
+        forked: false,
+        profile: auth.profile,
+        folder: targetFolderDisplay,
+        root_dir: targetDir,
+        config_path: configPath,
+        version_id: pen.saved_version?.id ?? null,
+        written_paths: result.writtenPaths,
+      },
     );
+  } else {
+    console.log(
+      `\n${fmt.green('✓')} Cloned ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} into ${fmt.cyan(targetFolderDisplay)}`,
+    );
+    if (auth.profile) {
+      console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+    }
+    console.log(`  Files:   ${result.writtenPaths.length} downloaded`);
+    if (pen.saved_version) {
+      console.log(`  Version: ${fmt.dim(shortId(pen.saved_version.id))}`);
+    }
+    console.log(`  Config:  ${fmt.dim(path.join(targetFolderDisplay, PROJECT_CONFIG_FILENAME))}`);
+
+    if (pen.editor === 'Classic') {
+      console.log(
+        fmt.yellow(
+          '\nNote: This is a Classic Pen (read-only through CodePen API v2). You can clone and pull files, but pushing and deploying require a CodePen 2.0 Pen.',
+        ),
+      );
+    }
   }
 
   return {
@@ -471,6 +520,7 @@ export function registerCloneCommand(program: Command): void {
     .command('clone <url> [folder]')
     .description('Clone a CodePen Pen into a local folder (offers to fork if owned by another user)')
     .option('-f, --force', 'Overwrite files if the target directory already exists and is not empty')
+    .option('--json', 'Output clone result as JSON')
     .action(
       async (
         urlArg: string,
@@ -482,6 +532,7 @@ export function registerCloneCommand(program: Command): void {
           urlArg,
           folderArg,
           force: options.force,
+          json: options.json,
           explicitProfile: getGlobalProfileOption(command),
         });
       },

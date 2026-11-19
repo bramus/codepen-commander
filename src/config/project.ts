@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { CdpnConfig, Pen, PenFile, SyncedFileEntry } from '../types.js';
+import { CliError } from '../utils/json.js';
 
 export const PROJECT_CONFIG_FILENAME = '.cdpn.json';
 
@@ -41,7 +42,8 @@ export async function findProject(startDir: string = process.cwd()): Promise<Pro
 export async function requireProject(startDir: string = process.cwd()): Promise<ProjectLocation> {
   const project = await findProject(startDir);
   if (!project) {
-    throw new Error(
+    throw new CliError(
+      404,
       `No ${PROJECT_CONFIG_FILENAME} found in this directory or any parent directory.\nRun \`cdpn clone <url>\` to clone a Pen or \`cdpn new\` to create one.`,
     );
   }
@@ -66,14 +68,16 @@ export async function requireProjectInDir(dir: string = process.cwd()): Promise<
   if (parentDir !== resolvedDir) {
     const parentProject = await findProject(parentDir);
     if (parentProject) {
-      throw new Error(
+      throw new CliError(
+        404,
         `No ${PROJECT_CONFIG_FILENAME} found in ${resolvedDir}.\n` +
           `This command only works directly inside a folder containing ${PROJECT_CONFIG_FILENAME} (found one in parent folder: ${parentProject.rootDir}).`,
       );
     }
   }
 
-  throw new Error(
+  throw new CliError(
+    404,
     `No ${PROJECT_CONFIG_FILENAME} found in ${resolvedDir}.\n` +
       `This command only works in a folder with a ${PROJECT_CONFIG_FILENAME} file in it.`,
   );
@@ -99,19 +103,19 @@ export async function readProjectConfig(rootDir: string): Promise<CdpnConfig> {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error(`Invalid JSON in ${configPath}`);
+    throw new CliError(400, `Invalid JSON in ${configPath}`);
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`Invalid ${PROJECT_CONFIG_FILENAME}: expected a JSON object.`);
+    throw new CliError(400, `Invalid ${PROJECT_CONFIG_FILENAME}: expected a JSON object.`);
   }
 
   const record = parsed as Record<string, unknown>;
   if (typeof record.pen_id !== 'string' || !record.pen_id.trim()) {
-    throw new Error(`Invalid ${PROJECT_CONFIG_FILENAME}: missing required "pen_id" string.`);
+    throw new CliError(400, `Invalid ${PROJECT_CONFIG_FILENAME}: missing required "pen_id" string.`);
   }
   if (typeof record.url !== 'string' || !record.url.trim()) {
-    throw new Error(`Invalid ${PROJECT_CONFIG_FILENAME}: missing required "url" string.`);
+    throw new CliError(400, `Invalid ${PROJECT_CONFIG_FILENAME}: missing required "url" string.`);
   }
 
   const profile =
@@ -299,7 +303,7 @@ export function extractPenIdFromUrl(rawUrl: string): string | null {
 export function normalizePenReference(rawInput: string): { apiIdentifier: string; originalUrl?: string } {
   const trimmed = rawInput.trim();
   if (!trimmed) {
-    throw new Error('Pen URL or ID cannot be empty.');
+    throw new CliError(400, 'Pen URL or ID cannot be empty.');
   }
 
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
@@ -307,7 +311,7 @@ export function normalizePenReference(rawInput: string): { apiIdentifier: string
     try {
       parsed = new URL(trimmed);
     } catch {
-      throw new Error(`Invalid URL: ${trimmed}`);
+      throw new CliError(400, `Invalid URL: ${trimmed}`);
     }
     const host = parsed.hostname.toLowerCase();
     const isCodePenHost =
@@ -317,7 +321,7 @@ export function normalizePenReference(rawInput: string): { apiIdentifier: string
       host.endsWith('.codepen.app') ||
       host.endsWith('.codepenusercontent.com');
     if (!isCodePenHost) {
-      throw new Error(`Expected a CodePen URL (codepen.io / codepen.dev / codepen.app), got: ${host}`);
+      throw new CliError(400, `Expected a CodePen URL (codepen.io / codepen.dev / codepen.app), got: ${host}`);
     }
     const extractedId = extractPenIdFromUrl(trimmed);
     return {
@@ -328,7 +332,7 @@ export function normalizePenReference(rawInput: string): { apiIdentifier: string
 
   // Raw cpid (UUID) or hashid
   if (!PEN_ID_PATTERN.test(trimmed)) {
-    throw new Error(`Invalid Pen ID: "${trimmed}". Provide a Pen URL, cpid, or hashid.`);
+    throw new CliError(400, `Invalid Pen ID: "${trimmed}". Provide a Pen URL, cpid, or hashid.`);
   }
 
   return { apiIdentifier: trimmed };

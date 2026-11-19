@@ -237,6 +237,7 @@ describe('auth configuration (~/.cdpn & multi-profile)', () => {
 
       let observedDefaultIndex = -1;
       let observedLabels: string[] = [];
+      let observedDescriptions: Array<string | undefined> = [];
       const promptedAuth = await resolveCommandAuth({
         project: unassociatedProject,
         env: {},
@@ -246,12 +247,19 @@ describe('auth configuration (~/.cdpn & multi-profile)', () => {
           promptCalls++;
           observedDefaultIndex = defaultIdx;
           observedLabels = opts.map((o) => o.value);
+          observedDescriptions = opts.map((o) => o.description);
           return opts[defaultIdx]!.value;
         },
       });
 
       assert.equal(promptCalls, 1);
       assert.deepEqual(observedLabels, ['bramus', 'username']);
+      assert.deepEqual(observedDescriptions, ['User · default', 'Team · matches URL']);
+      for (const desc of observedDescriptions) {
+        assert.equal(desc?.includes('cp_user_'), false, 'Account choice should not include API key');
+        assert.equal(desc?.includes('cp_team_'), false, 'Account choice should not include API key');
+        assert.equal(desc?.includes('••••'), false, 'Account choice should not include masked API key');
+      }
       assert.equal(observedDefaultIndex, 1, 'Should pre-select username based on Pen URL');
       assert.equal(promptedAuth.profile, 'username');
       assert.equal(promptedAuth.apiKey, 'cp_team_user22222222');

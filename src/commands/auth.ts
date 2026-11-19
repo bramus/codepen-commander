@@ -21,21 +21,26 @@ import {
 import { extractCodePenOwnerFromUrl, findProject } from '../config/project.js';
 import { openBrowser } from '../utils/browser.js';
 import { fmt, formatTable } from '../utils/format.js';
+import { CliError, printJsonResponse } from '../utils/json.js';
 import { isInteractive, promptConfirm, promptSecret, promptSelect, promptText } from '../utils/prompts.js';
 import { getGlobalProfileOption } from './auth-context.js';
 
-async function verifyKeyForStatus(apiKey: string): Promise<{ ok: boolean; detail: string }> {
+async function verifyKeyForStatus(
+  apiKey: string,
+): Promise<{ ok: boolean; error: string | null; detail: string }> {
   const client = new CodePenClient({ apiKey });
   try {
     await client.verifyAuth();
     return {
       ok: true,
+      error: null,
       detail: `${fmt.green('Valid')} ${fmt.dim('(verified with api.codepen.io/v2)')}`,
     };
   } catch (error) {
     const msg = isCodePenApiError(error) ? error.message : (error as Error).message;
     return {
       ok: false,
+      error: msg,
       detail: `${fmt.red('Invalid')} — ${msg}`,
     };
   }
@@ -50,7 +55,8 @@ export function registerAuthCommands(program: Command): void {
     .command('status')
     .description('Show loaded CodePen API keys/profiles and verify them')
     .option('--offline', 'Skip live verification against the CodePen API')
-    .action(async (options: { offline?: boolean }, command: Command) => {
+    .option('--json', 'Output authentication status as JSON')
+    .action(async (options: { offline?: boolean; json?: boolean }, command: Command) => {
       const requestedProfile = getGlobalProfileOption(command);
       const envKey = process.env[API_KEY_ENV_VAR]?.trim() || '';
       const { store, filePath, insecurePermissions } = await readAuthStore();
@@ -61,6 +67,17 @@ export function registerAuthCommands(program: Command): void {
       if (requestedProfile) {
         const validName = validateProfileName(requestedProfile);
         if (!Object.hasOwn(store.profiles, validName)) {
+          if (options.json) {
+            printJsonResponse(404, `Profile "${validName}" not found in ${filePath}.`, {
+              authenticated: false,
+              offline: Boolean(options.offline),
+              requested_profile: validName,
+              file_path: filePath,
+              available_profiles: profileNames,
+            });
+            process.exitCode = 1;
+            return;
+          }
           console.log(`${fmt.red('✗')} Profile ${fmt.bold(validName)} not found in ${filePath}.`);
           if (profileNames.length > 0) {
             console.log(fmt.dim(`  Available profiles: ${profileNames.join(', ')}`));
@@ -71,6 +88,37 @@ export function registerAuthCommands(program: Command): void {
         }
 
         const key = store.profiles[validName]!;
+        const check = options.offline ? null : await verifyKeyForStatus(key);
+
+        if (options.json) {
+          const ok = check ? check.ok : true;
+          const code = ok ? 200 : 401;
+          const message = options.offline
+            ? `Loaded profile "${validName}" (offline mode).`
+            : ok
+              ? `Profile "${validName}" is valid.`
+              : `Profile "${validName}" failed verification: ${check!.error}`;
+
+          printJsonResponse(code, message, {
+            authenticated: ok,
+            offline: Boolean(options.offline),
+            file_path: filePath,
+            insecure_permissions: insecurePermissions,
+            project_profile: projectProfile,
+            profile: {
+              name: validName,
+              key_type: getKeyType(key),
+              masked_key: maskApiKey(key),
+              is_default: validName === store.defaultProfile,
+              is_project_profile: validName === projectProfile,
+              verified: check ? check.ok : null,
+              verification_error: check ? check.error : null,
+            },
+          });
+          if (!ok) process.exitCode = 1;
+          return;
+        }
+
         const badges: string[] = [];
         if (validName === store.defaultProfile) badges.push(fmt.cyan('default'));
         if (validName === projectProfile) badges.push(fmt.green('current folder'));
@@ -87,8 +135,7 @@ export function registerAuthCommands(program: Command): void {
           );
         }
 
-        if (!options.offline) {
-          const check = await verifyKeyForStatus(key);
+        if (check) {
           console.log(`  API:  ${check.detail}`);
           if (!check.ok) process.exitCode = 1;
         }
@@ -96,6 +143,24 @@ export function registerAuthCommands(program: Command): void {
       }
 
       if (!envKey && profileNames.length === 0) {
+        if (options.json) {
+          printJsonResponse(
+            401,
+            `Not authenticated. No API key found in ${API_KEY_ENV_VAR} or ~/${API_KEY_FILENAME}.`,
+            {
+              authenticated: false,
+              offline: Boolean(options.offline),
+              file_path: filePath,
+              insecure_permissions: insecurePermissions,
+              default_profile: store.defaultProfile,
+              project_profile: projectProfile,
+              env: null,
+              profiles: [],
+            },
+          );
+          process.exitCode = 1;
+          return;
+        }
         console.log(`${fmt.red('✗')} Not authenticated.`);
         console.log(
           fmt.dim(
@@ -107,6 +172,76 @@ export function registerAuthCommands(program: Command): void {
       }
 
       let anyInvalid = false;
+
+      if (options.json) {
+        let envEntry: {
+          env_var: string;
+          key_type: ReturnType<typeof getKeyType>;
+          masked_key: string;
+          verified: boolean | null;
+          verification_error: string | null;
+        } | null = null;
+
+        if (envKey) {
+          const check = options.offline ? null : await verifyKeyForStatus(envKey);
+          if (check && !check.ok) anyInvalid = true;
+          envEntry = {
+            env_var: API_KEY_ENV_VAR,
+            key_type: getKeyType(envKey),
+            masked_key: maskApiKey(envKey),
+            verified: check ? check.ok : null,
+            verification_error: check ? check.error : null,
+          };
+        }
+
+        const profileEntries: Array<{
+          name: string;
+          key_type: ReturnType<typeof getKeyType>;
+          masked_key: string;
+          is_default: boolean;
+          is_project_profile: boolean;
+          verified: boolean | null;
+          verification_error: string | null;
+        }> = [];
+
+        for (const name of profileNames) {
+          const key = store.profiles[name]!;
+          const check = options.offline ? null : await verifyKeyForStatus(key);
+          if (check && !check.ok) anyInvalid = true;
+          profileEntries.push({
+            name,
+            key_type: getKeyType(key),
+            masked_key: maskApiKey(key),
+            is_default: name === store.defaultProfile,
+            is_project_profile: name === projectProfile,
+            verified: check ? check.ok : null,
+            verification_error: check ? check.error : null,
+          });
+        }
+
+        const totalCount = (envEntry ? 1 : 0) + profileEntries.length;
+        const code = anyInvalid ? 401 : 200;
+        const message = options.offline
+          ? `Loaded ${totalCount} authentication credential(s) (offline mode).`
+          : anyInvalid
+            ? 'One or more CodePen API keys failed verification.'
+            : 'All CodePen API keys are valid.';
+
+        printJsonResponse(code, message, {
+          authenticated: !anyInvalid,
+          offline: Boolean(options.offline),
+          file_path: filePath,
+          insecure_permissions: insecurePermissions,
+          default_profile: store.defaultProfile,
+          project_profile: projectProfile,
+          env: envEntry,
+          profiles: profileEntries,
+        });
+        if (anyInvalid) {
+          process.exitCode = 1;
+        }
+        return;
+      }
 
       if (envKey) {
         console.log(`${fmt.green('✓')} API key loaded from ${fmt.bold(`environment variable (${API_KEY_ENV_VAR})`)}`);
@@ -172,11 +307,37 @@ export function registerAuthCommands(program: Command): void {
     .command('list')
     .alias('ls')
     .description(`List stored CodePen profiles in ~/${API_KEY_FILENAME}`)
-    .action(async () => {
+    .option('--json', 'Output stored profiles as JSON')
+    .action(async (options: { json?: boolean }) => {
       const { store, filePath, insecurePermissions } = await readAuthStore();
       const profileNames = Object.keys(store.profiles).sort((a, b) => a.localeCompare(b));
       const project = await findProject(process.cwd()).catch(() => null);
       const projectProfile = project?.config.profile ?? null;
+
+      if (options.json) {
+        const message =
+          profileNames.length === 0
+            ? `No profiles stored in ~/${API_KEY_FILENAME}.`
+            : `Found ${profileNames.length} stored profile(s).`;
+        printJsonResponse(200, message, {
+          file_path: filePath,
+          default_profile: store.defaultProfile,
+          project_profile: projectProfile,
+          env_var_set: Boolean(process.env[API_KEY_ENV_VAR]?.trim()),
+          insecure_permissions: insecurePermissions,
+          profiles: profileNames.map((name) => {
+            const key = store.profiles[name]!;
+            return {
+              name,
+              key_type: getKeyType(key),
+              masked_key: maskApiKey(key),
+              is_default: name === store.defaultProfile,
+              is_project_profile: name === projectProfile,
+            };
+          }),
+        });
+        return;
+      }
 
       if (profileNames.length === 0) {
         console.log(fmt.dim(`No profiles stored in ${filePath}. Run \`cdpn auth login\` to add one.`));
@@ -213,19 +374,25 @@ export function registerAuthCommands(program: Command): void {
   authCmd
     .command('default [profile]')
     .description(`Set the default CodePen profile in ~/${API_KEY_FILENAME}`)
-    .action(async (profileArg: string | undefined, _options: Record<string, unknown>, command: Command) => {
+    .option('--json', 'Output result as JSON')
+    .action(async (profileArg: string | undefined, options: { json?: boolean }, command: Command) => {
       const { store } = await readAuthStore();
       const profileNames = Object.keys(store.profiles).sort((a, b) => a.localeCompare(b));
 
       if (profileNames.length === 0) {
-        throw new Error(`No profiles found in ~/${API_KEY_FILENAME}. Run \`cdpn auth login\` first.`);
+        throw new CliError(
+          404,
+          `No profiles found in ~/${API_KEY_FILENAME}. Run \`cdpn auth login\` first.`,
+        );
       }
 
       let target = profileArg?.trim() || getGlobalProfileOption(command);
       if (!target) {
-        if (!isInteractive()) {
-          throw new Error(
+        if (options.json || !isInteractive()) {
+          throw new CliError(
+            400,
             `Specify a profile name: \`cdpn auth default <profile>\`. Available: ${profileNames.join(', ')}`,
+            { available_profiles: profileNames },
           );
         }
         const defaultIdx = Math.max(
@@ -237,14 +404,24 @@ export function registerAuthCommands(program: Command): void {
           profileNames.map((name) => ({
             value: name,
             label: name,
-            description: `${getKeyType(store.profiles[name]!)} · ${maskApiKey(store.profiles[name]!)}${name === store.defaultProfile ? ' · current default' : ''}`,
+            description: `${getKeyType(store.profiles[name]!)}${name === store.defaultProfile ? ' · current default' : ''}`,
           })),
           defaultIdx,
         );
       }
 
-      await setDefaultProfile(target);
-      console.log(`${fmt.green('✓')} Default profile set to ${fmt.bold(target)}.`);
+      const validTarget = validateProfileName(target);
+      await setDefaultProfile(validTarget);
+
+      if (options.json) {
+        printJsonResponse(200, `Default profile set to "${validTarget}".`, {
+          default_profile: validTarget,
+          profiles: profileNames,
+        });
+        return;
+      }
+
+      console.log(`${fmt.green('✓')} Default profile set to ${fmt.bold(validTarget)}.`);
     });
 
   authCmd
@@ -425,28 +602,80 @@ export function registerAuthCommands(program: Command): void {
     .command('logout [profile]')
     .description(`Remove a stored profile or the entire ~/${API_KEY_FILENAME} file`)
     .option('--all', `Remove all stored profiles (~/${API_KEY_FILENAME})`)
+    .option('--json', 'Output logout result as JSON')
     .action(
       async (
         profileArg: string | undefined,
-        options: { all?: boolean },
+        options: { all?: boolean; json?: boolean },
         command: Command,
       ) => {
         const { store, exists } = await readAuthStore();
         const profileNames = Object.keys(store.profiles).sort((a, b) => a.localeCompare(b));
+        const envVarStillSet = Boolean(process.env[API_KEY_ENV_VAR]);
+        const explicitTarget = profileArg?.trim() || getGlobalProfileOption(command);
 
         if (!exists || profileNames.length === 0) {
+          if (options.json) {
+            if (explicitTarget && !options.all) {
+              printJsonResponse(
+                404,
+                `Profile "${explicitTarget}" was not found in ~/${API_KEY_FILENAME}.`,
+                {
+                  removed: false,
+                  removed_profiles: [],
+                  remaining_profiles: [],
+                  default_profile: null,
+                  file_deleted: false,
+                  env_var_still_set: envVarStillSet,
+                },
+              );
+              process.exitCode = 1;
+            } else {
+              printJsonResponse(200, `No ~/${API_KEY_FILENAME} file found.`, {
+                removed: false,
+                removed_profiles: [],
+                remaining_profiles: [],
+                default_profile: null,
+                file_deleted: false,
+                env_var_still_set: envVarStillSet,
+              });
+            }
+            return;
+          }
           console.log(fmt.dim(`No ~/${API_KEY_FILENAME} file found.`));
         } else if (options.all) {
           await removeApiKeyFile();
+          if (options.json) {
+            printJsonResponse(200, `Removed ~/${API_KEY_FILENAME} (all profiles).`, {
+              removed: true,
+              removed_profiles: profileNames,
+              remaining_profiles: [],
+              default_profile: null,
+              file_deleted: true,
+              env_var_still_set: envVarStillSet,
+            });
+            return;
+          }
           console.log(`${fmt.green('✓')} Removed ~/${API_KEY_FILENAME} (all profiles).`);
         } else {
-          let target = profileArg?.trim() || getGlobalProfileOption(command);
+          let target = explicitTarget;
 
           if (!target) {
             if (profileNames.length === 1) {
               await removeApiKeyFile();
+              if (options.json) {
+                printJsonResponse(200, `Removed profile ${profileNames[0]!} (~/${API_KEY_FILENAME}).`, {
+                  removed: true,
+                  removed_profiles: [profileNames[0]!],
+                  remaining_profiles: [],
+                  default_profile: null,
+                  file_deleted: true,
+                  env_var_still_set: envVarStillSet,
+                });
+                return;
+              }
               console.log(`${fmt.green('✓')} Removed profile ${fmt.bold(profileNames[0]!)} (~/${API_KEY_FILENAME}).`);
-            } else if (isInteractive()) {
+            } else if (!options.json && isInteractive()) {
               const ALL_SENTINEL = '__ALL__';
               const choice = await promptSelect<string>(
                 `Which profile would you like to remove from ~/${API_KEY_FILENAME}?`,
@@ -454,7 +683,7 @@ export function registerAuthCommands(program: Command): void {
                   ...profileNames.map((name) => ({
                     value: name,
                     label: name,
-                    description: `${getKeyType(store.profiles[name]!)} · ${maskApiKey(store.profiles[name]!)}${name === store.defaultProfile ? ' · default' : ''}`,
+                    description: `${getKeyType(store.profiles[name]!)}${name === store.defaultProfile ? ' · default' : ''}`,
                   })),
                   {
                     value: ALL_SENTINEL,
@@ -471,19 +700,56 @@ export function registerAuthCommands(program: Command): void {
                 target = choice;
               }
             } else {
-              throw new Error(
+              throw new CliError(
+                400,
                 `Multiple profiles exist (${profileNames.join(', ')}). Run \`cdpn auth logout <profile>\` or \`cdpn auth logout --all\`.`,
+                { available_profiles: profileNames },
               );
             }
           }
 
           if (target) {
             const result = await removeProfileFromFile(target);
+            const remaining = [...result.remainingProfiles].sort((a, b) => a.localeCompare(b));
             if (!result.removed) {
+              if (options.json) {
+                printJsonResponse(404, `Profile "${target}" was not found in ~/${API_KEY_FILENAME}.`, {
+                  removed: false,
+                  removed_profiles: [],
+                  remaining_profiles: remaining,
+                  default_profile: result.newDefault,
+                  file_deleted: false,
+                  env_var_still_set: envVarStillSet,
+                });
+                process.exitCode = 1;
+                return;
+              }
               console.log(fmt.yellow(`Profile "${target}" was not found in ~/${API_KEY_FILENAME}.`));
-            } else if (result.remainingProfiles.length === 0) {
+            } else if (remaining.length === 0) {
+              if (options.json) {
+                printJsonResponse(200, `Removed profile ${target} and deleted ~/${API_KEY_FILENAME}.`, {
+                  removed: true,
+                  removed_profiles: [target],
+                  remaining_profiles: [],
+                  default_profile: null,
+                  file_deleted: true,
+                  env_var_still_set: envVarStillSet,
+                });
+                return;
+              }
               console.log(`${fmt.green('✓')} Removed profile ${fmt.bold(target)} and deleted ~/${API_KEY_FILENAME}.`);
             } else {
+              if (options.json) {
+                printJsonResponse(200, `Removed profile ${target} from ~/${API_KEY_FILENAME}.`, {
+                  removed: true,
+                  removed_profiles: [target],
+                  remaining_profiles: remaining,
+                  default_profile: result.newDefault,
+                  file_deleted: false,
+                  env_var_still_set: envVarStillSet,
+                });
+                return;
+              }
               console.log(`${fmt.green('✓')} Removed profile ${fmt.bold(target)} from ~/${API_KEY_FILENAME}.`);
               if (result.newDefault) {
                 console.log(fmt.dim(`  Default profile: ${result.newDefault}`));
@@ -492,7 +758,7 @@ export function registerAuthCommands(program: Command): void {
           }
         }
 
-        if (process.env[API_KEY_ENV_VAR]) {
+        if (envVarStillSet) {
           console.log(
             fmt.yellow(
               `Note: ${API_KEY_ENV_VAR} is still set in your environment. Unset it in your shell config to log out completely.`,

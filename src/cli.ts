@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Command } from 'commander';
+import { Command, CommanderError } from 'commander';
 import { isCodePenApiError } from './api/errors.js';
 import { registerAuthCommands } from './commands/auth.js';
 import { registerCloneCommand } from './commands/clone.js';
@@ -21,6 +21,7 @@ import { registerPushCommand } from './commands/push.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerVersionCommands } from './commands/versions.js';
 import { fmt } from './utils/format.js';
+import { errorToJsonEnvelope, wantsJsonOutput } from './utils/json.js';
 
 function readPackageVersion(): string {
   const __filename = fileURLToPath(import.meta.url);
@@ -70,11 +71,40 @@ export function createProgram(): Command {
   return program;
 }
 
+function configureJsonErrorMode(cmd: Command): void {
+  cmd.exitOverride();
+  cmd.configureOutput({
+    writeErr: () => {
+      // Suppress Commander's plain-text stderr errors so --json mode emits a single JSON envelope
+    },
+  });
+  for (const sub of cmd.commands) {
+    configureJsonErrorMode(sub);
+  }
+}
+
 async function main(): Promise<void> {
   const program = createProgram();
+  const jsonMode = wantsJsonOutput(process.argv);
+
+  if (jsonMode) {
+    configureJsonErrorMode(program);
+  }
+
   try {
     await program.parseAsync(process.argv);
   } catch (error) {
+    if (error instanceof CommanderError && error.exitCode === 0) {
+      return;
+    }
+
+    if (jsonMode) {
+      const envelope = errorToJsonEnvelope(error);
+      console.log(JSON.stringify(envelope, null, 2));
+      process.exitCode = 1;
+      return;
+    }
+
     if (isCodePenApiError(error)) {
       console.error(`\n${fmt.red('Error:')} ${error.formatForUser()}`);
     } else if (error instanceof Error) {

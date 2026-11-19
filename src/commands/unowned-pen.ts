@@ -9,6 +9,7 @@ import {
 import { extractCodePenOwnerFromUrl } from '../config/project.js';
 import { openBrowser } from '../utils/browser.js';
 import { fmt } from '../utils/format.js';
+import { CliError } from '../utils/json.js';
 
 export interface UnmatchedStoredOwner {
   urlOwner: string;
@@ -110,7 +111,12 @@ export async function handleUnownedPenAccess(
       ...(profileLine ? [profileLine] : []),
       `Fork this Pen in your browser at ${safeUrl}, then run \`cdpn clone <your-fork-url>\`.`,
     ];
-    throw new Error(lines.join('\n'));
+    throw new CliError(403, lines.join('\n'), {
+      url: safeUrl,
+      owner: urlOwner,
+      ...(availableProfiles ? { available_profiles: availableProfiles } : {}),
+      ...(currentProfile ? { current_profile: currentProfile } : {}),
+    });
   }
 
   console.log(
@@ -213,13 +219,17 @@ export async function handlePenNotFoundOnFetch(options: {
       });
     }
 
-    throw new Error(
+    throw new CliError(
+      404,
       `Pen ${apiIdentifier} was not found under ${accountLabel}. Verify the Pen URL/ID exists and is not in the trash.`,
+      { pen_id: apiIdentifier, profile: auth.profile },
     );
   }
 
-  throw new Error(
+  throw new CliError(
+    404,
     `Pen ${apiIdentifier} was not found for ${accountLabel}.\n` +
       `Note: CodePen API v2 keys can only access and fork Pens owned by the key’s account (other users’ Pens return 404, even when public).`,
+    { pen_id: apiIdentifier, profile: auth.profile },
   );
 }

@@ -12,8 +12,10 @@ import { createPenFromDirectory } from './create-pen.js';
 import { computeSyncDiff, hasDiffChanges } from '../sync/diff.js';
 import { scanLocalFiles } from '../sync/fs.js';
 import { applyCompilerPatchesToDisk } from '../sync/materialize.js';
-import type { BinaryUploadPart, Build, FileChange, Pen } from '../types.js';
+import type { BinaryUploadPart, Build, BuildPatch, FileChange, Pen } from '../types.js';
 import { fmt, printBuildSummary, shortId } from '../utils/format.js';
+import { CliError, printJsonResponse } from '../utils/json.js';
+import { isInteractive } from '../utils/prompts.js';
 
 export interface PushOptions {
   label?: string;
@@ -23,13 +25,22 @@ export interface PushOptions {
   title?: string;
   access?: string;
   password?: string;
+  json?: boolean;
+  silent?: boolean;
 }
 
 export interface PushExecutionResult {
   pushed: boolean;
+  dryRun: boolean;
   pen: Pen;
   versionId: string | null;
   build: Build | null;
+  changes: {
+    added: string[];
+    modified: string[];
+    deleted: string[];
+  };
+  appliedPatches: BuildPatch[];
 }
 
 export async function executePush(
@@ -37,6 +48,7 @@ export async function executePush(
   project: ProjectLocation,
   options: PushOptions = {},
 ): Promise<PushExecutionResult> {
+  const silent = Boolean(options.silent);
   const [pen, remoteFiles, localFiles] = await Promise.all([
     client.getPen(project.config.pen_id),
     client.getPenFiles(project.config.pen_id),
@@ -44,7 +56,8 @@ export async function executePush(
   ]);
 
   if (pen.editor === 'Classic') {
-    throw new Error(
+    throw new CliError(
+      403,
       'This is a Classic Pen, which is read-only in CodePen API v2. Only CodePen 2.0 Pens can be pushed.',
     );
   }
@@ -53,9 +66,14 @@ export async function executePush(
   const remoteHead = pen.saved_version?.id ?? null;
 
   if (remoteHead && localHead && remoteHead !== localHead && !options.force) {
-    throw new Error(
+    throw new CliError(
+      409,
       `Remote Pen head (${shortId(remoteHead)}) has moved ahead of your last synced version (${shortId(localHead)}).\n` +
         'Run `cdpn status` to inspect differences, `cdpn pull` to sync remote changes, or `cdpn push --force` to overwrite.',
+      {
+        local_head: localHead,
+        remote_head: remoteHead,
+      },
     );
   }
 
@@ -67,16 +85,34 @@ export async function executePush(
   });
 
   if (!hasDiffChanges(diff)) {
-    console.log(`${fmt.green('✓')} Everything is up to date — nothing to push.`);
-    return { pushed: false, pen, versionId: remoteHead, build: pen.saved_version?.build ?? null };
+    if (!silent) {
+      console.log(`${fmt.green('✓')} Everything is up to date — nothing to push.`);
+    }
+    return {
+      pushed: false,
+      dryRun: Boolean(options.dryRun),
+      pen,
+      versionId: remoteHead,
+      build: pen.saved_version?.build ?? null,
+      changes: { added: [], modified: [], deleted: [] },
+      appliedPatches: [],
+    };
   }
 
-  console.log(
-    `${options.dryRun ? 'Dry-run pushing' : 'Pushing'} changes to ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}:`,
-  );
-  for (const item of diff.added) console.log(`  ${fmt.green('+')} ${item.path}`);
-  for (const item of diff.modified) console.log(`  ${fmt.yellow('~')} ${item.path}`);
-  for (const item of diff.deleted) console.log(`  ${fmt.red('-')} ${item.path}`);
+  const changes = {
+    added: diff.added.map((item) => item.path),
+    modified: diff.modified.map((item) => item.path),
+    deleted: diff.deleted.map((item) => item.path),
+  };
+
+  if (!silent) {
+    console.log(
+      `${options.dryRun ? 'Dry-run pushing' : 'Pushing'} changes to ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}:`,
+    );
+    for (const item of diff.added) console.log(`  ${fmt.green('+')} ${item.path}`);
+    for (const item of diff.modified) console.log(`  ${fmt.yellow('~')} ${item.path}`);
+    for (const item of diff.deleted) console.log(`  ${fmt.red('-')} ${item.path}`);
+  }
 
   const fileChanges: FileChange[] = [];
   const binaryUploads: BinaryUploadPart[] = [];
@@ -104,7 +140,9 @@ export async function executePush(
   const expectedVersionId = options.force ? undefined : (localHead ?? remoteHead ?? undefined);
   const shouldWait = options.wait !== false;
 
-  console.log(shouldWait ? '\nUploading and building on CodePen…' : '\nUploading to CodePen…');
+  if (!silent) {
+    console.log(shouldWait ? '\nUploading and building on CodePen…' : '\nUploading to CodePen…');
+  }
 
   const writeResult = await client.writePenFiles(
     pen.id,
@@ -123,6 +161,7 @@ export async function executePush(
     let lastStatus = `${finalBuild.status}:${finalBuild.id}`;
     finalBuild = await client.settleBuild(finalBuild, {
       onUpdate: (b) => {
+        if (silent) return;
         const key = `${b.status}:${b.id}`;
         if (key !== lastStatus) {
           lastStatus = key;
@@ -136,35 +175,48 @@ export async function executePush(
     });
   }
 
-  if (finalBuild) {
+  if (finalBuild && !silent) {
     printBuildSummary(finalBuild);
   }
 
   const finalVersionId = finalBuild?.version_id ?? writeResult.version?.id ?? null;
+  const appliedPatches = finalBuild?.applied_patches ?? [];
 
   if (options.dryRun) {
-    console.log(
-      `\n${fmt.cyan('ℹ')} Dry run complete — no changes were saved to CodePen head` +
-        (finalVersionId ? ` ${fmt.dim(`(ephemeral version ${shortId(finalVersionId)})`)}.` : '.'),
-    );
-    return { pushed: false, pen: writeResult.pen ?? pen, versionId: finalVersionId, build: finalBuild };
+    if (!silent) {
+      console.log(
+        `\n${fmt.cyan('ℹ')} Dry run complete — no changes were saved to CodePen head` +
+          (finalVersionId ? ` ${fmt.dim(`(ephemeral version ${shortId(finalVersionId)})`)}.` : '.'),
+      );
+    }
+    return {
+      pushed: false,
+      dryRun: true,
+      pen: writeResult.pen ?? pen,
+      versionId: finalVersionId,
+      build: finalBuild,
+      changes,
+      appliedPatches,
+    };
   }
 
   // Re-read the converged version's source files so we write back any compiler patches
   let convergedFiles = writeResult.version?.files;
-  if (finalVersionId && (finalBuild?.applied_patches.length || !convergedFiles)) {
+  if (finalVersionId && (appliedPatches.length > 0 || !convergedFiles)) {
     const version = await client.getVersion(finalVersionId);
     convergedFiles = version.files;
   }
 
-  if (finalBuild && finalBuild.applied_patches.length > 0) {
+  if (finalBuild && appliedPatches.length > 0) {
     await applyCompilerPatchesToDisk({
       client,
       rootDir: project.rootDir,
-      patches: finalBuild.applied_patches,
+      patches: appliedPatches,
       convergedFiles,
     });
-    console.log(fmt.cyan('✓ Synced compiler patches back to local folder.'));
+    if (!silent) {
+      console.log(fmt.cyan('✓ Synced compiler patches back to local folder.'));
+    }
   }
 
   // Re-scan local hashes so .cdpn.json reflects exact post-patch local state
@@ -187,18 +239,28 @@ export async function executePush(
   });
 
   if (finalBuild?.status === 'Failed') {
-    console.log(
-      `\n${fmt.yellow('!')} Files were saved as version ${fmt.dim(shortId(finalVersionId))}, but the build failed.`,
-    );
+    if (!silent) {
+      console.log(
+        `\n${fmt.yellow('!')} Files were saved as version ${fmt.dim(shortId(finalVersionId))}, but the build failed.`,
+      );
+    }
     process.exitCode = 1;
-  } else {
+  } else if (!silent) {
     console.log(
       `\n${fmt.green('✓')} Pushed successfully ${fmt.dim(`(version ${shortId(finalVersionId)})`)}`,
     );
     console.log(`  Preview: ${fmt.cyan(updatedPen.urls.preview)}`);
   }
 
-  return { pushed: true, pen: updatedPen, versionId: finalVersionId, build: finalBuild };
+  return {
+    pushed: true,
+    dryRun: false,
+    pen: updatedPen,
+    versionId: finalVersionId,
+    build: finalBuild,
+    changes,
+    appliedPatches,
+  };
 }
 
 export function registerPushCommand(program: Command): void {
@@ -212,9 +274,10 @@ export function registerPushCommand(program: Command): void {
     .option('-t, --title <title>', 'Title for the new Pen when pushing an unlinked folder for the first time')
     .option('--access <level>', 'Privacy for a new Pen: Public, Private, Protected, or Collaborators')
     .option('--password <password>', 'Password for a new Protected Pen (min 8 chars)')
+    .option('--json', 'Output push result as JSON')
     .action(async (options: PushOptions, command: Command) => {
       if (options.label && options.label.length > 80) {
-        throw new Error('Version label must be at most 80 characters.');
+        throw new CliError(400, 'Version label must be at most 80 characters.');
       }
 
       const explicitProfile = getGlobalProfileOption(command);
@@ -223,15 +286,18 @@ export function registerPushCommand(program: Command): void {
       // First-time push: no .cdpn.json found -> push local folder as a brand-new CodePen 2.0 Pen
       if (!project) {
         if (options.dryRun) {
-          throw new Error(
+          throw new CliError(
+            400,
             `No ${PROJECT_CONFIG_FILENAME} found. --dry-run is only supported for an existing synced Pen.`,
           );
         }
 
-        console.log(
-          fmt.dim(`No ${PROJECT_CONFIG_FILENAME} found — pushing this local folder as a new CodePen 2.0 Pen.`),
-        );
-        await createPenFromDirectory({
+        if (!options.json) {
+          console.log(
+            fmt.dim(`No ${PROJECT_CONFIG_FILENAME} found — pushing this local folder as a new CodePen 2.0 Pen.`),
+          );
+        }
+        const created = await createPenFromDirectory({
           targetDir: process.cwd(),
           folderDisplay: '.',
           explicitProfile,
@@ -240,16 +306,91 @@ export function registerPushCommand(program: Command): void {
           password: options.password,
           force: options.force,
           wait: options.wait,
+          silent: Boolean(options.json),
+          interactive: !options.json && isInteractive(),
         });
+
+        if (created && options.json) {
+          const buildFailed = created.build?.status === 'Failed';
+          if (buildFailed) {
+            process.exitCode = 1;
+          }
+          printJsonResponse(
+            buildFailed ? 422 : 201,
+            buildFailed
+              ? `Created Pen ${created.pen.title || 'Untitled'} (${created.pen.id}), but the initial build failed.`
+              : `Created Pen ${created.pen.title || 'Untitled'} (${created.pen.id}).`,
+            {
+              pushed: true,
+              created: true,
+              dry_run: false,
+              pen: created.pen,
+              profile: created.auth.profile,
+              folder: '.',
+              root_dir: created.project.rootDir,
+              config_path: created.project.configPath,
+              version_id: created.versionId,
+              build: created.build,
+            },
+          );
+        }
         return;
       }
 
       const auth = await resolveCommandAuth({
         explicitProfile,
         project,
+        interactive: !options.json && isInteractive(),
+        persistProfileToProject: !options.json,
       });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
-      await executePush(client, project, options);
+      const result = await executePush(client, project, {
+        ...options,
+        silent: Boolean(options.json),
+      });
+
+      if (options.json) {
+        const buildFailed = result.build?.status === 'Failed';
+        const payload = {
+          pushed: result.pushed,
+          created: false,
+          dry_run: result.dryRun,
+          pen: result.pen,
+          profile: auth.profile,
+          version_id: result.versionId,
+          build: result.build,
+          changes: result.changes,
+          applied_patches: result.appliedPatches,
+        };
+
+        if (result.dryRun) {
+          if (buildFailed) {
+            process.exitCode = 1;
+          }
+          printJsonResponse(
+            buildFailed ? 422 : 200,
+            buildFailed
+              ? 'Dry run completed, but the build failed.'
+              : 'Dry run complete — no changes were saved to CodePen head.',
+            payload,
+          );
+        } else if (!result.pushed) {
+          printJsonResponse(200, 'Everything is up to date — nothing to push.', payload);
+        } else if (buildFailed) {
+          process.exitCode = 1;
+          printJsonResponse(
+            422,
+            `Files were saved as version ${shortId(result.versionId)}, but the build failed.`,
+            payload,
+          );
+        } else {
+          printJsonResponse(
+            200,
+            `Pushed successfully (version ${shortId(result.versionId)}).`,
+            payload,
+          );
+        }
+      }
     });
 }

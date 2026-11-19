@@ -14,6 +14,7 @@ import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { BinaryUploadPart, Build, Pen, PenAccess, PenFileRequest } from '../types.js';
 import { fmt, printBuildSummary, shortId } from '../utils/format.js';
 import { extractHtmlTitle } from '../utils/html.js';
+import { CliError } from '../utils/json.js';
 import {
   isInteractive,
   promptConfirm,
@@ -30,7 +31,10 @@ export function normalizeAccess(raw?: string): PenAccess | undefined {
   if (!raw) return undefined;
   const lower = raw.trim().toLowerCase();
   if (!VALID_ACCESS.has(lower)) {
-    throw new Error(`Invalid access level "${raw}". Use: Public, Private, Protected, or Collaborators.`);
+    throw new CliError(
+      400,
+      `Invalid access level "${raw}". Use: Public, Private, Protected, or Collaborators.`,
+    );
   }
   return (lower[0]!.toUpperCase() + lower.slice(1)) as PenAccess;
 }
@@ -59,10 +63,10 @@ export async function resolveVisibilityAndPassword(options: {
 
   let access = normalizeAccess(options.rawAccess);
   if (access === 'Protected' && options.rawPassword !== undefined && options.rawPassword.length < 8) {
-    throw new Error('Protected Pens require --password with at least 8 characters.');
+    throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
   }
   if (access === 'Protected' && !options.rawPassword && !options.interactive) {
-    throw new Error('Protected Pens require --password with at least 8 characters.');
+    throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
   }
 
   if (!access) {
@@ -93,7 +97,7 @@ export async function resolveVisibilityAndPassword(options: {
   let password = options.rawPassword;
   if (access === 'Protected' && (!password || password.length < 8)) {
     if (!options.interactive) {
-      throw new Error('Protected Pens require --password with at least 8 characters.');
+      throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
     }
     for (;;) {
       password = await secretImpl('Password for Protected Pen (min 8 characters)');
@@ -128,6 +132,8 @@ export interface CreatePenFlowOptions {
   force?: boolean;
   /** Wait for initial build to settle (defaults to true). */
   wait?: boolean;
+  /** Suppress stdout progress/summary logs and interactive prompts (used by --json callers). */
+  silent?: boolean;
   /** Injectable API base URL (for testing). */
   baseUrl?: string;
   /** Injectable interactivity flag (for testing). */
@@ -186,7 +192,8 @@ export function printMissingIndexHtmlWarning(targetDir: string, fileCount: numbe
 export async function createPenFromDirectory(
   options: CreatePenFlowOptions,
 ): Promise<CreatePenFlowResult | null> {
-  const interactive = options.interactive ?? isInteractive();
+  const silent = Boolean(options.silent);
+  const interactive = silent ? false : (options.interactive ?? isInteractive());
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
   const textImpl = options.prompts?.text ?? promptText;
   const selectImpl = options.prompts?.select ?? promptSelect;
@@ -194,24 +201,26 @@ export async function createPenFromDirectory(
   // Validate --access / --password early before prompting or scanning
   const prevalidatedAccess = normalizeAccess(options.access);
   if (prevalidatedAccess === 'Protected' && options.password !== undefined && options.password.length < 8) {
-    throw new Error('Protected Pens require --password with at least 8 characters.');
+    throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
   }
   if (prevalidatedAccess === 'Protected' && !options.password && !interactive) {
-    throw new Error('Protected Pens require --password with at least 8 characters.');
+    throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
   }
 
   const targetDir = path.resolve(options.targetDir);
   const folderDisplay = options.folderDisplay;
 
   if (await hasProjectConfigInDir(targetDir)) {
-    throw new Error(
+    throw new CliError(
+      409,
       `${targetDir} already contains ${PROJECT_CONFIG_FILENAME}. Use \`cdpn push\` to update the existing Pen.`,
     );
   }
 
   const scanned = await scanLocalFiles(targetDir);
   if (scanned.size === 0) {
-    throw new Error(
+    throw new CliError(
+      400,
       `No ${PROJECT_CONFIG_FILENAME} found and no syncable files in ${targetDir}.\n` +
         'Run `cdpn clone <url>` to clone an existing Pen or `cdpn new` to scaffold a brand-new Pen.',
     );
@@ -221,10 +230,13 @@ export async function createPenFromDirectory(
 
   // 1. Check for index.html before pushing a local demo for the first time
   if (!indexFile) {
-    printMissingIndexHtmlWarning(targetDir, scanned.size);
+    if (!silent) {
+      printMissingIndexHtmlWarning(targetDir, scanned.size);
+    }
     if (!options.force) {
       if (!interactive) {
-        throw new Error(
+        throw new CliError(
+          400,
           `No index.html found in ${targetDir}. Pass --force to push this folder without an index.html.`,
         );
       }
@@ -288,7 +300,9 @@ export async function createPenFromDirectory(
 
   const shouldWait = options.wait !== false;
 
-  console.log(`\nCreating new Pen from ${textFiles.length + binaryFiles.length} local file(s)…`);
+  if (!silent) {
+    console.log(`\nCreating new Pen from ${textFiles.length + binaryFiles.length} local file(s)…`);
+  }
 
   const created = await client.createPen(
     {
@@ -307,7 +321,9 @@ export async function createPenFromDirectory(
   let finalBuild = created.build ?? null;
   if (finalBuild && shouldWait) {
     finalBuild = await client.settleBuild(finalBuild);
-    printBuildSummary(finalBuild);
+    if (!silent) {
+      printBuildSummary(finalBuild);
+    }
   }
 
   await fs.mkdir(targetDir, { recursive: true });
@@ -335,23 +351,27 @@ export async function createPenFromDirectory(
   const configPath = await writeProjectConfig(targetDir, config);
 
   if (finalBuild?.status === 'Failed') {
-    console.log(
-      `\n${fmt.yellow('!')} Created Pen ${fmt.bold(created.title || 'Untitled')} ${fmt.dim(`(${created.id})`)}, but the initial build failed.`,
-    );
+    if (!silent) {
+      console.log(
+        `\n${fmt.yellow('!')} Created Pen ${fmt.bold(created.title || 'Untitled')} ${fmt.dim(`(${created.id})`)}, but the initial build failed.`,
+      );
+    }
     process.exitCode = 1;
-  } else {
+  } else if (!silent) {
     console.log(
       `\n${fmt.green('✓')} Created Pen ${fmt.bold(created.title || 'Untitled')} ${fmt.dim(`(${created.id})`)}`,
     );
   }
-  if (auth.profile) {
-    console.log(`  Profile:    ${fmt.cyan(auth.profile)}`);
+  if (!silent) {
+    if (auth.profile) {
+      console.log(`  Profile:    ${fmt.cyan(auth.profile)}`);
+    }
+    console.log(`  Visibility: ${created.access}`);
+    console.log(`  Folder:     ${fmt.cyan(folderDisplay)}`);
+    console.log(`  Editor:     ${fmt.cyan(created.urls.editor)}`);
+    console.log(`  Preview:    ${fmt.cyan(created.urls.preview)}`);
+    console.log(`  Version:    ${fmt.dim(shortId(finalVersionId))}`);
   }
-  console.log(`  Visibility: ${created.access}`);
-  console.log(`  Folder:     ${fmt.cyan(folderDisplay)}`);
-  console.log(`  Editor:     ${fmt.cyan(created.urls.editor)}`);
-  console.log(`  Preview:    ${fmt.cyan(created.urls.preview)}`);
-  console.log(`  Version:    ${fmt.dim(shortId(finalVersionId))}`);
 
   return {
     pen: created,

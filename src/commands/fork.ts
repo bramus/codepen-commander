@@ -17,6 +17,7 @@ import { isDirectoryNonEmpty } from '../sync/fs.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { Build, Pen } from '../types.js';
 import { fmt, printBuildSummary, shortId } from '../utils/format.js';
+import { CliError, printJsonResponse } from '../utils/json.js';
 import {
   isInteractive,
   promptConfirm,
@@ -41,6 +42,7 @@ export interface ForkPenCliOptions {
   access?: string;
   password?: string;
   wait?: boolean;
+  json?: boolean;
 }
 
 export interface ForkPenCommandOptions {
@@ -59,6 +61,8 @@ export interface ForkPenCommandOptions {
   password?: string;
   /** Wait for initial build to settle (defaults to true). */
   wait?: boolean;
+  /** Output fork result as JSON. */
+  json?: boolean;
   /** Pre-resolved auth (avoids double-prompting when invoked from `cdpn clone`). */
   resolvedAuth?: ResolvedAuth;
   /** Pre-fetched source Pen (avoids duplicate `GET /v2/pens/{id}` when invoked from `cdpn clone`). */
@@ -149,7 +153,8 @@ async function suggestAvailableForkFolder(cwd: string, baseName: string): Promis
  */
 export async function forkPenCommand(options: ForkPenCommandOptions): Promise<ForkPenResult | null> {
   const cwd = path.resolve(options.cwd ?? process.cwd());
-  const interactive = options.interactive ?? isInteractive();
+  const jsonMode = Boolean(options.json);
+  const interactive = (options.interactive ?? isInteractive()) && !jsonMode;
   const textImpl = options.prompts?.text ?? promptText;
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
   const selectImpl = options.prompts?.select ?? promptSelect;
@@ -158,15 +163,15 @@ export async function forkPenCommand(options: ForkPenCommandOptions): Promise<Fo
   const { apiIdentifier, originalUrl } = normalizePenReference(options.urlArg);
 
   if (options.tags && options.tags.length > 5) {
-    throw new Error('CodePen allows at most 5 tags per Pen.');
+    throw new CliError(400, 'CodePen allows at most 5 tags per Pen.');
   }
 
   const explicitAccess = normalizeAccess(options.access);
   if (explicitAccess === 'Protected' && options.password !== undefined && options.password.length < 8) {
-    throw new Error('Protected Pens require --password with at least 8 characters.');
+    throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
   }
   if (explicitAccess === 'Protected' && !options.password && !interactive) {
-    throw new Error('Protected Pens require --password with at least 8 characters.');
+    throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
   }
 
   // If target folder was passed explicitly, validate before hitting the network
@@ -259,7 +264,9 @@ export async function forkPenCommand(options: ForkPenCommandOptions): Promise<Fo
   if (options.sourcePen) {
     sourcePen = options.sourcePen;
   } else {
-    console.log(`Fetching Pen ${fmt.cyan(apiIdentifier)}…`);
+    if (!jsonMode) {
+      console.log(`Fetching Pen ${fmt.cyan(apiIdentifier)}…`);
+    }
     try {
       sourcePen = await client.getPen(apiIdentifier);
     } catch (error) {
@@ -290,7 +297,8 @@ export async function forkPenCommand(options: ForkPenCommandOptions): Promise<Fo
   let password = options.password;
   if (effectiveAccess === 'Protected' && (!password || password.length < 8)) {
     if (!interactive) {
-      throw new Error(
+      throw new CliError(
+        400,
         'Forking a Protected Pen requires --password with at least 8 characters (or pass --access Public/Private).',
       );
     }
@@ -324,7 +332,9 @@ export async function forkPenCommand(options: ForkPenCommandOptions): Promise<Fo
   }
 
   const shouldWait = options.wait !== false;
-  console.log(`\nForking ${fmt.bold(sourcePen.title || 'Untitled')} ${fmt.dim(`(${sourcePen.id})`)}…`);
+  if (!jsonMode) {
+    console.log(`\nForking ${fmt.bold(sourcePen.title || 'Untitled')} ${fmt.dim(`(${sourcePen.id})`)}…`);
+  }
 
   const forked = await client.forkPen(sourcePen.id, {
     ...(title ? { title } : {}),
@@ -338,7 +348,9 @@ export async function forkPenCommand(options: ForkPenCommandOptions): Promise<Fo
   let finalBuild = forked.build ?? null;
   if (finalBuild && shouldWait) {
     finalBuild = await client.settleBuild(finalBuild);
-    printBuildSummary(finalBuild);
+    if (!jsonMode) {
+      printBuildSummary(finalBuild);
+    }
   }
 
   await fs.mkdir(targetDir, { recursive: true });
@@ -365,26 +377,48 @@ export async function forkPenCommand(options: ForkPenCommandOptions): Promise<Fo
   };
   const configPath = await writeProjectConfig(targetDir, config);
 
-  if (finalBuild?.status === 'Failed') {
-    console.log(
-      `\n${fmt.yellow('!')} Forked ${fmt.bold(forked.title || 'Untitled')} ${fmt.dim(`(${forked.id})`)}, but the initial build failed.`,
-    );
+  const buildFailed = finalBuild?.status === 'Failed';
+  if (buildFailed) {
     process.exitCode = 1;
+  }
+
+  if (jsonMode) {
+    const code = buildFailed ? 422 : 201;
+    const message = buildFailed
+      ? `Forked ${forked.title || 'Untitled'}, but the initial build failed.`
+      : `Forked ${forked.title || 'Untitled'} into ${folderDisplay}.`;
+    printJsonResponse(code, message, {
+      pen: forked,
+      source_pen: sourcePen,
+      profile: auth.profile,
+      folder: folderDisplay,
+      root_dir: targetDir,
+      config_path: configPath,
+      version_id: finalVersionId,
+      build: finalBuild,
+      written_paths: materialized.writtenPaths,
+    });
   } else {
-    console.log(
-      `\n${fmt.green('✓')} Forked ${fmt.bold(forked.title || 'Untitled')} ${fmt.dim(`(${forked.id})`)}`,
-    );
+    if (buildFailed) {
+      console.log(
+        `\n${fmt.yellow('!')} Forked ${fmt.bold(forked.title || 'Untitled')} ${fmt.dim(`(${forked.id})`)}, but the initial build failed.`,
+      );
+    } else {
+      console.log(
+        `\n${fmt.green('✓')} Forked ${fmt.bold(forked.title || 'Untitled')} ${fmt.dim(`(${forked.id})`)}`,
+      );
+    }
+    console.log(`  From:       ${fmt.dim(sourcePen.urls.editor)}`);
+    if (auth.profile) {
+      console.log(`  Profile:    ${fmt.cyan(auth.profile)}`);
+    }
+    console.log(`  Visibility: ${forked.access}`);
+    console.log(`  Folder:     ${fmt.cyan(folderDisplay)}`);
+    console.log(`  Files:      ${materialized.writtenPaths.length} downloaded`);
+    console.log(`  Editor:     ${fmt.cyan(forked.urls.editor)}`);
+    console.log(`  Preview:    ${fmt.cyan(forked.urls.preview)}`);
+    console.log(`  Version:    ${fmt.dim(shortId(finalVersionId))}`);
   }
-  console.log(`  From:       ${fmt.dim(sourcePen.urls.editor)}`);
-  if (auth.profile) {
-    console.log(`  Profile:    ${fmt.cyan(auth.profile)}`);
-  }
-  console.log(`  Visibility: ${forked.access}`);
-  console.log(`  Folder:     ${fmt.cyan(folderDisplay)}`);
-  console.log(`  Files:      ${materialized.writtenPaths.length} downloaded`);
-  console.log(`  Editor:     ${fmt.cyan(forked.urls.editor)}`);
-  console.log(`  Preview:    ${fmt.cyan(forked.urls.preview)}`);
-  console.log(`  Version:    ${fmt.dim(shortId(finalVersionId))}`);
 
   return {
     sourcePen,
@@ -411,6 +445,7 @@ export function registerForkCommand(program: Command): void {
     .option('--access <level>', 'Privacy: Public, Private, Protected, or Collaborators')
     .option('--password <password>', 'Password (min 8 chars; required for Protected forks)')
     .option('--no-wait', 'Return as soon as files are saved without waiting for the build')
+    .option('--json', 'Output fork result as JSON')
     .action(
       async (
         urlArg: string,
@@ -435,6 +470,7 @@ export function registerForkCommand(program: Command): void {
           access: options.access,
           password: options.password,
           wait: options.wait,
+          json: options.json,
         });
       },
     );

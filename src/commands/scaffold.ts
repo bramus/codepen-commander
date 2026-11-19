@@ -9,6 +9,7 @@ import {
 } from '../config/project.js';
 import { isDirectoryNonEmpty, normalizePenPath } from '../sync/fs.js';
 import type { BinaryUploadPart, Pen, PenFileRequest } from '../types.js';
+import { CliError } from '../utils/json.js';
 
 /**
  * Ensures a local target directory either does not exist yet or is completely empty
@@ -25,7 +26,7 @@ export async function assertEmptyTargetDirectory(
   try {
     const stat = await fs.lstat(targetDir);
     if (!stat.isDirectory()) {
-      throw new Error(`Target path ${folderDisplay} already exists and is not a directory.`);
+      throw new CliError(409, `Target path ${folderDisplay} already exists and is not a directory.`);
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -35,13 +36,15 @@ export async function assertEmptyTargetDirectory(
   }
 
   if (await hasProjectConfigInDir(targetDir)) {
-    throw new Error(
+    throw new CliError(
+      409,
       `${folderDisplay} already contains ${PROJECT_CONFIG_FILENAME}. ${options.nonEmptyHint}`,
     );
   }
 
   if (await isDirectoryNonEmpty(targetDir)) {
-    throw new Error(
+    throw new CliError(
+      409,
       `Folder ${folderDisplay} is not empty. \`cdpn ${options.commandName}\` requires a new or empty target folder.\n` +
         options.nonEmptyHint,
     );
@@ -82,7 +85,7 @@ export async function resolveTemplatePen(
 ): Promise<Pen> {
   const query = rawQuery.trim();
   if (!query) {
-    throw new Error('--template requires a CodePen template ID, URL, or title.');
+    throw new CliError(400, '--template requires a CodePen template ID, URL, or title.');
   }
 
   if (/^https?:\/\//i.test(query)) {
@@ -104,8 +107,10 @@ export async function resolveTemplatePen(
   }
   if (byTitle.length > 1) {
     const choices = byTitle.map((t) => `  - ${t.title} (${t.id})`).join('\n');
-    throw new Error(
+    throw new CliError(
+      409,
       `Multiple CodePen templates match "${query}":\n${choices}\nPass the template ID or URL to pick one.`,
+      { matches: byTitle.map((t) => ({ id: t.id, title: t.title })) },
     );
   }
 
@@ -121,7 +126,8 @@ export async function resolveTemplatePen(
   }
 
   if (templates.length === 0) {
-    throw new Error(
+    throw new CliError(
+      404,
       `No CodePen template found matching "${query}" (and your account has no Pens marked as templates yet).\n` +
         'Mark any Pen as a template on CodePen or run `cdpn info --template true` in a synced Pen folder.',
     );
@@ -131,8 +137,10 @@ export async function resolveTemplatePen(
     .slice(0, 10)
     .map((t) => `  - ${t.title || 'Untitled'} (${t.id})`)
     .join('\n');
-  throw new Error(
+  throw new CliError(
+    404,
     `No CodePen template found matching "${query}".\nAvailable templates on this account:\n${available}`,
+    { available_templates: templates.slice(0, 10).map((t) => ({ id: t.id, title: t.title })) },
   );
 }
 

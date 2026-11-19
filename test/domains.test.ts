@@ -246,13 +246,13 @@ describe('cdpn domains command', () => {
     }
   });
 
-  it('includes default_url alongside domains in --json output', async () => {
+  it('outputs standard JSON envelope with default_url and domains for list, add, and delete', async () => {
     const { tmpHome, tmpDir, cleanup } = await setupProject();
     deploymentUrl = DEFAULT_DEPLOY_URL;
     domainsState = [];
 
     try {
-      const { output } = await captureLogs(() =>
+      const { output: listOut } = await captureLogs(() =>
         listPenDomains({
           cwd: tmpDir,
           baseUrl,
@@ -263,9 +263,57 @@ describe('cdpn domains command', () => {
         }),
       );
 
-      const parsed = JSON.parse(output) as { default_url: string | null; domains: PenDomain[] };
-      assert.equal(parsed.default_url, DEFAULT_DEPLOY_URL);
-      assert.deepEqual(parsed.domains, []);
+      const listParsed = JSON.parse(listOut) as {
+        status: { code: number; message: string };
+        contents: { default_url: string | null; domains: PenDomain[] };
+      };
+      assert.equal(listParsed.status.code, 200);
+      assert.equal(typeof listParsed.status.message, 'string');
+      assert.equal(listParsed.contents.default_url, DEFAULT_DEPLOY_URL);
+      assert.deepEqual(listParsed.contents.domains, []);
+
+      const { output: addOut } = await captureLogs(() =>
+        addPenDomain('www.example.com', {
+          cwd: tmpDir,
+          baseUrl,
+          homeDir: tmpHome,
+          env: {},
+          json: true,
+          interactive: false,
+        }),
+      );
+
+      const addParsed = JSON.parse(addOut) as {
+        status: { code: number; message: string };
+        contents: { host: string; default_url: string | null; domains: PenDomain[] };
+      };
+      assert.equal(addParsed.status.code, 201);
+      assert.match(addParsed.status.message, /www\.example\.com/);
+      assert.equal(addParsed.contents.host, 'www.example.com');
+      assert.equal(addParsed.contents.default_url, DEFAULT_DEPLOY_URL);
+      assert.equal(addParsed.contents.domains.length, 1);
+
+      const { output: delOut } = await captureLogs(() =>
+        deletePenDomain('www.example.com', {
+          cwd: tmpDir,
+          baseUrl,
+          homeDir: tmpHome,
+          env: {},
+          yes: true,
+          json: true,
+          interactive: false,
+        }),
+      );
+
+      const delParsed = JSON.parse(delOut) as {
+        status: { code: number; message: string };
+        contents: { host: string; default_url: string | null; domains: PenDomain[] };
+      };
+      assert.equal(delParsed.status.code, 200);
+      assert.match(delParsed.status.message, /www\.example\.com/);
+      assert.equal(delParsed.contents.host, 'www.example.com');
+      assert.equal(delParsed.contents.default_url, DEFAULT_DEPLOY_URL);
+      assert.deepEqual(delParsed.contents.domains, []);
     } finally {
       await cleanup();
     }

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { CliError } from '../utils/json.js';
 import { extractCodePenOwnerFromUrl } from './project.js';
 
 export const CODEPEN_API_SETTINGS_URL = 'https://codepen.io/settings/api';
@@ -71,7 +72,8 @@ export function isValidProfileName(name: string): boolean {
 export function validateProfileName(name: string): string {
   const trimmed = name.trim();
   if (!isValidProfileName(trimmed)) {
-    throw new Error(
+    throw new CliError(
+      400,
       `Invalid profile name "${name}". Use 1-64 characters: letters, numbers, hyphens, underscores, or dots (starting with a letter or number).`,
     );
   }
@@ -345,7 +347,7 @@ export async function saveProfileToFile(
   const validProfile = validateProfileName(profileName);
   const trimmedKey = apiKey.trim();
   if (!trimmedKey) {
-    throw new Error('Cannot save an empty API key.');
+    throw new CliError(400, 'Cannot save an empty API key.');
   }
 
   const { store } = await readAuthStore({ homeDir: options.homeDir });
@@ -394,7 +396,10 @@ export async function setDefaultProfile(
       available.length > 0
         ? ` Available profiles: ${available.join(', ')}.`
         : ` Run \`cdpn auth login --profile ${validProfile}\` first.`;
-    throw new Error(`Profile "${validProfile}" not found in ~/${API_KEY_FILENAME}.${hint}`);
+    throw new CliError(404, `Profile "${validProfile}" not found in ~/${API_KEY_FILENAME}.${hint}`, {
+      requested_profile: validProfile,
+      available_profiles: available,
+    });
   }
 
   store.defaultProfile = validProfile;
@@ -547,12 +552,15 @@ export async function requireAuth(options: AuthOptions = {}): Promise<ResolvedAu
       const available = Object.keys(store.profiles).sort((a, b) => a.localeCompare(b));
       const availableNote =
         available.length > 0 ? ` Available profiles: ${available.join(', ')}.` : '';
-      throw new Error(
+      throw new CliError(
+        404,
         `Profile "${options.profile}" not found in ~/${API_KEY_FILENAME}.${availableNote}\n` +
           `Run \`cdpn auth login --profile ${options.profile}\` to add it.`,
+        { requested_profile: options.profile, available_profiles: available },
       );
     }
-    throw new Error(
+    throw new CliError(
+      401,
       `No CodePen API key found. Run \`cdpn auth login\` or set the ${API_KEY_ENV_VAR} environment variable.`,
     );
   }

@@ -12,6 +12,7 @@ import { scanLocalFiles } from '../sync/fs.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { Pen } from '../types.js';
 import { fmt, shortId } from '../utils/format.js';
+import { CliError, printJsonResponse } from '../utils/json.js';
 import {
   isInteractive,
   promptConfirm,
@@ -22,11 +23,14 @@ import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 export interface PullCliOptions {
   force?: boolean;
+  json?: boolean;
 }
 
 export interface PullPenCommandOptions {
   /** Overwrite local changes without prompting. */
   force?: boolean;
+  /** Output pull result as JSON. */
+  json?: boolean;
   /** Working directory inside an existing clone (defaults to `process.cwd()`). */
   cwd?: string;
   /** Explicit `--profile <name>` flag value. */
@@ -66,7 +70,8 @@ export async function pullPenCommand(
   options: PullPenCommandOptions = {},
 ): Promise<PullPenResult | null> {
   const cwd = options.cwd ?? process.cwd();
-  const interactive = options.interactive ?? isInteractive();
+  const jsonMode = Boolean(options.json);
+  const interactive = (options.interactive ?? isInteractive()) && !jsonMode;
   const force = Boolean(options.force);
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
   const selectImpl = options.prompts?.select ?? promptSelect;
@@ -76,6 +81,7 @@ export async function pullPenCommand(
     explicitProfile: options.explicitProfile,
     project,
     interactive,
+    persistProfileToProject: !jsonMode,
     env: options.env,
     homeDir: options.homeDir,
     selectProfile: selectImpl,
@@ -83,7 +89,9 @@ export async function pullPenCommand(
   const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
 
   const { rootDir, config } = project;
-  console.log(`Pulling latest changes for ${fmt.cyan(config.pen_id)}…`);
+  if (!jsonMode) {
+    console.log(`Pulling latest changes for ${fmt.cyan(config.pen_id)}…`);
+  }
 
   const localFiles = await scanLocalFiles(rootDir);
   const localDirty = detectLocalChangesFromBaseline(localFiles, config.files);
@@ -91,13 +99,19 @@ export async function pullPenCommand(
     localDirty.added.length + localDirty.modified.length + localDirty.deleted.length;
 
   if (dirtyCount > 0 && !force) {
-    console.log(fmt.yellow('\nWarning: You have uncommitted local changes that will be overwritten:'));
-    for (const p of localDirty.added) console.log(`  ${fmt.green('+')} ${p} ${fmt.dim('(will be removed)')}`);
-    for (const p of localDirty.modified) console.log(`  ${fmt.yellow('~')} ${p} ${fmt.dim('(will be overwritten)')}`);
-    for (const p of localDirty.deleted) console.log(`  ${fmt.red('-')} ${p} ${fmt.dim('(will be restored)')}`);
+    if (!jsonMode) {
+      console.log(fmt.yellow('\nWarning: You have uncommitted local changes that will be overwritten:'));
+      for (const p of localDirty.added) console.log(`  ${fmt.green('+')} ${p} ${fmt.dim('(will be removed)')}`);
+      for (const p of localDirty.modified) console.log(`  ${fmt.yellow('~')} ${p} ${fmt.dim('(will be overwritten)')}`);
+      for (const p of localDirty.deleted) console.log(`  ${fmt.red('-')} ${p} ${fmt.dim('(will be restored)')}`);
+    }
 
     if (!interactive) {
-      throw new Error('Local changes detected. Commit/push them first, or re-run with --force.');
+      throw new CliError(
+        409,
+        'Local changes detected. Commit/push them first, or re-run with --force.',
+        { dirty_files: localDirty },
+      );
     }
 
     const ok = await confirmImpl('\nOverwrite local changes with remote version?', false);
@@ -132,16 +146,28 @@ export async function pullPenCommand(
   };
   const configPath = await writeProjectConfig(rootDir, nextConfig);
 
-  console.log(`\n${fmt.green('✓')} Synced ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}`);
-  if (auth.profile) {
-    console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
-  }
-  console.log(
-    `  Updated: ${result.writtenPaths.length} file(s)` +
-      (result.deletedPaths.length > 0 ? `, removed ${result.deletedPaths.length} deleted file(s)` : ''),
-  );
-  if (pen.saved_version) {
-    console.log(`  Version: ${fmt.dim(shortId(pen.saved_version.id))}`);
+  if (jsonMode) {
+    printJsonResponse(200, `Synced ${pen.title || 'Untitled'}.`, {
+      pen,
+      profile: profileToPersist ?? null,
+      root_dir: rootDir,
+      config_path: configPath,
+      version_id: pen.saved_version?.id ?? null,
+      written_paths: result.writtenPaths,
+      deleted_paths: result.deletedPaths,
+    });
+  } else {
+    console.log(`\n${fmt.green('✓')} Synced ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}`);
+    if (auth.profile) {
+      console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+    }
+    console.log(
+      `  Updated: ${result.writtenPaths.length} file(s)` +
+        (result.deletedPaths.length > 0 ? `, removed ${result.deletedPaths.length} deleted file(s)` : ''),
+    );
+    if (pen.saved_version) {
+      console.log(`  Version: ${fmt.dim(shortId(pen.saved_version.id))}`);
+    }
   }
 
   return {
@@ -163,9 +189,11 @@ export function registerPullCommand(program: Command): void {
     .allowExcessArguments(false)
     .description('Pull latest changes from CodePen into an existing cloned folder (requires .cdpn.json)')
     .option('-f, --force', 'Overwrite local changes without prompting')
+    .option('--json', 'Output pull result as JSON')
     .action(async (options: PullCliOptions, command: Command) => {
       await pullPenCommand({
         force: options.force,
+        json: options.json,
         explicitProfile: getGlobalProfileOption(command),
       });
     });

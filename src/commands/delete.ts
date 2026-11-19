@@ -9,6 +9,7 @@ import {
 } from '../config/project.js';
 import type { Pen } from '../types.js';
 import { fmt } from '../utils/format.js';
+import { CliError, printJsonResponse } from '../utils/json.js';
 import {
   isInteractive,
   promptConfirm,
@@ -21,11 +22,14 @@ export const CODEPEN_DELETED_ITEMS_URL = 'https://codepen.io/your-work?item_type
 
 export interface DeleteCliOptions {
   yes?: boolean;
+  json?: boolean;
 }
 
 export interface DeletePenCommandOptions {
   /** Skip confirmation prompt (required in non-interactive mode). */
   yes?: boolean;
+  /** Output structured JSON response instead of human-readable logs. */
+  json?: boolean;
   /** Working directory (must contain `.cdpn.json` directly; defaults to `process.cwd()`). */
   cwd?: string;
   /** Explicit `--profile <name>` flag value. */
@@ -67,7 +71,7 @@ export async function deletePenCommand(
   options: DeletePenCommandOptions = {},
 ): Promise<DeletePenResult | null> {
   const cwd = options.cwd ?? process.cwd();
-  const interactive = options.interactive ?? isInteractive();
+  const interactive = (options.interactive ?? isInteractive()) && !options.json;
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
   const selectImpl = options.prompts?.select ?? promptSelect;
 
@@ -89,7 +93,7 @@ export async function deletePenCommand(
 
   if (!options.yes) {
     if (!interactive) {
-      throw new Error('Refusing to delete Pen in non-interactive mode without --yes.');
+      throw new CliError(400, 'Refusing to delete Pen in non-interactive mode without --yes.');
     }
 
     console.log(`\n${fmt.yellow('About to delete online Pen:')}`);
@@ -122,14 +126,30 @@ export async function deletePenCommand(
   // Remove `.cdpn.json` only after remote deletion succeeded
   await fs.unlink(project.configPath);
 
-  console.log(
-    `\n${fmt.green('✓')} Deleted ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} on CodePen ${fmt.dim('(moved to Deleted Items; restorable for 3 days)')}`,
-  );
-  if (auth.profile) {
-    console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+  if (options.json) {
+    printJsonResponse(
+      200,
+      `Deleted ${pen.title || 'Untitled'} (${pen.id}) on CodePen and removed ${PROJECT_CONFIG_FILENAME}.`,
+      {
+        pen_id: pen.id,
+        title: pen.title,
+        profile: auth.profile,
+        editor_url: pen.urls.editor,
+        deleted: true,
+        config_removed: true,
+        restore_url: CODEPEN_DELETED_ITEMS_URL,
+      },
+    );
+  } else {
+    console.log(
+      `\n${fmt.green('✓')} Deleted ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} on CodePen ${fmt.dim('(moved to Deleted Items; restorable for 3 days)')}`,
+    );
+    if (auth.profile) {
+      console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+    }
+    console.log(`  Removed: ${fmt.cyan(PROJECT_CONFIG_FILENAME)} ${fmt.dim('(local files were kept untouched)')}`);
+    console.log(`  Restore: ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
   }
-  console.log(`  Removed: ${fmt.cyan(PROJECT_CONFIG_FILENAME)} ${fmt.dim('(local files were kept untouched)')}`);
-  console.log(`  Restore: ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
 
   return {
     pen,
@@ -148,9 +168,11 @@ export function registerDeleteCommand(program: Command): void {
       `Delete the online Pen on CodePen (moves to Deleted Items) and remove ${PROJECT_CONFIG_FILENAME}`,
     )
     .option('-y, --yes', 'Skip confirmation prompt')
+    .option('--json', 'Output deletion result as JSON')
     .action(async (options: DeleteCliOptions, command: Command) => {
       await deletePenCommand({
         yes: options.yes,
+        json: options.json,
         explicitProfile: getGlobalProfileOption(command),
       });
     });

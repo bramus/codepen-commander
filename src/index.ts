@@ -61,4 +61,14 @@ export type { LocalFile } from './sync/fs.js';
 export { applyCompilerPatchesToDisk, syncRemoteFilesToDisk } from './sync/materialize.js';
 export type { MaterializeResult } from './sync/materialize.js';
 export { extractHtmlTitle } from './utils/html.js';
+export {
+  CliError,
+  createJsonResponse,
+  errorToJsonEnvelope,
+  formatJsonResponse,
+  isCliError,
+  printJsonResponse,
+  wantsJsonOutput,
+} from './utils/json.js';
+export type { JsonEnvelope, JsonStatus } from './utils/json.js';
 export type * from './types.js';

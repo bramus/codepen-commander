@@ -5,6 +5,7 @@ import { requireProject } from '../config/project.js';
 import { computeSyncDiff, detectLocalChangesFromBaseline, hasDiffChanges } from '../sync/diff.js';
 import { scanLocalFiles } from '../sync/fs.js';
 import { fmt, shortId } from '../utils/format.js';
+import { printJsonResponse } from '../utils/json.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 export function registerStatusCommand(program: Command): void {
@@ -17,7 +18,7 @@ export function registerStatusCommand(program: Command): void {
       const auth = await resolveCommandAuth({
         explicitProfile: getGlobalProfileOption(command),
         project,
-        interactive: !options.json,
+        interactive: options.json ? false : undefined,
         persistProfileToProject: !options.json,
       });
       const client = new CodePenClient({ apiKey: auth.apiKey });
@@ -41,31 +42,34 @@ export function registerStatusCommand(program: Command): void {
       const localBaselineChanges = detectLocalChangesFromBaseline(localFiles, project.config.files);
 
       if (options.json) {
-        console.log(
-          JSON.stringify(
-            {
-              pen_id: pen.id,
-              title: pen.title,
-              editor: pen.editor,
-              profile: auth.profile ?? project.config.profile ?? null,
-              auth_source: auth.source,
-              url: project.config.url,
-              local_version_id: localHead,
-              remote_version_id: remoteHead,
-              remote_ahead: remoteMoved,
-              build_status: pen.saved_version?.build?.status ?? null,
-              deployment: pen.deployment,
-              changes: {
-                added: diff.added.map((i) => i.path),
-                modified: diff.modified.map((i) => i.path),
-                deleted: diff.deleted.map((i) => i.path),
-                unchanged: diff.unchanged.map((i) => i.path),
-              },
-            },
-            null,
-            2,
-          ),
-        );
+        const changeCount = diff.added.length + diff.modified.length + diff.deleted.length;
+        const message =
+          changeCount === 0
+            ? remoteMoved
+              ? 'Local files match remote content, but version metadata is behind.'
+              : `Up to date with CodePen (${diff.unchanged.length} file(s)).`
+            : `Found ${changeCount} difference(s) between local folder and remote head.`;
+
+        printJsonResponse(200, message, {
+          pen_id: pen.id,
+          title: pen.title,
+          editor: pen.editor,
+          profile: auth.profile ?? project.config.profile ?? null,
+          auth_source: auth.source,
+          url: project.config.url,
+          local_version_id: localHead,
+          remote_version_id: remoteHead,
+          remote_ahead: remoteMoved,
+          up_to_date: changeCount === 0 && !remoteMoved,
+          build_status: pen.saved_version?.build?.status ?? null,
+          deployment: pen.deployment,
+          changes: {
+            added: diff.added.map((i) => i.path),
+            modified: diff.modified.map((i) => i.path),
+            deleted: diff.deleted.map((i) => i.path),
+            unchanged: diff.unchanged.map((i) => i.path),
+          },
+        });
         return;
       }
 

@@ -159,6 +159,59 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       assert.ok(authHelp.includes(sub), `Expected auth help to list subcommand "${sub}"`);
     }
     assert.ok(authHelp.includes('~/.cdpn'), 'Expected auth help to reference ~/.cdpn');
+
+    // Verify --json is exposed on all applicable commands and excluded from interactive/browser-only commands
+    const commandsWithJson: string[][] = [
+      ['auth', 'status'],
+      ['auth', 'list'],
+      ['auth', 'default'],
+      ['auth', 'logout'],
+      ['clone'],
+      ['fork'],
+      ['new'],
+      ['pull'],
+      ['status'],
+      ['push'],
+      ['deploy'],
+      ['undeploy'],
+      ['domains'],
+      ['domains', 'list'],
+      ['domains', 'add'],
+      ['domains', 'delete'],
+      ['privacy'],
+      ['delete'],
+      ['list'],
+      ['versions'],
+      ['rollback'],
+      ['info'],
+      ['settings'],
+    ];
+
+    for (const args of commandsWithJson) {
+      const { stdout: cmdHelp } = await execFileAsync(process.execPath, [
+        path.join(distDir, 'cli.js'),
+        ...args,
+        '--help',
+      ]);
+      assert.ok(
+        cmdHelp.includes('--json'),
+        `Expected "cdpn ${args.join(' ')} --help" to include --json`,
+      );
+    }
+
+    const commandsWithoutJson: string[][] = [['open'], ['auth', 'login']];
+    for (const args of commandsWithoutJson) {
+      const { stdout: cmdHelp } = await execFileAsync(process.execPath, [
+        path.join(distDir, 'cli.js'),
+        ...args,
+        '--help',
+      ]);
+      assert.equal(
+        cmdHelp.includes('--json'),
+        false,
+        `Expected "cdpn ${args.join(' ')} --help" NOT to include --json`,
+      );
+    }
   });
 
   it('validates browser URLs strictly (HTTPS only, no control chars)', () => {

@@ -10,6 +10,7 @@ import type {
   SettingsUpdateRequest,
 } from '../types.js';
 import { fmt, formatDate, shortId } from '../utils/format.js';
+import { CliError, printJsonResponse } from '../utils/json.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 const VALID_ACCESS = new Set(['public', 'private', 'protected', 'collaborators']);
@@ -18,7 +19,7 @@ function parseBooleanOption(raw: string, flagName: string): boolean {
   const lower = raw.trim().toLowerCase();
   if (lower === 'true' || lower === '1' || lower === 'yes' || lower === 'on') return true;
   if (lower === 'false' || lower === '0' || lower === 'no' || lower === 'off') return false;
-  throw new Error(`Invalid boolean value "${raw}" for ${flagName}. Use true or false.`);
+  throw new CliError(400, `Invalid boolean value "${raw}" for ${flagName}. Use true or false.`);
 }
 
 function renderPenInfo(pen: Pen, profile?: string | null): void {
@@ -84,7 +85,7 @@ export function registerMetaCommands(program: Command): void {
         const auth = await resolveCommandAuth({
           explicitProfile: getGlobalProfileOption(command),
           project,
-          interactive: !options.json,
+          interactive: options.json ? false : undefined,
           persistProfileToProject: !options.json,
         });
         const client = new CodePenClient({ apiKey: auth.apiKey });
@@ -101,7 +102,8 @@ export function registerMetaCommands(program: Command): void {
         if (options.access !== undefined) {
           const lower = options.access.trim().toLowerCase();
           if (!VALID_ACCESS.has(lower)) {
-            throw new Error(
+            throw new CliError(
+              400,
               `Invalid --access "${options.access}". Use: Public, Private, Protected, or Collaborators.`,
             );
           }
@@ -109,7 +111,7 @@ export function registerMetaCommands(program: Command): void {
         }
         if (options.password !== undefined) {
           if (options.password.length < 8) {
-            throw new Error('Password must be at least 8 characters.');
+            throw new CliError(400, 'Password must be at least 8 characters.');
           }
           patch.password = options.password;
         }
@@ -123,7 +125,11 @@ export function registerMetaCommands(program: Command): void {
           : await client.getPen(project.config.pen_id);
 
         if (options.json) {
-          console.log(JSON.stringify(pen, null, 2));
+          printJsonResponse(
+            200,
+            hasUpdates ? 'Updated Pen metadata.' : 'Fetched Pen metadata.',
+            pen,
+          );
           return;
         }
 
@@ -159,7 +165,7 @@ export function registerMetaCommands(program: Command): void {
         const auth = await resolveCommandAuth({
           explicitProfile: getGlobalProfileOption(command),
           project,
-          interactive: !options.json,
+          interactive: options.json ? false : undefined,
           persistProfileToProject: !options.json,
         });
         const client = new CodePenClient({ apiKey: auth.apiKey });
@@ -177,14 +183,14 @@ export function registerMetaCommands(program: Command): void {
         if (options.indentWith !== undefined) {
           const lower = options.indentWith.trim().toLowerCase();
           if (lower !== 'tabs' && lower !== 'spaces') {
-            throw new Error('Invalid --indent-with value. Use "tabs" or "spaces".');
+            throw new CliError(400, 'Invalid --indent-with value. Use "tabs" or "spaces".');
           }
           patch.indent_with = lower as IndentWith;
         }
         if (options.tabSize !== undefined) {
           const parsed = Number.parseInt(options.tabSize, 10);
           if (Number.isNaN(parsed) || parsed < 1 || parsed > 6) {
-            throw new Error('--tab-size must be an integer between 1 and 6.');
+            throw new CliError(400, '--tab-size must be an integer between 1 and 6.');
           }
           patch.tab_size = parsed;
         }
@@ -195,7 +201,11 @@ export function registerMetaCommands(program: Command): void {
           : (await client.getPen(project.config.pen_id)).settings;
 
         if (options.json) {
-          console.log(JSON.stringify(settings, null, 2));
+          printJsonResponse(
+            200,
+            hasUpdates ? 'Updated Pen settings.' : 'Fetched Pen settings.',
+            settings,
+          );
           return;
         }
 

@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
 import type { Pen, PenEditor, PenSortField, SortDirection } from '../types.js';
 import { fmt, formatDate, formatTable } from '../utils/format.js';
+import { CliError, printJsonResponse } from '../utils/json.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 export interface ListOptions {
@@ -39,22 +40,25 @@ export function registerListCommand(program: Command): void {
     .option('--json', 'Output Pens as JSON')
     .action(async (options: ListOptions, command: Command) => {
       if (options.deployed && options.notDeployed) {
-        throw new Error('Cannot combine --deployed and --not-deployed.');
+        throw new CliError(400, 'Cannot combine --deployed and --not-deployed.');
       }
 
       const limit = Number.parseInt(options.limit ?? '20', 10);
       if (Number.isNaN(limit) || limit < 1) {
-        throw new Error('--limit must be a positive integer.');
+        throw new CliError(400, '--limit must be a positive integer.');
       }
 
       const sort = (options.sort ?? 'updated').toLowerCase();
       if (!VALID_SORTS.has(sort)) {
-        throw new Error(`Invalid --sort value "${options.sort}". Use: created, updated, popularity, or title.`);
+        throw new CliError(
+          400,
+          `Invalid --sort value "${options.sort}". Use: created, updated, popularity, or title.`,
+        );
       }
 
       const direction = (options.direction ?? 'desc').toLowerCase();
       if (!VALID_DIRECTIONS.has(direction)) {
-        throw new Error(`Invalid --direction value "${options.direction}". Use: asc or desc.`);
+        throw new CliError(400, `Invalid --direction value "${options.direction}". Use: asc or desc.`);
       }
 
       let editor: PenEditor | undefined;
@@ -62,7 +66,7 @@ export function registerListCommand(program: Command): void {
         const lower = options.editor.trim().toLowerCase();
         if (lower === 'v2') editor = 'V2';
         else if (lower === 'classic') editor = 'Classic';
-        else throw new Error(`Invalid --editor value "${options.editor}". Use: V2 or Classic.`);
+        else throw new CliError(400, `Invalid --editor value "${options.editor}". Use: V2 or Classic.`);
       }
 
       const deployed = options.deployed ? true : options.notDeployed ? false : undefined;
@@ -70,7 +74,7 @@ export function registerListCommand(program: Command): void {
 
       const auth = await resolveCommandAuth({
         explicitProfile: getGlobalProfileOption(command),
-        interactive: !options.json,
+        interactive: options.json ? false : undefined,
         promptMessage: 'Which CodePen profile would you like to list Pens for?',
       });
       const client = new CodePenClient({ apiKey: auth.apiKey });
@@ -97,7 +101,9 @@ export function registerListCommand(program: Command): void {
       const sliced = pens.slice(0, limit);
 
       if (options.json) {
-        console.log(JSON.stringify(sliced, null, 2));
+        const message =
+          sliced.length === 0 ? 'No matching Pens found.' : `Found ${sliced.length} Pen(s).`;
+        printJsonResponse(200, message, sliced);
         return;
       }
 

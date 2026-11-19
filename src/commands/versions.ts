@@ -4,6 +4,7 @@ import { buildSyncedFileMap, requireProject, writeProjectConfig } from '../confi
 import { scanLocalFiles } from '../sync/fs.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import { fmt, formatDate, formatTable, shortId } from '../utils/format.js';
+import { CliError, printJsonResponse } from '../utils/json.js';
 import { isInteractive, promptConfirm, promptSelect } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
@@ -16,14 +17,14 @@ export function registerVersionCommands(program: Command): void {
     .action(async (options: { limit?: string; json?: boolean }, command: Command) => {
       const limit = Number.parseInt(options.limit ?? '15', 10);
       if (Number.isNaN(limit) || limit < 1) {
-        throw new Error('--limit must be a positive integer.');
+        throw new CliError(400, '--limit must be a positive integer.');
       }
 
       const project = await requireProject();
       const auth = await resolveCommandAuth({
         explicitProfile: getGlobalProfileOption(command),
         project,
-        interactive: !options.json,
+        interactive: options.json ? false : undefined,
         persistProfileToProject: !options.json,
       });
       const client = new CodePenClient({ apiKey: auth.apiKey });
@@ -38,13 +39,21 @@ export function registerVersionCommands(program: Command): void {
       ]);
 
       if (pen.editor === 'Classic') {
-        console.log(fmt.yellow('Classic Pens do not have saved versions in CodePen API v2.'));
+        if (options.json) {
+          printJsonResponse(200, 'Classic Pens do not have saved versions in CodePen API v2.', []);
+        } else {
+          console.log(fmt.yellow('Classic Pens do not have saved versions in CodePen API v2.'));
+        }
         return;
       }
 
       const versions = versionsPage.items.slice(0, limit);
       if (options.json) {
-        console.log(JSON.stringify(versions, null, 2));
+        const message =
+          versions.length === 0
+            ? 'No saved versions found.'
+            : `Found ${versions.length} saved version(s).`;
+        printJsonResponse(200, message, versions);
         return;
       }
 
@@ -87,28 +96,35 @@ export function registerVersionCommands(program: Command): void {
     .description('Restore an older saved version to head and sync files locally')
     .option('-m, --label <label>', 'Optional label for the restored version (max 80 chars)')
     .option('-y, --yes', 'Skip confirmation prompt')
+    .option('--json', 'Output rollback result as JSON')
     .action(
       async (
         versionIdArg: string | undefined,
-        options: { label?: string; yes?: boolean },
+        options: { label?: string; yes?: boolean; json?: boolean },
         command: Command,
       ) => {
         if (options.label && options.label.length > 80) {
-          throw new Error('Version label must be at most 80 characters.');
+          throw new CliError(400, 'Version label must be at most 80 characters.');
         }
 
+        const interactive = isInteractive() && !options.json;
         const project = await requireProject();
         const auth = await resolveCommandAuth({
           explicitProfile: getGlobalProfileOption(command),
           project,
+          interactive,
+          persistProfileToProject: !options.json,
         });
         const client = new CodePenClient({ apiKey: auth.apiKey });
 
         let targetVersionId = versionIdArg?.trim();
 
         if (!targetVersionId) {
-          if (!isInteractive()) {
-            throw new Error('Missing <version-id>. Run `cdpn versions` to list available version IDs.');
+          if (!interactive) {
+            throw new CliError(
+              400,
+              'Missing <version-id>. Run `cdpn versions` to list available version IDs.',
+            );
           }
 
           const page = await client.listVersions(project.config.pen_id, {
@@ -118,7 +134,7 @@ export function registerVersionCommands(program: Command): void {
           });
 
           if (page.items.length === 0) {
-            throw new Error('No saved versions available to restore.');
+            throw new CliError(404, 'No saved versions available to restore.');
           }
 
           targetVersionId = await promptSelect(
@@ -133,8 +149,8 @@ export function registerVersionCommands(program: Command): void {
         }
 
         if (!options.yes) {
-          if (!isInteractive()) {
-            throw new Error('Refusing to rollback in non-interactive mode without --yes.');
+          if (!interactive) {
+            throw new CliError(400, 'Refusing to rollback in non-interactive mode without --yes.');
           }
           const ok = await promptConfirm(
             `Restore version ${fmt.cyan(targetVersionId)} as the new head and overwrite local files?`,
@@ -146,7 +162,9 @@ export function registerVersionCommands(program: Command): void {
           }
         }
 
-        console.log(`Restoring version ${fmt.cyan(shortId(targetVersionId))}…`);
+        if (!options.json) {
+          console.log(`Restoring version ${fmt.cyan(shortId(targetVersionId))}…`);
+        }
         const updatedPen = await client.restoreVersion(
           project.config.pen_id,
           targetVersionId,
@@ -175,6 +193,22 @@ export function registerVersionCommands(program: Command): void {
           editor: updatedPen.editor,
           files: buildSyncedFileMap(remoteFiles, materialized.localSha256ByPath),
         });
+
+        if (options.json) {
+          printJsonResponse(
+            200,
+            `Restored version ${targetVersionId} to head.`,
+            {
+              pen: updatedPen,
+              profile: auth.profile ?? project.config.profile ?? null,
+              restored_version_id: targetVersionId,
+              new_version_id: newHeadId,
+              written_paths: materialized.writtenPaths,
+              deleted_paths: materialized.deletedPaths,
+            },
+          );
+          return;
+        }
 
         console.log(
           `\n${fmt.green('✓')} Restored version ${fmt.dim(shortId(targetVersionId))} → new head ${fmt.dim(shortId(newHeadId))}`,

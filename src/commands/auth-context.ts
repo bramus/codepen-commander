@@ -4,7 +4,6 @@ import {
   API_KEY_FILENAME,
   findMatchingProfile,
   getKeyType,
-  maskApiKey,
   readAuthStore,
   validateProfileName,
   type ResolvedAuth,
@@ -15,6 +14,7 @@ import {
   type ProjectLocation,
 } from '../config/project.js';
 import { fmt } from '../utils/format.js';
+import { CliError } from '../utils/json.js';
 import { isInteractive, promptSelect, type SelectOption } from '../utils/prompts.js';
 
 export interface ResolveCommandAuthOptions {
@@ -105,9 +105,11 @@ export async function resolveCommandAuth(
         availableProfiles.length > 0
           ? ` Available profiles: ${availableProfiles.join(', ')}.`
           : '';
-      throw new Error(
+      throw new CliError(
+        404,
         `Profile "${requested}" not found in ~/${API_KEY_FILENAME}.${availableNote}\n` +
           `Run \`cdpn auth login ${requested}\` to add it.`,
+        { requested_profile: requested, available_profiles: availableProfiles },
       );
     }
     return makeFileAuth(requested);
@@ -130,7 +132,8 @@ export async function resolveCommandAuth(
 
   // 3. No stored profiles at all
   if (!hasFile) {
-    throw new Error(
+    throw new CliError(
+      401,
       `No CodePen API key found. Run \`cdpn auth login\` or set the ${API_KEY_ENV_VAR} environment variable.`,
     );
   }
@@ -141,9 +144,11 @@ export async function resolveCommandAuth(
     const validProjectProfile = validateProfileName(projectProfile);
     if (!Object.hasOwn(store.profiles, validProjectProfile)) {
       const availableNote = ` Available profiles: ${availableProfiles.join(', ')}.`;
-      throw new Error(
+      throw new CliError(
+        404,
         `Profile "${validProjectProfile}" (configured in ${PROJECT_CONFIG_FILENAME}) was not found in ~/${API_KEY_FILENAME}.${availableNote}\n` +
           `Run \`cdpn auth login ${validProjectProfile}\` to add it, or pass \`--profile <name>\` to override.`,
+        { requested_profile: validProjectProfile, available_profiles: availableProfiles },
       );
     }
     return makeFileAuth(validProjectProfile);
@@ -166,7 +171,7 @@ export async function resolveCommandAuth(
 
       const selectOptions: SelectOption<string>[] = availableProfiles.map((name) => {
         const key = store.profiles[name]!;
-        const parts: string[] = [getKeyType(key), maskApiKey(key)];
+        const parts: string[] = [getKeyType(key)];
         if (name === store.defaultProfile) parts.push('default');
         if (name === matchedProfile) parts.push('matches URL');
         return {
@@ -186,9 +191,11 @@ export async function resolveCommandAuth(
     } else if (store.defaultProfile && Object.hasOwn(store.profiles, store.defaultProfile)) {
       chosenProfile = store.defaultProfile;
     } else {
-      throw new Error(
+      throw new CliError(
+        400,
         `Multiple profiles exist in ~/${API_KEY_FILENAME} (${availableProfiles.join(', ')}).\n` +
           'Pass `--profile <name>` or set a default profile with `cdpn auth default <name>`.',
+        { available_profiles: availableProfiles },
       );
     }
   }

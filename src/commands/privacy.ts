@@ -4,6 +4,7 @@ import type { ResolvedAuth } from '../config/auth.js';
 import { requireProjectInDir } from '../config/project.js';
 import type { Pen, PenAccess, PenUpdateRequest } from '../types.js';
 import { fmt } from '../utils/format.js';
+import { CliError, printJsonResponse } from '../utils/json.js';
 import {
   isInteractive,
   promptConfirm,
@@ -99,15 +100,15 @@ export async function managePenPrivacy(
   const requestedAccess = normalizeAccess(options.levelArg);
   if (options.password !== undefined) {
     if (options.password.length < 8) {
-      throw new Error('Password must be at least 8 characters.');
+      throw new CliError(400, 'Password must be at least 8 characters.');
     }
     if (requestedAccess && requestedAccess !== 'Protected') {
-      throw new Error('--password can only be used with Protected privacy.');
+      throw new CliError(400, '--password can only be used with Protected privacy.');
     }
   }
 
   if (options.show && (requestedAccess || options.password !== undefined)) {
-    throw new Error('Cannot combine --show with a privacy level or --password.');
+    throw new CliError(400, 'Cannot combine --show with a privacy level or --password.');
   }
 
   const auth = await resolveCommandAuth({
@@ -127,20 +128,14 @@ export async function managePenPrivacy(
   // Read-only mode: `--show`, or no level/password in non-interactive / `--json` mode
   if (options.show || (!requestedAccess && options.password === undefined && !interactive)) {
     if (options.json) {
-      console.log(
-        JSON.stringify(
-          {
-            pen_id: currentPen.id,
-            title: currentPen.title,
-            access: currentPen.access,
-            editor: currentPen.editor,
-            profile: auth.profile ?? project.config.profile ?? null,
-            updated: false,
-          },
-          null,
-          2,
-        ),
-      );
+      printJsonResponse(200, `Pen privacy is ${currentPen.access}.`, {
+        pen_id: currentPen.id,
+        title: currentPen.title,
+        access: currentPen.access,
+        editor: currentPen.editor,
+        profile: auth.profile ?? project.config.profile ?? null,
+        updated: false,
+      });
     } else {
       console.log(`${fmt.bold(currentPen.title || 'Untitled')} ${fmt.dim(`(${currentPen.id})`)}`);
       if (auth.profile) {
@@ -167,7 +162,8 @@ export async function managePenPrivacy(
     targetAccess = requestedAccess;
   } else if (options.password !== undefined) {
     if (previousAccess !== 'Protected') {
-      throw new Error(
+      throw new CliError(
+        400,
         `This Pen is currently ${previousAccess}. To set a password and make it Protected, run \`cdpn privacy protected --password <password>\`.`,
       );
     }
@@ -199,7 +195,8 @@ export async function managePenPrivacy(
       // Already Protected: rotate password if explicitly requested, or confirm in picker flow
       if (!password) {
         if (!interactive) {
-          throw new Error(
+          throw new CliError(
+            400,
             'This Pen is already Protected. Pass --password <new-password> (min 8 chars) to replace its password.',
           );
         }
@@ -228,7 +225,10 @@ export async function managePenPrivacy(
       // Changing to Protected -> password is required by CodePen API
       if (!password) {
         if (!interactive) {
-          throw new Error('Changing privacy to Protected requires --password with at least 8 characters.');
+          throw new CliError(
+            400,
+            'Changing privacy to Protected requires --password with at least 8 characters.',
+          );
         }
         password = await promptForProtectedPassword(
           secretImpl,
@@ -246,19 +246,16 @@ export async function managePenPrivacy(
   // No-op when privacy did not change
   if (Object.keys(patch).length === 0) {
     if (options.json) {
-      console.log(
-        JSON.stringify(
-          {
-            pen_id: currentPen.id,
-            title: currentPen.title,
-            previous_access: previousAccess,
-            access: currentPen.access,
-            updated: false,
-          },
-          null,
-          2,
-        ),
-      );
+      printJsonResponse(200, `Privacy is already ${currentPen.access} — no changes made.`, {
+        pen_id: currentPen.id,
+        title: currentPen.title,
+        previous_access: previousAccess,
+        access: currentPen.access,
+        editor: currentPen.editor,
+        profile: auth.profile ?? project.config.profile ?? null,
+        password_updated: false,
+        updated: false,
+      });
     } else {
       console.log(`Privacy is already ${fmt.cyan(currentPen.access)} — no changes made.`);
     }
@@ -276,20 +273,21 @@ export async function managePenPrivacy(
   const updatedPen = await client.updatePen(project.config.pen_id, patch);
 
   if (options.json) {
-    console.log(
-      JSON.stringify(
-        {
-          pen_id: updatedPen.id,
-          title: updatedPen.title,
-          previous_access: previousAccess,
-          access: updatedPen.access,
-          password_updated: passwordUpdated,
-          updated: true,
-        },
-        null,
-        2,
-      ),
-    );
+    const message =
+      previousAccess === updatedPen.access && passwordUpdated
+        ? 'Updated password for Protected Pen.'
+        : `Updated privacy from ${previousAccess} to ${updatedPen.access}.`;
+    printJsonResponse(200, message, {
+      pen_id: updatedPen.id,
+      title: updatedPen.title,
+      previous_access: previousAccess,
+      access: updatedPen.access,
+      editor: updatedPen.editor,
+      profile: auth.profile ?? project.config.profile ?? null,
+      password_updated: passwordUpdated,
+      updated: true,
+      url: updatedPen.urls.editor,
+    });
   } else if (previousAccess === updatedPen.access && passwordUpdated) {
     console.log(
       `\n${fmt.green('✓')} Updated password for Protected Pen ${fmt.bold(updatedPen.title || 'Untitled')} ${fmt.dim(`(${updatedPen.id})`)}`,

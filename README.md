@@ -112,34 +112,55 @@ cdpn fork https://codepen.io/username/pen/abcde my-fork      # Forks directly in
 
 ## Commands
 
-All commands accept the global `--profile <name>` flag to override the active profile.
+All commands accept the global `--profile <name>` flag to override the active profile. Every data/state command also accepts `--json` (everything except interactive-only `cdpn auth login` and browser-opening `cdpn open`).
 
 | Command | Description |
 | --- | --- |
-| `cdpn auth status [--offline]` | Show loaded API keys/profiles (`CODEPEN_API_KEY` & `~/.cdpn`) and verify them |
+| `cdpn auth status [--offline] [--json]` | Show loaded API keys/profiles (`CODEPEN_API_KEY` & `~/.cdpn`) and verify them |
 | `cdpn auth login [profile] [--default] [--no-open]` | Open CodePen API settings, verify key, and save a profile to `~/.cdpn` or print shell export lines |
-| `cdpn auth list` | List stored profiles in `~/.cdpn` (alias: `cdpn auth ls`) |
-| `cdpn auth default [profile]` | Set the default profile in `~/.cdpn` |
-| `cdpn auth logout [profile] [--all]` | Remove a specific profile or delete `~/.cdpn` completely |
-| `cdpn new [folder] [--template <id\|url\|title>] [--as-template]` | Scaffold a brand-new 2.0 Pen from a CodePen Template (or CodePen default starter) into a new or empty folder |
-| `cdpn fork <url> [folder] [--title ...] [--access ...]` | Fork one of your own 2.0 Pens into a local folder (for other users' Pens, offers to open in browser to fork and clone back) |
-| `cdpn clone <url> [folder] [--force]` | Clone a CodePen Pen into a local folder (auto-matches stored profile by URL owner; offers browser fork-and-clone fallback for unowned Pens) |
-| `cdpn pull [--force]` | Pull latest remote changes into an existing cloned folder (requires `.cdpn.json`) |
+| `cdpn auth list [--json]` | List stored profiles in `~/.cdpn` (alias: `cdpn auth ls`) |
+| `cdpn auth default [profile] [--json]` | Set the default profile in `~/.cdpn` |
+| `cdpn auth logout [profile] [--all] [--json]` | Remove a specific profile or delete `~/.cdpn` completely |
+| `cdpn new [folder] [--template <id\|url\|title>] [--as-template] [--json]` | Scaffold a brand-new 2.0 Pen from a CodePen Template (or CodePen default starter) into a new or empty folder |
+| `cdpn fork <url> [folder] [--title ...] [--access ...] [--json]` | Fork one of your own 2.0 Pens into a local folder (for other users' Pens, offers to open in browser to fork and clone back) |
+| `cdpn clone <url> [folder] [--force] [--json]` | Clone a CodePen Pen into a local folder (auto-matches stored profile by URL owner; offers browser fork-and-clone fallback for unowned Pens) |
+| `cdpn pull [--force] [--json]` | Pull latest remote changes into an existing cloned folder (requires `.cdpn.json`) |
 | `cdpn status [--json]` | Show active profile, file diffs (added/modified/deleted), remote head, build & deployment status |
-| `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait]` | Push local changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (checks `index.html`, asks account, title, and visibility) |
-| `cdpn deploy [--no-push] [--version <id>] [--force]` | Push local changes (creating a Pen first if unlinked) and deploy to CodePen Hosting |
-| `cdpn undeploy [--yes]` | Take down the live deployment (Pen & versions remain intact) |
-| `cdpn domains [list]` | Show the default deployed URL, custom domains, verification status, and required DNS records |
-| `cdpn domains add <host>` | Attach a custom domain to the Pen's deployment |
-| `cdpn domains delete <host> [--yes]` | Delete a custom domain (aliases: `cdpn domains del`, `cdpn domains rm`) |
+| `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait] [--json]` | Push local changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (checks `index.html`, asks account, title, and visibility) |
+| `cdpn deploy [--no-push] [--version <id>] [--force] [--json]` | Push local changes (creating a Pen first if unlinked) and deploy to CodePen Hosting |
+| `cdpn undeploy [--yes] [--json]` | Take down the live deployment (Pen & versions remain intact) |
+| `cdpn domains [list] [--json]` | Show the default deployed URL, custom domains, verification status, and required DNS records |
+| `cdpn domains add <host> [--json]` | Attach a custom domain to the Pen's deployment |
+| `cdpn domains delete <host> [--yes] [--json]` | Delete a custom domain (aliases: `cdpn domains del`, `cdpn domains rm`) |
 | `cdpn open [--preview \| --deploy]` | Open the Pen's editor, preview, or deployed URL in your browser (prompts to choose when multiple domains exist; `--live` is an alias for `--deploy`) |
-| `cdpn list [--search ...] [--templates] [--deployed] [--editor V2\|Classic]` | List and search your Pens (or Templates) on CodePen (alias: `cdpn ls`) |
-| `cdpn versions [--limit <n>]` | List saved versions with build status, labels, and markers (`head`, `local`, `deployed`) |
-| `cdpn rollback [version-id] [-m <label>] [--yes]` | Restore an older saved version to head and sync files locally |
+| `cdpn list [--search ...] [--templates] [--deployed] [--editor V2\|Classic] [--json]` | List and search your Pens (or Templates) on CodePen (alias: `cdpn ls`) |
+| `cdpn versions [--limit <n>] [--json]` | List saved versions with build status, labels, and markers (`head`, `local`, `deployed`) |
+| `cdpn rollback [version-id] [-m <label>] [--yes] [--json]` | Restore an older saved version to head and sync files locally |
 | `cdpn privacy [level] [--password <pw>] [--show] [--json]` | View or update Pen privacy (`Public`, `Private`, `Protected`, `Collaborators`; alias: `cdpn access`; requires `.cdpn.json` in current folder) |
-| `cdpn delete [--yes]` | Delete the online Pen on CodePen (moves to Deleted Items for 3 days) and remove `.cdpn.json` while keeping local files untouched (aliases: `cdpn del`, `cdpn rm`) |
-| `cdpn info [--title ...] [--tags ...] [--access ...] [--template true\|false]` | View or update Pen metadata |
-| `cdpn settings [--auto-deploy ...] [--indent-with ...]` | View or update Pen editor & deployment settings |
+| `cdpn delete [--yes] [--json]` | Delete the online Pen on CodePen (moves to Deleted Items for 3 days) and remove `.cdpn.json` while keeping local files untouched (aliases: `cdpn del`, `cdpn rm`) |
+| `cdpn info [--title ...] [--tags ...] [--access ...] [--template true\|false] [--json]` | View or update Pen metadata |
+| `cdpn settings [--auto-deploy ...] [--indent-with ...] [--json]` | View or update Pen editor & deployment settings |
+
+## JSON Output (`--json`)
+
+When `--json` is passed, `cdpn` runs non-interactively, suppresses human-readable progress output, and prints a single JSON envelope to `stdout` (even on errors):
+
+```json
+{
+  "status": {
+    "code": 200,
+    "message": "Up to date with CodePen (3 file(s))."
+  },
+  "contents": {
+    "...": "raw command data"
+  }
+}
+```
+
+- `status.code` uses HTTP-style status codes (`200` OK, `201` Created, `400` Bad Request / missing required flag such as `--yes`, `401` Unauthorized, `403` Forbidden, `404` Not Found, `409` Conflict, `422` Build Failed, `429` Rate Limited, `500` Internal Error).
+- `status.message` is a plain, human-readable summary string (ANSI-free).
+- `contents` holds the structured payload for tools to consume (or error metadata / `null` on failure).
+- Non-`2xx` outcomes exit with a non-zero exit code (`1`).
 
 ## Development & Publishing
 
