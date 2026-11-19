@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
+import { CodePenApiError } from '../api/errors.js';
 import type { ResolvedAuth } from '../config/auth.js';
 import {
   buildSyncedFileMap,
@@ -16,10 +17,22 @@ import { isDirectoryNonEmpty } from '../sync/fs.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { Build, Pen } from '../types.js';
 import { fmt, printBuildSummary, shortId } from '../utils/format.js';
-import { isInteractive, promptSecret, promptSelect, promptText, type SelectOption } from '../utils/prompts.js';
+import {
+  isInteractive,
+  promptConfirm,
+  promptSecret,
+  promptSelect,
+  promptText,
+  type SelectOption,
+} from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 import { normalizeAccess } from './create-pen.js';
 import { assertEmptyTargetDirectory } from './scaffold.js';
+import {
+  findUnmatchedStoredOwner,
+  handlePenNotFoundOnFetch,
+  handleUnownedPenAccess,
+} from './unowned-pen.js';
 
 export interface ForkPenCliOptions {
   title?: string;
@@ -60,9 +73,14 @@ export interface ForkPenCommandOptions {
   env?: NodeJS.ProcessEnv;
   /** Injectable home dir (for testing). */
   homeDir?: string;
+  /** Injectable browser launcher (for testing). */
+  openBrowser?: (url: string) => Promise<boolean>;
+  /** Whether to offer opening another user's Pen in the browser (defaults to true in interactive mode). */
+  allowBrowserFallback?: boolean;
   /** Injectable prompts (for testing). */
   prompts?: {
     text?: (question: string, defaultValue?: string) => Promise<string>;
+    confirm?: (question: string, defaultYes?: boolean) => Promise<boolean>;
     select?: <T extends string>(
       question: string,
       options: SelectOption<T>[],
@@ -73,13 +91,16 @@ export interface ForkPenCommandOptions {
 }
 
 export interface ForkPenResult {
-  sourcePen: Pen;
+  /** Original Pen when forked directly via CodePen API v2; null when forked in the browser and cloned back. */
+  sourcePen: Pen | null;
   pen: Pen;
   versionId: string | null;
   build: Build | null;
   writtenPaths: string[];
   auth: ResolvedAuth;
   project: ProjectLocation;
+  /** True when the user forked another user's Pen in the browser and pasted the forked URL to clone. */
+  forkedInBrowser?: boolean;
 }
 
 const FORK_NON_EMPTY_HINT =
@@ -126,10 +147,11 @@ async function suggestAvailableForkFolder(cwd: string, baseName: string): Promis
  * Forks an existing CodePen Pen via `POST /v2/pens/{id}/fork` and downloads the new fork
  * into a local folder linked with `.cdpn.json`.
  */
-export async function forkPenCommand(options: ForkPenCommandOptions): Promise<ForkPenResult> {
+export async function forkPenCommand(options: ForkPenCommandOptions): Promise<ForkPenResult | null> {
   const cwd = path.resolve(options.cwd ?? process.cwd());
   const interactive = options.interactive ?? isInteractive();
   const textImpl = options.prompts?.text ?? promptText;
+  const confirmImpl = options.prompts?.confirm ?? promptConfirm;
   const selectImpl = options.prompts?.select ?? promptSelect;
   const secretImpl = options.prompts?.secret ?? promptSecret;
 
@@ -160,6 +182,66 @@ export async function forkPenCommand(options: ForkPenCommandOptions): Promise<Fo
     }
   }
 
+  const clonePastedForkUrl = async (pastedUrl: string): Promise<ForkPenResult | null> => {
+    const { clonePenCommand } = await import('./clone.js');
+    const cloned = await clonePenCommand({
+      urlArg: pastedUrl,
+      folderArg: options.folderArg,
+      cwd,
+      baseUrl: options.baseUrl,
+      interactive,
+      env: options.env,
+      homeDir: options.homeDir,
+      openBrowser: options.openBrowser,
+      allowBrowserFallback: false,
+      prompts: {
+        text: textImpl,
+        confirm: confirmImpl,
+        select: selectImpl,
+        secret: secretImpl,
+      },
+    });
+    if (!cloned || !cloned.project) {
+      return null;
+    }
+    return {
+      sourcePen: null,
+      pen: cloned.pen,
+      versionId: cloned.pen.saved_version?.id ?? null,
+      build: null,
+      writtenPaths: cloned.writtenPaths,
+      auth: cloned.auth,
+      project: cloned.project,
+      forkedInBrowser: true,
+    };
+  };
+
+  if (!options.resolvedAuth && !options.sourcePen) {
+    const unmatched = await findUnmatchedStoredOwner({
+      originalUrl,
+      explicitProfile: options.explicitProfile,
+      env: options.env,
+      homeDir: options.homeDir,
+    });
+    if (unmatched && originalUrl) {
+      const pastedUrl = await handleUnownedPenAccess({
+        action: 'fork',
+        penUrl: originalUrl,
+        urlOwner: unmatched.urlOwner,
+        availableProfiles: unmatched.availableProfiles,
+        interactive,
+        allowBrowserFallback: options.allowBrowserFallback,
+        confirmImpl,
+        textImpl,
+        openBrowserImpl: options.openBrowser,
+      });
+      if (!pastedUrl) {
+        return null;
+      }
+      return clonePastedForkUrl(pastedUrl);
+    }
+  }
+
   const auth =
     options.resolvedAuth ??
     (await resolveCommandAuth({
@@ -178,7 +260,29 @@ export async function forkPenCommand(options: ForkPenCommandOptions): Promise<Fo
     sourcePen = options.sourcePen;
   } else {
     console.log(`Fetching Pen ${fmt.cyan(apiIdentifier)}…`);
-    sourcePen = await client.getPen(apiIdentifier);
+    try {
+      sourcePen = await client.getPen(apiIdentifier);
+    } catch (error) {
+      if (error instanceof CodePenApiError && error.status === 404) {
+        const pastedUrl = await handlePenNotFoundOnFetch({
+          action: 'fork',
+          apiIdentifier,
+          originalUrl,
+          auth,
+          client,
+          interactive,
+          allowBrowserFallback: options.allowBrowserFallback,
+          confirmImpl,
+          textImpl,
+          openBrowserImpl: options.openBrowser,
+        });
+        if (!pastedUrl) {
+          return null;
+        }
+        return clonePastedForkUrl(pastedUrl);
+      }
+      throw error;
+    }
   }
 
   // CodePen API requires a password when forking a Protected Pen (unless access is overridden)

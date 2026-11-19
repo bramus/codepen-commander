@@ -572,6 +572,7 @@ describe('template-only cdpn new and dedicated cdpn fork', () => {
         await fs.readFile(path.join(tmpParent, 'custom-fork-dir', 'index.html'), 'utf8'),
         '<h1>Forked Pen</h1>',
       );
+      assert.ok(explicitRes);
       const explicitCfg = await readProjectConfig(explicitRes.project.rootDir);
       assert.equal(explicitCfg.profile, 'username');
 
@@ -596,6 +597,7 @@ describe('template-only cdpn new and dedicated cdpn fork', () => {
         },
       });
 
+      assert.ok(autoRes);
       assert.equal(promptedDefaultFolder, 'scroll-cards-fork');
       assert.equal(autoRes.project.rootDir, path.join(tmpParent, 'scroll-cards-fork'));
       assert.equal(
@@ -613,6 +615,7 @@ describe('template-only cdpn new and dedicated cdpn fork', () => {
         homeDir: tmpHome,
         interactive: false,
       });
+      assert.ok(nonInteractiveRes);
       assert.equal(nonInteractiveRes.project.rootDir, path.join(tmpParent, 'scroll-cards-fork-2'));
 
       // 4. Rejects non-empty explicit folder before calling API

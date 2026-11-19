@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { clonePenCommand } from '../src/commands/clone.js';
+import { forkPenCommand } from '../src/commands/fork.js';
 import { pullPenCommand } from '../src/commands/pull.js';
 import { saveProfileToFile } from '../src/config/auth.js';
 import { PROJECT_CONFIG_FILENAME, readProjectConfig } from '../src/config/project.js';
@@ -739,4 +740,172 @@ describe('cdpn clone and cdpn pull commands', () => {
       await fs.rm(tmpWork, { recursive: true, force: true });
     }
   });
+
+  it('fails fast on unowned Pen URLs and offers a browser fork-and-clone fallback for fork and clone', async () => {
+    const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-unowned-home-'));
+    const tmpSingleHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-unowned-single-'));
+    const tmpWork = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-unowned-work-'));
+
+    const FOREIGN_URL =
+      'https://codepen.io/editor/chriscoyier/pen/01a1d7ac-929d-7b6d-9867-73987a930c40';
+    const OWNED_FORK_URL =
+      'https://codepen.io/editor/bramus/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08';
+
+    try {
+      await saveProfileToFile('bramus', KEY_BRAMUS, { homeDir: tmpHome, setAsDefault: true });
+      await saveProfileToFile('username', KEY_USERNAME, { homeDir: tmpHome });
+      await saveProfileToFile('bramus', KEY_BRAMUS, { homeDir: tmpSingleHome, setAsDefault: true });
+
+      currentFiles = [makeTextFile('f1', '/index.html', 'h-v2', '<h1>Browser Forked</h1>\n')];
+
+      // 1. Multi-profile non-interactive `cdpn fork` fails fast before profile prompt or API calls
+      requestLog = [];
+      let selectCalls = 0;
+      await assert.rejects(
+        () =>
+          forkPenCommand({
+            urlArg: FOREIGN_URL,
+            cwd: tmpWork,
+            baseUrl,
+            interactive: false,
+            env: {},
+            homeDir: tmpHome,
+            prompts: {
+              select: async (_q, opts) => {
+                selectCalls++;
+                return opts[0]!.value;
+              },
+            },
+          }),
+        /Cannot fork chriscoyier’s Pen via CodePen API v2[\s\S]*Stored profiles: bramus, username[\s\S]*cdpn clone <your-fork-url>/i,
+      );
+      assert.equal(selectCalls, 0, 'Should not prompt for profile when failing fast');
+      assert.equal(requestLog.length, 0, 'Should fail fast with zero API requests');
+
+      // 2. Multi-profile interactive `cdpn fork` -> opens browser -> user pastes forked URL -> clones under bramus
+      requestLog = [];
+      const openedUrls: string[] = [];
+      let forkSelectCalls = 0;
+      const forkedViaBrowser = await forkPenCommand({
+        urlArg: FOREIGN_URL,
+        folderArg: 'chris-fork',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpHome,
+        openBrowser: async (url) => {
+          openedUrls.push(url);
+          return true;
+        },
+        prompts: {
+          confirm: async () => true,
+          text: async () => OWNED_FORK_URL,
+          select: async (_q, opts) => {
+            forkSelectCalls++;
+            return opts[0]!.value;
+          },
+        },
+      });
+      assert.ok(forkedViaBrowser);
+      assert.equal(forkSelectCalls, 0, 'Should neither prompt on fail-fast nor when cloning matched fork URL');
+      assert.deepEqual(openedUrls, [FOREIGN_URL]);
+      assert.equal(forkedViaBrowser.forkedInBrowser, true);
+      assert.equal(forkedViaBrowser.sourcePen, null);
+      assert.equal(forkedViaBrowser.auth.profile, 'bramus');
+      assert.equal(forkedViaBrowser.project.rootDir, path.resolve(tmpWork, 'chris-fork'));
+      assert.equal(
+        await fs.readFile(path.join(tmpWork, 'chris-fork', 'index.html'), 'utf8'),
+        '<h1>Browser Forked</h1>\n',
+      );
+      const forkedCfg = await readProjectConfig(path.join(tmpWork, 'chris-fork'));
+      assert.equal(forkedCfg.profile, 'bramus');
+      assert.equal(forkedCfg.pen_id, '01a11c78-9eba-777b-98a7-fa51e8b7cb08');
+
+      // 3. Interactive `cdpn clone` on unowned URL -> user declines opening browser -> exits cleanly (null)
+      requestLog = [];
+      const declinedClone = await clonePenCommand({
+        urlArg: FOREIGN_URL,
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpHome,
+        openBrowser: async () => {
+          throw new Error('Must not open browser when declined');
+        },
+        prompts: {
+          confirm: async () => false,
+        },
+      });
+      assert.equal(declinedClone, null);
+      assert.equal(requestLog.length, 0);
+
+      // 4. Interactive `cdpn clone` on unowned URL -> opens browser -> user pastes forked URL -> clones cleanly
+      const cloneOpenedUrls: string[] = [];
+      const clonedViaBrowser = await clonePenCommand({
+        urlArg: FOREIGN_URL,
+        folderArg: 'chris-clone',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpHome,
+        openBrowser: async (url) => {
+          cloneOpenedUrls.push(url);
+          return true;
+        },
+        prompts: {
+          confirm: async () => true,
+          text: async () => OWNED_FORK_URL,
+        },
+      });
+      assert.ok(clonedViaBrowser);
+      assert.deepEqual(cloneOpenedUrls, [FOREIGN_URL]);
+      assert.equal(clonedViaBrowser.auth.profile, 'bramus');
+      assert.equal(clonedViaBrowser.linked, true);
+      assert.equal(clonedViaBrowser.rootDir, path.resolve(tmpWork, 'chris-clone'));
+
+      // 5. Single-profile `cdpn fork` hits 404 on API -> catches 404 -> offers browser fallback cleanly
+      const singleOpenedUrls: string[] = [];
+      const singleExited = await forkPenCommand({
+        urlArg: FOREIGN_URL,
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpSingleHome,
+        openBrowser: async (url) => {
+          singleOpenedUrls.push(url);
+          return true;
+        },
+        prompts: {
+          confirm: async () => true,
+          // User presses Enter without pasting a URL
+          text: async () => '',
+        },
+      });
+      assert.equal(singleExited, null);
+      assert.deepEqual(singleOpenedUrls, [FOREIGN_URL]);
+
+      // 6. Single-profile non-interactive 404 on raw Pen ID explains CodePen API v2 owner-only scope
+      await assert.rejects(
+        () =>
+          clonePenCommand({
+            urlArg: '01a1d7ac-929d-7b6d-9867-73987a930c40',
+            cwd: tmpWork,
+            baseUrl,
+            interactive: false,
+            env: {},
+            homeDir: tmpSingleHome,
+          }),
+        /was not found for profile "bramus"[\s\S]*CodePen API v2 keys can only access/i,
+      );
+    } finally {
+      await fs.rm(tmpHome, { recursive: true, force: true });
+      await fs.rm(tmpSingleHome, { recursive: true, force: true });
+      await fs.rm(tmpWork, { recursive: true, force: true });
+    }
+  });
 });
+

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
+import { CodePenApiError } from '../api/errors.js';
 import { DEFAULT_PROFILE_NAME, findMatchingProfile, type ResolvedAuth } from '../config/auth.js';
 import {
   buildSyncedFileMap,
@@ -27,6 +28,11 @@ import {
 } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 import { forkPenCommand } from './fork.js';
+import {
+  findUnmatchedStoredOwner,
+  handlePenNotFoundOnFetch,
+  handleUnownedPenAccess,
+} from './unowned-pen.js';
 
 export interface CloneCliOptions {
   force?: boolean;
@@ -51,6 +57,10 @@ export interface ClonePenCommandOptions {
   env?: NodeJS.ProcessEnv;
   /** Injectable home dir (for testing). */
   homeDir?: string;
+  /** Injectable browser launcher (for testing). */
+  openBrowser?: (url: string) => Promise<boolean>;
+  /** Whether to offer opening another user's Pen in the browser (defaults to true in interactive mode). */
+  allowBrowserFallback?: boolean;
   /** Injectable prompts (for testing). */
   prompts?: {
     text?: (question: string, defaultValue?: string) => Promise<string>;
@@ -197,6 +207,35 @@ export async function clonePenCommand(
     }
   }
 
+  const unmatched = await findUnmatchedStoredOwner({
+    originalUrl,
+    explicitProfile: options.explicitProfile,
+    env: options.env,
+    homeDir: options.homeDir,
+  });
+  if (unmatched && originalUrl) {
+    const pastedUrl = await handleUnownedPenAccess({
+      action: 'clone',
+      penUrl: originalUrl,
+      urlOwner: unmatched.urlOwner,
+      availableProfiles: unmatched.availableProfiles,
+      interactive,
+      allowBrowserFallback: options.allowBrowserFallback,
+      confirmImpl,
+      textImpl,
+      openBrowserImpl: options.openBrowser,
+    });
+    if (!pastedUrl) {
+      return null;
+    }
+    return clonePenCommand({
+      ...options,
+      urlArg: pastedUrl,
+      explicitProfile: undefined,
+      allowBrowserFallback: false,
+    });
+  }
+
   let auth = await resolveCommandAuth({
     explicitProfile: options.explicitProfile,
     urlHint: originalUrl ?? options.urlArg,
@@ -220,7 +259,35 @@ export async function clonePenCommand(
   }
 
   console.log(`Fetching Pen ${fmt.cyan(apiIdentifier)}…`);
-  const pen = await client.getPen(apiIdentifier);
+  let pen: Pen;
+  try {
+    pen = await client.getPen(apiIdentifier);
+  } catch (error) {
+    if (error instanceof CodePenApiError && error.status === 404) {
+      const pastedUrl = await handlePenNotFoundOnFetch({
+        action: 'clone',
+        apiIdentifier,
+        originalUrl,
+        auth,
+        client,
+        interactive,
+        allowBrowserFallback: options.allowBrowserFallback,
+        confirmImpl,
+        textImpl,
+        openBrowserImpl: options.openBrowser,
+      });
+      if (!pastedUrl) {
+        return null;
+      }
+      return clonePenCommand({
+        ...options,
+        urlArg: pastedUrl,
+        explicitProfile: undefined,
+        allowBrowserFallback: false,
+      });
+    }
+    throw error;
+  }
 
   // Check whether this Pen belongs to a stored profile (handles Pen IDs / preview URLs without an owner in the input)
   const penOwner =
@@ -275,16 +342,21 @@ export async function clonePenCommand(
           interactive,
           env: options.env,
           homeDir: options.homeDir,
+          openBrowser: options.openBrowser,
           prompts: {
             text: textImpl,
+            confirm: confirmImpl,
             select: selectImpl,
             secret: secretImpl,
           },
         });
+        if (!forkedResult) {
+          return null;
+        }
 
         return {
           pen: forkedResult.pen,
-          sourcePen: forkedResult.sourcePen,
+          sourcePen: forkedResult.sourcePen ?? undefined,
           rootDir: forkedResult.project.rootDir,
           writtenPaths: forkedResult.writtenPaths,
           auth: forkedResult.auth,

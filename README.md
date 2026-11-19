@@ -101,12 +101,14 @@ cdpn new my-demo --template "CSS Demo Base"      # Scaffold from a CodePen Templ
 cdpn new my-starter --as-template                # Create a new reusable Template on CodePen
 ```
 
-To fork an existing Pen into a new local folder, use `cdpn fork`:
+To fork one of your own 2.0 Pens into a new local folder, use `cdpn fork`:
 
 ```bash
 cdpn fork https://codepen.io/username/pen/abcde              # Prompts for target folder (or auto-generates one)
 cdpn fork https://codepen.io/username/pen/abcde my-fork      # Forks directly into ./my-fork
 ```
+
+> **Note:** CodePen API v2 keys can only access and fork Pens owned by the key's account (other users' Pens return `404`, even when public). When you run `cdpn fork` or `cdpn clone` on another user's Pen URL interactively, `cdpn` offers to open the Pen in your browser so you can fork it on `codepen.io` and paste your forked URL back to clone immediately.
 
 ## Commands
 
@@ -120,8 +122,8 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn auth default [profile]` | Set the default profile in `~/.cdpn` |
 | `cdpn auth logout [profile] [--all]` | Remove a specific profile or delete `~/.cdpn` completely |
 | `cdpn new [folder] [--template <id\|url\|title>] [--as-template]` | Scaffold a brand-new 2.0 Pen from a CodePen Template (or CodePen default starter) into a new or empty folder |
-| `cdpn fork <url> [folder] [--title ...] [--access ...]` | Fork an existing CodePen Pen and download it into a local folder (prompts/generates folder when omitted) |
-| `cdpn clone <url> [folder] [--force]` | Clone an existing CodePen Pen into a local folder (offers to fork if owned by another user; creates an unlinked local copy if declined) |
+| `cdpn fork <url> [folder] [--title ...] [--access ...]` | Fork one of your own 2.0 Pens into a local folder (for other users' Pens, offers to open in browser to fork and clone back) |
+| `cdpn clone <url> [folder] [--force]` | Clone a CodePen Pen into a local folder (auto-matches stored profile by URL owner; offers browser fork-and-clone fallback for unowned Pens) |
 | `cdpn pull [--force]` | Pull latest remote changes into an existing cloned folder (requires `.cdpn.json`) |
 | `cdpn status [--json]` | Show active profile, file diffs (added/modified/deleted), remote head, build & deployment status |
 | `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait]` | Push local changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (checks `index.html`, asks account, title, and visibility) |
