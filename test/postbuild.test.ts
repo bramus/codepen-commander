@@ -57,6 +57,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       'domains',
       'new',
       'privacy',
+      'delete',
       'open',
       'list',
       'versions',
@@ -94,6 +95,25 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
         ]),
       /too many arguments/i,
     );
+
+    // `cdpn delete` takes no positional arguments (rejects passing a URL) and supports `del` / `rm` aliases
+    await assert.rejects(
+      () =>
+        execFileAsync(process.execPath, [
+          path.join(distDir, 'cli.js'),
+          'delete',
+          'https://codepen.io/username/pen/abcde',
+        ]),
+      /too many arguments/i,
+    );
+    for (const alias of ['del', 'rm']) {
+      const { stdout: aliasHelp } = await execFileAsync(process.execPath, [
+        path.join(distDir, 'cli.js'),
+        alias,
+        '--help',
+      ]);
+      assert.ok(aliasHelp.includes('Usage: cdpn delete'), `Expected "${alias}" to alias "delete"`);
+    }
 
     // `cdpn fork` without mandatory <url> must fail
     await assert.rejects(

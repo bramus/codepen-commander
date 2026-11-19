@@ -338,6 +338,12 @@ describe('CodePenClient & sync integration against local 127.0.0.1 mock API', ()
         return;
       }
 
+      if (req.method === 'DELETE' && url.pathname === `/v2/pens/${PEN_ID}`) {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
     });
@@ -472,5 +478,7 @@ describe('CodePenClient & sync integration against local 127.0.0.1 mock API', ()
     assert.equal(forked.id, 'forked-pen-id');
     assert.equal(forked.title, 'Forked Copy');
     assert.equal(forked.access, 'Public');
+
+    await client.deletePen(PEN_ID);
   });
 });

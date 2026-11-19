@@ -7,6 +7,7 @@ import { Command } from 'commander';
 import { isCodePenApiError } from './api/errors.js';
 import { registerAuthCommands } from './commands/auth.js';
 import { registerCloneCommand } from './commands/clone.js';
+import { registerDeleteCommand } from './commands/delete.js';
 import { registerDeployCommands } from './commands/deploy.js';
 import { registerDomainsCommand } from './commands/domains.js';
 import { registerForkCommand } from './commands/fork.js';
@@ -60,6 +61,7 @@ export function createProgram(): Command {
   registerDomainsCommand(program);
   registerNewCommand(program);
   registerPrivacyCommand(program);
+  registerDeleteCommand(program);
   registerOpenCommand(program);
   registerListCommand(program);
   registerVersionCommands(program);

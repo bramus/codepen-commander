@@ -278,6 +278,10 @@ export class CodePenClient {
     return this.requestJson<Pen>('PATCH', `/v2/pens/${encodePenId(penId)}`, { json: payload });
   }
 
+  public async deletePen(penId: string): Promise<void> {
+    await this.requestRaw('DELETE', `/v2/pens/${encodePenId(penId)}`);
+  }
+
   public async updateSettings(penId: string, payload: SettingsUpdateRequest): Promise<PenSettings> {
     return this.requestJson<PenSettings>('PATCH', `/v2/pens/${encodePenId(penId)}/settings`, {
       json: payload,
