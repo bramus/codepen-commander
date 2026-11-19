@@ -5,8 +5,8 @@ import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
+import { forkPenCommand } from '../src/commands/fork.js';
 import { scaffoldNewPen } from '../src/commands/new.js';
-import { buildStarterFiles, parseCustomFileList } from '../src/commands/scaffold.js';
 import { saveProfileToFile } from '../src/config/auth.js';
 import { readProjectConfig, writeProjectConfig } from '../src/config/project.js';
 import type { Pen, PenFile } from '../src/types.js';
@@ -70,29 +70,7 @@ function makePen(overrides: Partial<Pen> & { id: string; title: string }): Pen {
   };
 }
 
-describe('cdpn new scaffolding & templates', () => {
-  it('generates escaped HTML5 starter files and links stylesheets/scripts accurately', () => {
-    const files = buildStarterFiles(
-      ['index.html', 'src/style.scss', 'src/app.ts', 'data.json'],
-      'A & B <Demo>',
-    );
-    assert.deepEqual(
-      files.map((f) => f.path),
-      ['/index.html', '/src/style.scss', '/src/app.ts', '/data.json'],
-    );
-    const html = files[0]!.content;
-    assert.ok(html.includes('<title>A &amp; B &lt;Demo&gt;</title>'));
-    assert.ok(html.includes('<link rel="stylesheet" href="src/style.scss">'));
-    assert.ok(html.includes('<script type="module" src="src/app.ts"></script>'));
-    assert.equal(files[1]!.content, '');
-    assert.equal(files[2]!.content, '');
-    assert.equal(files[3]!.content, '{}\n');
-
-    assert.throws(() => parseCustomFileList('../escape.html'), /Unsafe path segment/);
-    assert.throws(() => parseCustomFileList('.cdpn.json'), /reserved path/);
-    assert.throws(() => parseCustomFileList('.cdpnignore'), /reserved CLI file/);
-  });
-
+describe('template-only cdpn new and dedicated cdpn fork', () => {
   let server: http.Server;
   let baseUrl = '';
   let createCalls: Array<{
@@ -102,6 +80,7 @@ describe('cdpn new scaffolding & templates', () => {
     rawBody: string;
   }> = [];
   let forkCalls: Array<{
+    auth: string | undefined;
     penId: string;
     body: Record<string, unknown>;
   }> = [];
@@ -109,8 +88,9 @@ describe('cdpn new scaffolding & templates', () => {
   let createCounter = 0;
 
   const TEMPLATE_CSS_ID = 'tpl-css-01';
-  const TEMPLATE_BLANK_ID = 'tpl-blank-02';
-  const EXISTING_PEN_ID = 'pen-source-99';
+  const TEMPLATE_CLASSIC_ID = 'tpl-classic-02';
+  const SOURCE_PEN_ID = 'pen-source-99';
+  const PROTECTED_PEN_ID = 'pen-protected-88';
 
   before(async () => {
     server = http.createServer(async (req, res) => {
@@ -138,7 +118,7 @@ describe('cdpn new scaffolding & templates', () => {
         if (url.searchParams.get('template') === 'true') {
           return sendJson(200, [
             makePen({ id: TEMPLATE_CSS_ID, title: 'CSS Demo Base', template: true }),
-            makePen({ id: TEMPLATE_BLANK_ID, title: 'Blank Starter', template: true, editor: 'Classic' }),
+            makePen({ id: TEMPLATE_CLASSIC_ID, title: 'Classic Starter', template: true, editor: 'Classic' }),
           ]);
         }
         return sendJson(200, []);
@@ -148,8 +128,16 @@ describe('cdpn new scaffolding & templates', () => {
         return sendJson(200, makePen({ id: TEMPLATE_CSS_ID, title: 'CSS Demo Base', template: true }));
       }
 
-      if (req.method === 'GET' && url.pathname === `/v2/pens/${EXISTING_PEN_ID}`) {
-        return sendJson(200, makePen({ id: EXISTING_PEN_ID, title: 'Original Pen', template: false }));
+      if (
+        req.method === 'GET' &&
+        (url.pathname === `/v2/pens/${SOURCE_PEN_ID}` ||
+          decodeURIComponent(url.pathname) === `/v2/pens/https://codepen.io/username/pen/${SOURCE_PEN_ID}`)
+      ) {
+        return sendJson(200, makePen({ id: SOURCE_PEN_ID, title: 'Scroll Cards', access: 'Private' }));
+      }
+
+      if (req.method === 'GET' && url.pathname === `/v2/pens/${PROTECTED_PEN_ID}`) {
+        return sendJson(200, makePen({ id: PROTECTED_PEN_ID, title: 'Secret Demo', access: 'Protected' }));
       }
 
       if (req.method === 'GET' && url.pathname === `/v2/pens/${TEMPLATE_CSS_ID}/files`) {
@@ -231,7 +219,6 @@ describe('cdpn new scaffolding & templates', () => {
 
         let files: PenFile[];
         if (uploaded === null) {
-          // CodePen's built-in default starter files
           files = [
             {
               id: 'sf-cfg',
@@ -308,21 +295,25 @@ describe('cdpn new scaffolding & templates', () => {
 
         createdFilesByVersion.set(verId, files);
 
-        const created = makePen({
-          id: penId,
-          title: (parsed.title as string) || 'Untitled',
-          access: (parsed.access as Pen['access']) || 'Public',
-          template: Boolean(parsed.template),
-        });
-        return sendJson(201, created);
+        return sendJson(
+          201,
+          makePen({
+            id: penId,
+            title: (parsed.title as string) || 'Untitled',
+            access: (parsed.access as Pen['access']) || 'Public',
+            template: Boolean(parsed.template),
+          }),
+        );
       }
 
-      if (req.method === 'POST' && url.pathname === `/v2/pens/${EXISTING_PEN_ID}/fork`) {
+      const forkMatch = url.pathname.match(/^\/v2\/pens\/([^/]+)\/fork$/);
+      if (req.method === 'POST' && forkMatch?.[1]) {
+        const sourceId = decodeURIComponent(forkMatch[1]);
         createCounter++;
         const penId = `forked-pen-${createCounter}`;
         const verId = `ver-${penId}`;
         const parsed = rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : {};
-        forkCalls.push({ penId: EXISTING_PEN_ID, body: parsed });
+        forkCalls.push({ auth, penId: sourceId, body: parsed });
 
         createdFilesByVersion.set(verId, [
           {
@@ -339,12 +330,15 @@ describe('cdpn new scaffolding & templates', () => {
           },
         ]);
 
+        const fallbackAccess: Pen['access'] = sourceId === PROTECTED_PEN_ID ? 'Protected' : 'Private';
+        const fallbackTitle = sourceId === PROTECTED_PEN_ID ? 'Secret Demo' : 'Scroll Cards';
+
         return sendJson(
           201,
           makePen({
             id: penId,
-            title: (parsed.title as string) || 'Original Pen',
-            access: (parsed.access as Pen['access']) || 'Public',
+            title: (parsed.title as string) || fallbackTitle,
+            access: (parsed.access as Pen['access']) || fallbackAccess,
           }),
         );
       }
@@ -379,7 +373,7 @@ describe('cdpn new scaffolding & templates', () => {
     await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
   });
 
-  it('refuses to scaffold into a non-empty folder or already-linked folder and points to cdpn push', async () => {
+  it('refuses to scaffold into a non-empty or already-linked folder and points to cdpn push', async () => {
     const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-home-'));
     const tmpWork = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-nonempty-'));
     createCalls = [];
@@ -426,7 +420,7 @@ describe('cdpn new scaffolding & templates', () => {
     }
   });
 
-  it('fetches CodePen Templates interactively and scaffolds a clean independent Pen with text + binary files', async () => {
+  it('presents only CodePen default starter and account CodePen Templates interactively', async () => {
     const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-home-'));
     const tmpParent = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-parent-'));
     createCalls = [];
@@ -434,10 +428,10 @@ describe('cdpn new scaffolding & templates', () => {
     try {
       await saveProfileToFile('bramus', KEY_BRAMUS, { homeDir: tmpHome, setAsDefault: true });
       await saveProfileToFile('username', KEY_USERNAME, { homeDir: tmpHome });
-      // Make parent non-empty (like ~/demos/) to verify `cdpn new` without folder creates a subfolder!
+      // Make parent non-empty (like ~/demos/) to verify `cdpn new` without folder creates a subfolder
       await fs.writeFile(path.join(tmpParent, 'other-demo.txt'), 'existing sibling\n', 'utf8');
 
-      let seenScaffoldOptions: string[] = [];
+      let seenTemplateChoices: string[] = [];
       const result = await scaffoldNewPen({
         cwd: tmpParent,
         baseUrl,
@@ -449,8 +443,8 @@ describe('cdpn new scaffolding & templates', () => {
             if (question.toLowerCase().includes('account') || question.toLowerCase().includes('profile')) {
               return 'username' as never;
             }
-            if (question.toLowerCase().includes('scaffold')) {
-              seenScaffoldOptions = opts.map((o) => o.value);
+            if (question.toLowerCase().includes('template')) {
+              seenTemplateChoices = opts.map((o) => o.value);
               return `template:${TEMPLATE_CSS_ID}` as never;
             }
             return 'Private' as never;
@@ -459,28 +453,24 @@ describe('cdpn new scaffolding & templates', () => {
             if (question.toLowerCase().includes('title')) {
               return 'Anchor Popover Demo';
             }
-            // Local folder prompt should default to slugified title because parent cwd is non-empty!
             assert.equal(defaultVal, 'anchor-popover-demo');
             return defaultVal ?? '';
           },
         },
       });
 
-      assert.ok(seenScaffoldOptions.includes('starter'));
-      assert.ok(seenScaffoldOptions.includes(`template:${TEMPLATE_CSS_ID}`));
-      assert.ok(seenScaffoldOptions.includes(`template:${TEMPLATE_BLANK_ID}`));
-      assert.ok(seenScaffoldOptions.includes('preset:html-css'));
-      assert.ok(seenScaffoldOptions.includes('preset:html-css-js'));
-      assert.ok(seenScaffoldOptions.includes('preset:blank'));
-      assert.ok(seenScaffoldOptions.includes('custom-files'));
-      assert.ok(seenScaffoldOptions.includes('from-source'));
+      assert.deepEqual(seenTemplateChoices, [
+        'default-starter',
+        `template:${TEMPLATE_CSS_ID}`,
+        `template:${TEMPLATE_CLASSIC_ID}`,
+      ]);
 
       assert.equal(createCalls.length, 1);
       assert.equal(createCalls[0]?.auth, `Bearer ${KEY_USERNAME}`);
       assert.equal(createCalls[0]?.isMultipart, true, 'Template binary asset should upload via multipart');
       assert.equal(createCalls[0]?.body.title, 'Anchor Popover Demo');
       assert.equal(createCalls[0]?.body.access, 'Private');
-      assert.equal(createCalls[0]?.body.template, undefined, 'New Pen from template should NOT be marked template');
+      assert.equal(createCalls[0]?.body.template, undefined);
 
       const outDir = path.join(tmpParent, 'anchor-popover-demo');
       assert.equal(result.project.rootDir, outDir);
@@ -502,16 +492,14 @@ describe('cdpn new scaffolding & templates', () => {
     }
   });
 
-  it('supports --template by title, --scaffold starter, --files custom, --from local dir, and --fork', async () => {
+  it('supports --template by title and default starter with --as-template', async () => {
     const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-home-'));
     const tmpParent = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-flags-'));
     createCalls = [];
-    forkCalls = [];
 
     try {
       await saveProfileToFile('bramus', KEY_BRAMUS, { homeDir: tmpHome, setAsDefault: true });
 
-      // 1. --template by case-insensitive title
       await scaffoldNewPen({
         folderArg: 'from-title-tpl',
         cwd: tmpParent,
@@ -527,11 +515,9 @@ describe('cdpn new scaffolding & templates', () => {
         'body { color: rebeccapurple; }\n',
       );
 
-      // 2. --scaffold starter omits `files` so CodePen supplies its default starter
       await scaffoldNewPen({
-        folderArg: 'from-starter',
+        folderArg: 'new-template',
         cwd: tmpParent,
-        scaffold: 'starter',
         asTemplate: true,
         baseUrl,
         env: {},
@@ -542,86 +528,150 @@ describe('cdpn new scaffolding & templates', () => {
       assert.equal(starterCall.body.files, undefined);
       assert.equal(starterCall.body.template, true);
       assert.equal(
-        await fs.readFile(path.join(tmpParent, 'from-starter', 'index.html'), 'utf8'),
+        await fs.readFile(path.join(tmpParent, 'new-template', 'index.html'), 'utf8'),
         '<h1>CodePen Default Starter</h1>\n',
       );
+    } finally {
+      await fs.rm(tmpHome, { recursive: true, force: true });
+      await fs.rm(tmpParent, { recursive: true, force: true });
+    }
+  });
 
-      // 3. --files custom starter files
-      await scaffoldNewPen({
-        folderArg: 'from-custom',
+  it('cdpn fork <url> [folder] supports explicit folder, prompted/generated folder with -fork fallback, and URL profile matching', async () => {
+    const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-fork-home-'));
+    const tmpParent = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-fork-work-'));
+    forkCalls = [];
+
+    try {
+      await saveProfileToFile('bramus', KEY_BRAMUS, { homeDir: tmpHome, setAsDefault: true });
+      await saveProfileToFile('username', KEY_USERNAME, { homeDir: tmpHome });
+
+      // 1. Explicit folder + CodePen URL pre-selecting matching profile `username`
+      let profileDefaultIdx: number | undefined;
+      let profileOptions: string[] = [];
+      const explicitRes = await forkPenCommand({
+        urlArg: `https://codepen.io/username/pen/${SOURCE_PEN_ID}`,
+        folderArg: 'custom-fork-dir',
         cwd: tmpParent,
-        files: 'index.html,style.css',
-        title: 'CSS Only Demo',
+        title: 'Scroll Cards v2',
         baseUrl,
         env: {},
         homeDir: tmpHome,
-        interactive: false,
-      });
-      const customHtml = await fs.readFile(path.join(tmpParent, 'from-custom', 'index.html'), 'utf8');
-      assert.ok(customHtml.includes('<title>CSS Only Demo</title>'));
-      assert.ok(customHtml.includes('<link rel="stylesheet" href="style.css">'));
-      assert.equal(customHtml.includes('<script'), false);
-
-      // 4. --from local template directory (ignoring .cdpn.json inside source dir)
-      const localTplDir = path.join(tmpParent, 'my-local-template');
-      await fs.mkdir(localTplDir, { recursive: true });
-      await fs.writeFile(path.join(localTplDir, 'index.html'), '<main>Local Scaffold</main>', 'utf8');
-      await writeProjectConfig(localTplDir, {
-        url: 'https://codepen.io/bramus/pen/old',
-        pen_id: 'old',
-        last_synced_version_id: null,
+        interactive: true,
+        prompts: {
+          select: async (_q, opts, defaultIdx) => {
+            profileOptions = opts.map((o) => o.value);
+            profileDefaultIdx = defaultIdx;
+            return opts[defaultIdx ?? 0]!.value;
+          },
+        },
       });
 
-      await scaffoldNewPen({
-        folderArg: 'from-local-dir',
-        cwd: tmpParent,
-        from: './my-local-template',
-        baseUrl,
-        env: {},
-        homeDir: tmpHome,
-        interactive: false,
-      });
-      assert.equal(
-        await fs.readFile(path.join(tmpParent, 'from-local-dir', 'index.html'), 'utf8'),
-        '<main>Local Scaffold</main>',
-      );
-      const localDirCfg = await readProjectConfig(path.join(tmpParent, 'from-local-dir'));
-      assert.notEqual(localDirCfg.pen_id, 'old');
-
-      // 5. --fork existing Pen via POST /v2/pens/{id}/fork
-      await scaffoldNewPen({
-        folderArg: 'from-fork',
-        cwd: tmpParent,
-        fork: EXISTING_PEN_ID,
-        title: 'My Forked Pen',
-        baseUrl,
-        env: {},
-        homeDir: tmpHome,
-        interactive: false,
-      });
+      assert.equal(profileOptions[profileDefaultIdx ?? 0], 'username');
       assert.equal(forkCalls.length, 1);
-      assert.equal(forkCalls[0]?.penId, EXISTING_PEN_ID);
-      assert.equal(forkCalls[0]?.body.title, 'My Forked Pen');
+      assert.equal(forkCalls[0]?.auth, `Bearer ${KEY_USERNAME}`);
+      assert.equal(forkCalls[0]?.penId, SOURCE_PEN_ID);
+      assert.equal(forkCalls[0]?.body.title, 'Scroll Cards v2');
       assert.equal(
-        await fs.readFile(path.join(tmpParent, 'from-fork', 'index.html'), 'utf8'),
+        await fs.readFile(path.join(tmpParent, 'custom-fork-dir', 'index.html'), 'utf8'),
+        '<h1>Forked Pen</h1>',
+      );
+      const explicitCfg = await readProjectConfig(explicitRes.project.rootDir);
+      assert.equal(explicitCfg.profile, 'username');
+
+      // 2. Omitted folder when `./scroll-cards` is ALREADY occupied -> auto-suggests `scroll-cards-fork`
+      await fs.mkdir(path.join(tmpParent, 'scroll-cards'), { recursive: true });
+      await fs.writeFile(path.join(tmpParent, 'scroll-cards', 'index.html'), 'original\n', 'utf8');
+
+      let promptedDefaultFolder: string | undefined;
+      const autoRes = await forkPenCommand({
+        urlArg: `https://codepen.io/username/pen/${SOURCE_PEN_ID}`,
+        cwd: tmpParent,
+        explicitProfile: 'username',
+        baseUrl,
+        env: {},
+        homeDir: tmpHome,
+        interactive: true,
+        prompts: {
+          text: async (_q, def) => {
+            promptedDefaultFolder = def;
+            return def ?? '';
+          },
+        },
+      });
+
+      assert.equal(promptedDefaultFolder, 'scroll-cards-fork');
+      assert.equal(autoRes.project.rootDir, path.join(tmpParent, 'scroll-cards-fork'));
+      assert.equal(
+        await fs.readFile(path.join(tmpParent, 'scroll-cards-fork', 'index.html'), 'utf8'),
         '<h1>Forked Pen</h1>',
       );
 
-      // 6. Rejects combining mutually exclusive scaffold sources
+      // 3. Omitted folder in non-interactive mode -> auto-generates `scroll-cards-fork-2`
+      const nonInteractiveRes = await forkPenCommand({
+        urlArg: SOURCE_PEN_ID,
+        cwd: tmpParent,
+        explicitProfile: 'username',
+        baseUrl,
+        env: {},
+        homeDir: tmpHome,
+        interactive: false,
+      });
+      assert.equal(nonInteractiveRes.project.rootDir, path.join(tmpParent, 'scroll-cards-fork-2'));
+
+      // 4. Rejects non-empty explicit folder before calling API
+      const callsBefore = forkCalls.length;
       await assert.rejects(
         () =>
-          scaffoldNewPen({
-            folderArg: 'bad-combo',
+          forkPenCommand({
+            urlArg: SOURCE_PEN_ID,
+            folderArg: 'scroll-cards',
             cwd: tmpParent,
-            template: 'CSS Demo Base',
-            scaffold: 'html-css',
+            explicitProfile: 'username',
             baseUrl,
             env: {},
             homeDir: tmpHome,
             interactive: false,
           }),
-        /Specify only one scaffold source/,
+        /is not empty/,
       );
+      assert.equal(forkCalls.length, callsBefore);
+
+      // 5. Protected Pen fork requires password unless access is overridden
+      await assert.rejects(
+        () =>
+          forkPenCommand({
+            urlArg: PROTECTED_PEN_ID,
+            folderArg: 'protected-no-pw',
+            cwd: tmpParent,
+            explicitProfile: 'username',
+            baseUrl,
+            env: {},
+            homeDir: tmpHome,
+            interactive: false,
+          }),
+        /requires --password/,
+      );
+
+      let secretPromptCalled = false;
+      await forkPenCommand({
+        urlArg: PROTECTED_PEN_ID,
+        folderArg: 'protected-with-pw',
+        cwd: tmpParent,
+        explicitProfile: 'username',
+        baseUrl,
+        env: {},
+        homeDir: tmpHome,
+        interactive: true,
+        prompts: {
+          secret: async () => {
+            secretPromptCalled = true;
+            return 'forksecret99';
+          },
+        },
+      });
+      assert.equal(secretPromptCalled, true);
+      assert.equal(forkCalls[forkCalls.length - 1]?.body.password, 'forksecret99');
     } finally {
       await fs.rm(tmpHome, { recursive: true, force: true });
       await fs.rm(tmpParent, { recursive: true, force: true });

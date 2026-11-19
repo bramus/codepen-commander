@@ -8,6 +8,7 @@ import { isCodePenApiError } from './api/errors.js';
 import { registerAuthCommands } from './commands/auth.js';
 import { registerDeployCommands } from './commands/deploy.js';
 import { registerDomainsCommand } from './commands/domains.js';
+import { registerForkCommand } from './commands/fork.js';
 import { registerListCommand } from './commands/list.js';
 import { registerMetaCommands } from './commands/meta.js';
 import { registerNewCommand } from './commands/new.js';
@@ -49,6 +50,7 @@ export function createProgram(): Command {
 
   registerAuthCommands(program);
   registerPullCommand(program);
+  registerForkCommand(program);
   registerStatusCommand(program);
   registerPushCommand(program);
   registerDeployCommands(program);

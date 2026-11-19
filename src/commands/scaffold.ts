@@ -2,170 +2,50 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { CodePenClient } from '../api/client.js';
 import { isCodePenApiError } from '../api/errors.js';
-import { normalizePenReference } from '../config/project.js';
-import { IGNORE_FILENAME, normalizePenPath, scanLocalFiles } from '../sync/fs.js';
+import {
+  hasProjectConfigInDir,
+  normalizePenReference,
+  PROJECT_CONFIG_FILENAME,
+} from '../config/project.js';
+import { isDirectoryNonEmpty, normalizePenPath } from '../sync/fs.js';
 import type { BinaryUploadPart, Pen, PenFileRequest } from '../types.js';
-import { escapeHtml } from '../utils/html.js';
-
-export type ScaffoldPreset = 'starter' | 'html-css' | 'html-css-js' | 'blank';
-
-export const VALID_SCAFFOLD_PRESETS: readonly ScaffoldPreset[] = [
-  'starter',
-  'html-css',
-  'html-css-js',
-  'blank',
-];
-
-const STYLESHEET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less']);
-const SCRIPT_EXTENSIONS = new Set(['.js', '.mjs', '.ts', '.jsx', '.tsx']);
-const HTML_EXTENSIONS = new Set(['.html', '.htm']);
-
-export function normalizeScaffoldPreset(raw: string): ScaffoldPreset {
-  const lower = raw.trim().toLowerCase();
-  if (
-    lower === 'starter' ||
-    lower === 'html-css' ||
-    lower === 'html-css-js' ||
-    lower === 'blank'
-  ) {
-    return lower;
-  }
-  throw new Error(
-    `Invalid scaffold preset "${raw}". Use: ${VALID_SCAFFOLD_PRESETS.join(', ')}.`,
-  );
-}
-
-export function getPresetFilePaths(preset: Exclude<ScaffoldPreset, 'starter'>): string[] {
-  switch (preset) {
-    case 'blank':
-      return ['/index.html'];
-    case 'html-css':
-      return ['/index.html', '/style.css'];
-    case 'html-css-js':
-      return ['/index.html', '/style.css', '/script.js'];
-  }
-}
 
 /**
- * Validates and normalizes a comma-separated list of custom starter file paths.
+ * Ensures a local target directory either does not exist yet or is completely empty
+ * (and does not already contain `.cdpn.json`).
  */
-export function parseCustomFileList(raw: string): string[] {
-  const parts = raw
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-
-  if (parts.length === 0) {
-    throw new Error('Specify at least one starter file path (e.g. index.html,style.css).');
+export async function assertEmptyTargetDirectory(
+  targetDir: string,
+  folderDisplay: string,
+  options: {
+    commandName: 'new' | 'fork';
+    nonEmptyHint: string;
+  },
+): Promise<void> {
+  try {
+    const stat = await fs.lstat(targetDir);
+    if (!stat.isDirectory()) {
+      throw new Error(`Target path ${folderDisplay} already exists and is not a directory.`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
   }
 
-  const seenLower = new Set<string>();
-  const normalized: string[] = [];
-
-  for (const part of parts) {
-    const cleanPath = normalizePenPath(part);
-    const firstSegment = cleanPath.slice(1).split('/')[0];
-    if (firstSegment === IGNORE_FILENAME) {
-      throw new Error(`Refusing to scaffold reserved CLI file: ${cleanPath}`);
-    }
-    const key = cleanPath.toLowerCase();
-    if (!seenLower.has(key)) {
-      seenLower.add(key);
-      normalized.push(cleanPath);
-    }
+  if (await hasProjectConfigInDir(targetDir)) {
+    throw new Error(
+      `${folderDisplay} already contains ${PROJECT_CONFIG_FILENAME}. ${options.nonEmptyHint}`,
+    );
   }
 
-  return normalized;
-}
-
-function buildHtmlDocument(
-  htmlPath: string,
-  title: string,
-  stylesheets: string[],
-  scripts: string[],
-): string {
-  const htmlDir = path.posix.dirname(htmlPath);
-  const headLines: string[] = [
-    '  <meta charset="UTF-8">',
-    '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-    `  <title>${escapeHtml(title.trim() || 'Untitled')}</title>`,
-  ];
-
-  for (const cssPath of stylesheets) {
-    const rel = path.posix.relative(htmlDir, cssPath);
-    headLines.push(`  <link rel="stylesheet" href="${escapeHtml(rel)}">`);
+  if (await isDirectoryNonEmpty(targetDir)) {
+    throw new Error(
+      `Folder ${folderDisplay} is not empty. \`cdpn ${options.commandName}\` requires a new or empty target folder.\n` +
+        options.nonEmptyHint,
+    );
   }
-
-  for (const scriptPath of scripts) {
-    const rel = path.posix.relative(htmlDir, scriptPath);
-    headLines.push(`  <script type="module" src="${escapeHtml(rel)}"></script>`);
-  }
-
-  return [
-    '<!DOCTYPE html>',
-    '<html lang="en">',
-    '<head>',
-    ...headLines,
-    '</head>',
-    '<body>',
-    '  ',
-    '</body>',
-    '</html>',
-    '',
-  ].join('\n');
-}
-
-/**
- * Generates clean starter file contents for a list of Pen paths, linking included
- * stylesheets and scripts inside HTML files and safely escaping the `<title>`.
- */
-export function buildStarterFiles(filePaths: string[], title: string): PenFileRequest[] {
-  const normalizedPaths: string[] = [];
-  const seenLower = new Set<string>();
-
-  for (const rawPath of filePaths) {
-    const cleanPath = normalizePenPath(rawPath);
-    const firstSegment = cleanPath.slice(1).split('/')[0];
-    if (firstSegment === IGNORE_FILENAME) {
-      throw new Error(`Refusing to scaffold reserved CLI file: ${cleanPath}`);
-    }
-    const key = cleanPath.toLowerCase();
-    if (!seenLower.has(key)) {
-      seenLower.add(key);
-      normalizedPaths.push(cleanPath);
-    }
-  }
-
-  if (normalizedPaths.length === 0) {
-    throw new Error('At least one starter file path is required.');
-  }
-
-  const stylesheets = normalizedPaths.filter((p) =>
-    STYLESHEET_EXTENSIONS.has(path.posix.extname(p).toLowerCase()),
-  );
-  const scripts = normalizedPaths.filter((p) =>
-    SCRIPT_EXTENSIONS.has(path.posix.extname(p).toLowerCase()),
-  );
-
-  return normalizedPaths.map((filePath) => {
-    const ext = path.posix.extname(filePath).toLowerCase();
-    if (HTML_EXTENSIONS.has(ext)) {
-      return {
-        path: filePath,
-        content: buildHtmlDocument(filePath, title, stylesheets, scripts),
-      };
-    }
-    if (ext === '.json') {
-      return {
-        path: filePath,
-        content: '{}\n',
-      };
-    }
-    return {
-      path: filePath,
-      content: '',
-    };
-  });
 }
 
 /**
@@ -257,8 +137,8 @@ export async function resolveTemplatePen(
 }
 
 /**
- * Downloads all text and binary files from one of your CodePen Pens (e.g. a Template Pen)
- * so they can be used to create a brand-new independent CodePen 2.0 Pen.
+ * Downloads all text and binary files from a CodePen Template Pen so they can be
+ * used to create a brand-new independent CodePen 2.0 Pen.
  */
 export async function fetchPenFilesAsUploadPayload(
   client: CodePenClient,
@@ -286,56 +166,6 @@ export async function fetchPenFilesAsUploadPayload(
         path: normalizedPath,
         content: file.content ?? '',
       });
-    }
-  }
-
-  return { textFiles, binaryFiles };
-}
-
-/**
- * Checks whether a `--from` source string points to an existing local directory.
- */
-export async function resolveExistingLocalDirectory(
-  candidate: string,
-  cwd: string = process.cwd(),
-): Promise<string | null> {
-  const trimmed = candidate.trim();
-  if (!trimmed || /^https?:\/\//i.test(trimmed)) {
-    return null;
-  }
-
-  const resolved = path.resolve(cwd, trimmed);
-  try {
-    const stat = await fs.stat(resolved);
-    return stat.isDirectory() ? resolved : null;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return null;
-    }
-    throw error;
-  }
-}
-
-/**
- * Reads all syncable files from a local scaffold directory (ignoring `.cdpn.json`, `.git`,
- * `node_modules`, `.cdpnignore`, and symlinks).
- */
-export async function readLocalScaffoldFolder(
-  dirPath: string,
-): Promise<{ textFiles: PenFileRequest[]; binaryFiles: BinaryUploadPart[] }> {
-  const scanned = await scanLocalFiles(dirPath);
-  if (scanned.size === 0) {
-    throw new Error(`Local scaffold folder ${dirPath} contains no syncable files.`);
-  }
-
-  const textFiles: PenFileRequest[] = [];
-  const binaryFiles: BinaryUploadPart[] = [];
-
-  for (const [filePath, lf] of scanned) {
-    if (lf.isBinary && lf.buffer.length > 0) {
-      binaryFiles.push({ path: filePath, content: lf.buffer });
-    } else {
-      textFiles.push({ path: filePath, content: lf.textContent ?? '' });
     }
   }
 

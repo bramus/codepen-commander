@@ -48,6 +48,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     for (const cmd of [
       'auth',
       'pull',
+      'fork',
       'status',
       'push',
       'deploy',
@@ -63,6 +64,23 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     ]) {
       assert.ok(stdout.includes(cmd), `Expected CLI help to list command "${cmd}"`);
     }
+
+    const { stdout: newHelp } = await execFileAsync(process.execPath, [
+      path.join(distDir, 'cli.js'),
+      'new',
+      '--help',
+    ]);
+    assert.ok(newHelp.includes('--template'));
+    assert.ok(newHelp.includes('--as-template'));
+    assert.equal(newHelp.includes('--scaffold'), false);
+    assert.equal(newHelp.includes('--files'), false);
+    assert.equal(newHelp.includes('--from'), false);
+
+    // `cdpn fork` without mandatory <url> must fail
+    await assert.rejects(
+      () => execFileAsync(process.execPath, [path.join(distDir, 'cli.js'), 'fork']),
+      /missing required argument 'url'/i,
+    );
 
     const { stdout: authHelp } = await execFileAsync(process.execPath, [
       path.join(distDir, 'cli.js'),

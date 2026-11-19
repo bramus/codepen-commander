@@ -91,23 +91,21 @@ You can also add an optional `.cdpnignore` file in a Pen folder to exclude extra
 
 ## Scaffolding & Templates (`cdpn new`)
 
-`cdpn new [folder]` is dedicated to scaffolding a brand-new CodePen 2.0 Pen into a new or empty local folder (for pushing an existing local demo folder, run `cdpn push` inside that folder instead).
+`cdpn new [folder]` is dedicated to scaffolding a brand-new CodePen 2.0 Pen from a CodePen Template into a new or empty local folder (for pushing an existing local demo folder, run `cdpn push` inside that folder instead).
 
-CodePen stores your reusable scaffolds as **Templates** (any Pen marked with `template: true` on CodePen or via `cdpn info --template true` / `cdpn new --as-template`), in addition to CodePen's built-in 2.0 starter files. When you run `cdpn new` interactively, it fetches your account's Templates from CodePen and lets you pick what your scaffold looks like:
-
-- **CodePen default starter** (`--scaffold starter`) — CodePen's built-in 2.0 starter files
-- **Your CodePen Templates** (`--template <id|url|title>`) — copies all files (including `.codepen/pen.config.json`, Blocks, and binary assets) from any of your CodePen Templates into a clean, independent 2.0 Pen
-- **Built-in minimal presets** — `--scaffold html-css`, `--scaffold html-css-js`, or `--scaffold blank`
-- **Custom starter files** — `--files index.html,style.css` (auto-links included stylesheets & scripts inside `index.html`)
-- **Any existing Pen or local folder** — `--from <pen-url-or-id-or-dir>` (clean copy) or `--fork <pen-url-or-id>` (CodePen fork)
+CodePen stores your reusable scaffolds as **Templates** (any Pen marked with `template: true` on CodePen or via `cdpn info --template true` / `cdpn new --as-template`), alongside CodePen's built-in 2.0 starter. When you run `cdpn new` interactively, it fetches your account's Templates from CodePen and lets you pick one (or use CodePen's default starter):
 
 ```bash
-cdpn new my-demo                                 # Interactive picker (includes your CodePen Templates)
+cdpn new my-demo                                 # Interactive picker (your CodePen Templates + CodePen default starter)
 cdpn new my-demo --template "CSS Demo Base"      # Scaffold from a CodePen Template by title, ID, or URL
-cdpn new my-demo --scaffold html-css             # Minimal index.html + style.css
-cdpn new my-demo --files index.html,src/app.ts   # Custom starter files
-cdpn new my-demo --from ./my-local-starter       # Copy from a local folder or another Pen
 cdpn new my-starter --as-template                # Create a new reusable Template on CodePen
+```
+
+To fork an existing Pen into a new local folder, use `cdpn fork`:
+
+```bash
+cdpn fork https://codepen.io/username/pen/abcde              # Prompts for target folder (or auto-generates one)
+cdpn fork https://codepen.io/username/pen/abcde my-fork      # Forks directly into ./my-fork
 ```
 
 ## Commands
@@ -121,7 +119,8 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn auth list` | List stored profiles in `~/.cdpn` (alias: `cdpn auth ls`) |
 | `cdpn auth default [profile]` | Set the default profile in `~/.cdpn` |
 | `cdpn auth logout [profile] [--all]` | Remove a specific profile or delete `~/.cdpn` completely |
-| `cdpn new [folder] [--template ...] [--scaffold ...] [--files ...] [--from ...] [--fork ...] [--as-template]` | Scaffold a brand-new 2.0 Pen into a new or empty folder from CodePen Templates, built-in presets, custom files, or another Pen/folder |
+| `cdpn new [folder] [--template <id\|url\|title>] [--as-template]` | Scaffold a brand-new 2.0 Pen from a CodePen Template (or CodePen default starter) into a new or empty folder |
+| `cdpn fork <url> [folder] [--title ...] [--access ...]` | Fork an existing CodePen Pen and download it into a local folder (prompts/generates folder when omitted) |
 | `cdpn pull [url] [folder] [--force]` | Pull a Pen into a new folder (prompts if omitted), or update the current synced folder |
 | `cdpn status [--json]` | Show active profile, file diffs (added/modified/deleted), remote head, build & deployment status |
 | `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait]` | Push local changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (checks `index.html`, asks account, title, and visibility) |
