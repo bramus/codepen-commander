@@ -34,6 +34,7 @@ export type {
 export {
   buildSyncedFileMap,
   extractCodePenOwnerFromUrl,
+  extractPenIdFromUrl,
   findProject,
   normalizePenReference,
   PROJECT_CONFIG_FILENAME,

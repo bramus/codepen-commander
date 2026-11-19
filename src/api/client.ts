@@ -19,6 +19,7 @@ import type {
   SettingsUpdateRequest,
   Version,
 } from '../types.js';
+import { extractPenIdFromUrl } from '../config/project.js';
 import { CodePenApiError } from './errors.js';
 
 export const DEFAULT_API_BASE_URL = 'https://api.codepen.io';
@@ -76,7 +77,9 @@ export function parseLinkHeader(header: string | null): PaginatedResult<unknown>
 }
 
 export function encodePenId(penIdOrUrl: string): string {
-  return encodeURIComponent(penIdOrUrl.trim());
+  const trimmed = penIdOrUrl.trim();
+  const extracted = extractPenIdFromUrl(trimmed);
+  return encodeURIComponent(extracted ?? trimmed);
 }
 
 export class CodePenClient {

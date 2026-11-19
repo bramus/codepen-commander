@@ -128,11 +128,7 @@ describe('template-only cdpn new and dedicated cdpn fork', () => {
         return sendJson(200, makePen({ id: TEMPLATE_CSS_ID, title: 'CSS Demo Base', template: true }));
       }
 
-      if (
-        req.method === 'GET' &&
-        (url.pathname === `/v2/pens/${SOURCE_PEN_ID}` ||
-          decodeURIComponent(url.pathname) === `/v2/pens/https://codepen.io/username/pen/${SOURCE_PEN_ID}`)
-      ) {
+      if (req.method === 'GET' && url.pathname === `/v2/pens/${SOURCE_PEN_ID}`) {
         return sendJson(200, makePen({ id: SOURCE_PEN_ID, title: 'Scroll Cards', access: 'Private' }));
       }
 

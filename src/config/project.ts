@@ -206,9 +206,95 @@ export function buildSyncedFileMap(
   return sortRecordKeys(map);
 }
 
+const PEN_ID_PATTERN = /^[A-Za-z0-9_-]{3,64}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PEN_VIEW_SEGMENTS = new Set(['pen', 'full', 'details', 'debug', 'live', 'embed']);
+const CLASSIC_PEN_VIEW_SEGMENTS = new Set([...PEN_VIEW_SEGMENTS, 'editor']);
+
+/**
+ * Extracts a Pen's cpid or hashid from a CodePen URL, when present in the URL path or host.
+ *
+ * Examples:
+ * - `https://codepen.io/editor/bramus/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08` -> `01a11c78-9eba-777b-98a7-fa51e8b7cb08`
+ * - `https://codepen.io/editor/bramus/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08/89bb` -> `01a11c78-9eba-777b-98a7-fa51e8b7cb08`
+ * - `https://codepen.io/bramus/pen/abcde` -> `abcde`
+ * - `https://codepen.io/team/username/pen/abcde` -> `abcde`
+ * - `https://codepen.io/bramus/embed/preview/abcde` -> `abcde`
+ * - `https://01a11c78-9eba-777b-98a7-fa51e8b7cb08.codepenusercontent.com/index.html` -> `01a11c78-9eba-777b-98a7-fa51e8b7cb08`
+ */
+export function extractPenIdFromUrl(rawUrl: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
+    return null;
+  }
+
+  const host = parsed.hostname.toLowerCase();
+
+  if (host === 'codepen.io' || host === 'www.codepen.io') {
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (segments.length < 2) {
+      return null;
+    }
+
+    let idx = 0;
+    const isV2EditorPath = segments[0]?.toLowerCase() === 'editor';
+    const viewSegments = isV2EditorPath ? PEN_VIEW_SEGMENTS : CLASSIC_PEN_VIEW_SEGMENTS;
+
+    if (isV2EditorPath) {
+      idx++;
+      if (segments.length === 2 && segments[1] && UUID_PATTERN.test(segments[1])) {
+        return segments[1];
+      }
+    }
+
+    if (segments[idx]?.toLowerCase() === 'team') {
+      // Skip `team/<team-slug>`
+      idx += 2;
+    } else if (segments[idx] && !viewSegments.has(segments[idx]!.toLowerCase())) {
+      // Skip `<username>`
+      idx += 1;
+    }
+
+    const view = segments[idx]?.toLowerCase();
+    if (!view || !viewSegments.has(view)) {
+      return null;
+    }
+    idx++;
+
+    // Handle `/embed/preview/<id>`
+    if (view === 'embed' && segments[idx]?.toLowerCase() === 'preview') {
+      idx++;
+    }
+
+    const idCandidate = segments[idx]?.trim();
+    if (idCandidate && PEN_ID_PATTERN.test(idCandidate)) {
+      return idCandidate;
+    }
+    return null;
+  }
+
+  // Content or preview subdomains carrying a UUID cpid (e.g. `<cpid>.codepenusercontent.com`)
+  const firstLabel = host.split('.')[0];
+  if (
+    firstLabel &&
+    UUID_PATTERN.test(firstLabel) &&
+    (host.endsWith('.codepen.dev') ||
+      host.endsWith('.codepen.app') ||
+      host.endsWith('.codepenusercontent.com'))
+  ) {
+    return firstLabel;
+  }
+
+  return null;
+}
+
 /**
  * Validates and normalizes a Pen identifier or CodePen URL passed by the user.
- * CodePen API v2 accepts cpids, hashids, and CodePen URLs (editor, pen, preview).
+ * Extracts the Pen's cpid or hashid from CodePen URLs when present (CodePen REST API v2
+ * `/v2/pens/:id` reliably resolves raw IDs and can return 404 on `%2F`-encoded editor URLs),
+ * while preserving `originalUrl` for owner matching and `.cdpn.json`.
  */
 export function normalizePenReference(rawInput: string): { apiIdentifier: string; originalUrl?: string } {
   const trimmed = rawInput.trim();
@@ -228,15 +314,20 @@ export function normalizePenReference(rawInput: string): { apiIdentifier: string
       host === 'codepen.io' ||
       host.endsWith('.codepen.io') ||
       host.endsWith('.codepen.dev') ||
-      host.endsWith('.codepen.app');
+      host.endsWith('.codepen.app') ||
+      host.endsWith('.codepenusercontent.com');
     if (!isCodePenHost) {
       throw new Error(`Expected a CodePen URL (codepen.io / codepen.dev / codepen.app), got: ${host}`);
     }
-    return { apiIdentifier: trimmed, originalUrl: trimmed };
+    const extractedId = extractPenIdFromUrl(trimmed);
+    return {
+      apiIdentifier: extractedId ?? trimmed,
+      originalUrl: trimmed,
+    };
   }
 
   // Raw cpid (UUID) or hashid
-  if (!/^[A-Za-z0-9_-]{3,64}$/.test(trimmed)) {
+  if (!PEN_ID_PATTERN.test(trimmed)) {
     throw new Error(`Invalid Pen ID: "${trimmed}". Provide a Pen URL, cpid, or hashid.`);
   }
 

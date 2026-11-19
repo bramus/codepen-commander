@@ -146,11 +146,10 @@ describe('cdpn clone and cdpn pull commands', () => {
         ]);
       }
 
-      // Own Pen (owned by "username")
+      // Own Pen (owned by "username") — API expects clean extracted Pen IDs, not %2F-encoded URLs
       if (
         req.method === 'GET' &&
-        (url.pathname === `/v2/pens/${PEN_ID}` ||
-          url.pathname === `/v2/pens/${encodeURIComponent('https://codepen.io/username/pen/abcde')}`)
+        (url.pathname === `/v2/pens/${PEN_ID}` || url.pathname === '/v2/pens/abcde')
       ) {
         return sendJson(
           200,
@@ -164,11 +163,10 @@ describe('cdpn clone and cdpn pull commands', () => {
         );
       }
 
-      // CodePen 2.0 editor URL owned by "bramus" (`/editor/bramus/pen/<cpid>`)
+      // CodePen 2.0 editor URL owned by "bramus" (`/editor/bramus/pen/<cpid>`) -> requested by extracted cpid
       if (
         req.method === 'GET' &&
-        url.pathname ===
-          `/v2/pens/${encodeURIComponent('https://codepen.io/editor/bramus/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08')}`
+        url.pathname === '/v2/pens/01a11c78-9eba-777b-98a7-fa51e8b7cb08'
       ) {
         const pen = makePen({
           id: '01a11c78-9eba-777b-98a7-fa51e8b7cb08',
@@ -193,8 +191,7 @@ describe('cdpn clone and cdpn pull commands', () => {
       // Another user's Pen (owned by "otheruser")
       if (
         req.method === 'GET' &&
-        (url.pathname === `/v2/pens/${OTHER_PEN_ID}` ||
-          url.pathname === `/v2/pens/${encodeURIComponent('https://codepen.io/otheruser/pen/xyz99')}`)
+        (url.pathname === `/v2/pens/${OTHER_PEN_ID}` || url.pathname === '/v2/pens/xyz99')
       ) {
         return sendJson(
           200,
