@@ -291,8 +291,9 @@ const RESERVED_CODEPEN_SEGMENTS = new Set([
 
 /**
  * Extracts the CodePen username or team slug from a `codepen.io` URL, if present.
- * Supports both personal (`https://codepen.io/bramus/pen/...`) and team
- * (`https://codepen.io/team/username/pen/...` or `https://codepen.io/username/pen/...`) URLs.
+ * Supports CodePen 2.0 editor URLs (`https://codepen.io/editor/bramus/pen/<cpid>`),
+ * Classic personal URLs (`https://codepen.io/bramus/pen/<slug>`), and team URLs
+ * (`https://codepen.io/team/username/pen/...`, `https://codepen.io/editor/team/username/pen/...`).
  */
 export function extractCodePenOwnerFromUrl(rawUrl: string): string | null {
   let parsed: URL;
@@ -308,25 +309,30 @@ export function extractCodePenOwnerFromUrl(rawUrl: string): string | null {
   }
 
   const segments = parsed.pathname.split('/').filter(Boolean);
-  if (segments.length < 2) {
+  let idx = 0;
+
+  // CodePen 2.0 editor URLs place `/editor/` before the username/team slug
+  if (segments[idx]?.toLowerCase() === 'editor') {
+    idx++;
+  }
+
+  // Team URLs may include a `/team/` prefix before the team slug
+  if (segments[idx]?.toLowerCase() === 'team') {
+    idx++;
+  }
+
+  // Require at least `<owner>/<view-or-resource>` remaining (e.g. `bramus/pen/<id>`)
+  if (segments.length - idx < 2) {
     return null;
   }
 
-  if (segments[0]?.toLowerCase() === 'team' && segments.length >= 3) {
-    const teamSlug = segments[1]?.trim();
-    if (teamSlug && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(teamSlug)) {
-      return teamSlug;
-    }
+  const candidate = segments[idx]?.trim();
+  if (!candidate || RESERVED_CODEPEN_SEGMENTS.has(candidate.toLowerCase())) {
     return null;
   }
 
-  const first = segments[0]?.trim();
-  if (!first || RESERVED_CODEPEN_SEGMENTS.has(first.toLowerCase())) {
-    return null;
-  }
-
-  if (/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(first)) {
-    return first;
+  if (/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(candidate)) {
+    return candidate;
   }
   return null;
 }

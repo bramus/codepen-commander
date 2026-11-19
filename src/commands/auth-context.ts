@@ -22,8 +22,13 @@ export interface ResolveCommandAuthOptions {
   explicitProfile?: string;
   /** Synced project when running inside an existing Pen folder. */
   project?: ProjectLocation;
-  /** Optional CodePen URL hint used to pre-select a matching profile when prompting. */
+  /** Optional CodePen URL hint used to pre-select (or auto-select) a matching profile. */
   urlHint?: string;
+  /**
+   * When true and `urlHint` matches a stored profile name in `~/.cdpn`, automatically
+   * selects that profile without prompting interactively (e.g. for `cdpn clone <url>`).
+   */
+  autoSelectUrlMatch?: boolean;
   /** Prompt question shown when asking the user to pick a profile. */
   promptMessage?: string;
   /**
@@ -149,36 +154,35 @@ export async function resolveCommandAuth(
 
   if (availableProfiles.length === 1) {
     chosenProfile = availableProfiles[0]!;
-  } else if (interactive) {
-    const effectiveUrlHint = options.urlHint ?? options.project?.config.url;
-    const matchedProfile = findMatchingProfile(availableProfiles, effectiveUrlHint);
-    const preselected = matchedProfile ?? store.defaultProfile ?? availableProfiles[0]!;
-    const defaultIndex = Math.max(0, availableProfiles.indexOf(preselected));
-
-    const selectOptions: SelectOption<string>[] = availableProfiles.map((name) => {
-      const key = store.profiles[name]!;
-      const parts: string[] = [getKeyType(key), maskApiKey(key)];
-      if (name === store.defaultProfile) parts.push('default');
-      if (name === matchedProfile) parts.push('matches URL');
-      return {
-        value: name,
-        label: name,
-        description: parts.join(' · '),
-      };
-    });
-
-    const question =
-      options.promptMessage ??
-      (options.project
-        ? `This Pen is not associated with a profile yet. Which profile should be used?`
-        : 'Which CodePen profile should be used?');
-
-    chosenProfile = await selectImpl(question, selectOptions, defaultIndex);
   } else {
     const effectiveUrlHint = options.urlHint ?? options.project?.config.url;
     const matchedProfile = findMatchingProfile(availableProfiles, effectiveUrlHint);
-    if (matchedProfile) {
+
+    if (matchedProfile && (options.autoSelectUrlMatch || !interactive)) {
       chosenProfile = matchedProfile;
+    } else if (interactive) {
+      const preselected = matchedProfile ?? store.defaultProfile ?? availableProfiles[0]!;
+      const defaultIndex = Math.max(0, availableProfiles.indexOf(preselected));
+
+      const selectOptions: SelectOption<string>[] = availableProfiles.map((name) => {
+        const key = store.profiles[name]!;
+        const parts: string[] = [getKeyType(key), maskApiKey(key)];
+        if (name === store.defaultProfile) parts.push('default');
+        if (name === matchedProfile) parts.push('matches URL');
+        return {
+          value: name,
+          label: name,
+          description: parts.join(' · '),
+        };
+      });
+
+      const question =
+        options.promptMessage ??
+        (options.project
+          ? `This Pen is not associated with a profile yet. Which profile should be used?`
+          : 'Which CodePen profile should be used?');
+
+      chosenProfile = await selectImpl(question, selectOptions, defaultIndex);
     } else if (store.defaultProfile && Object.hasOwn(store.profiles, store.defaultProfile)) {
       chosenProfile = store.defaultProfile;
     } else {

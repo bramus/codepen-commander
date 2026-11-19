@@ -41,7 +41,7 @@ When running commands, `cdpn` resolves credentials in this order:
 1. An explicit `--profile <name>` flag (e.g. `cdpn list --profile username`)
 2. The `CODEPEN_API_KEY` environment variable (useful in CI)
 3. The `"profile"` stored in the Pen folder’s `.cdpn.json`
-4. Your sole profile in `~/.cdpn`, or—when multiple profiles exist and the Pen isn’t associated with one yet—an interactive prompt (automatically pre-selecting a matching username/team from the Pen URL)
+4. Your sole profile in `~/.cdpn`, a stored profile matching the Pen owner (automatically selected by `cdpn clone <url>`), or—when multiple profiles exist and none matches—an interactive prompt
 
 Check your authentication status or list profiles at any time:
 
@@ -57,7 +57,7 @@ cdpn auth list
 cdpn auth login bramus
 cdpn auth login username
 
-# 2. Clone an existing Pen into a local folder (prompts for profile if multiple exist)
+# 2. Clone an existing Pen into a local folder (automatically uses "username" when stored)
 cdpn clone https://codepen.io/username/pen/abcde my-pen
 cd my-pen
 

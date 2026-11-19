@@ -164,7 +164,29 @@ describe('cdpn clone and cdpn pull commands', () => {
         );
       }
 
-      if (req.method === 'GET' && url.pathname === `/v2/pens/${PEN_ID}/files`) {
+      // CodePen 2.0 editor URL owned by "bramus" (`/editor/bramus/pen/<cpid>`)
+      if (
+        req.method === 'GET' &&
+        url.pathname ===
+          `/v2/pens/${encodeURIComponent('https://codepen.io/editor/bramus/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08')}`
+      ) {
+        const pen = makePen({
+          id: '01a11c78-9eba-777b-98a7-fa51e8b7cb08',
+          title: 'V2 Editor Demo',
+          owner: 'bramus',
+          slug: '01a11c78-9eba-777b-98a7-fa51e8b7cb08',
+          versionId: 'ver-v2-1',
+        });
+        pen.urls.editor =
+          'https://codepen.io/editor/bramus/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08';
+        return sendJson(200, pen);
+      }
+
+      if (
+        req.method === 'GET' &&
+        (url.pathname === `/v2/pens/${PEN_ID}/files` ||
+          url.pathname === '/v2/pens/01a11c78-9eba-777b-98a7-fa51e8b7cb08/files')
+      ) {
         return sendJson(200, currentFiles);
       }
 
@@ -303,9 +325,9 @@ describe('cdpn clone and cdpn pull commands', () => {
       );
       assert.equal(requestLog.length, 0, 'Should fail fast on non-empty target directory');
 
-      // 3. Interactive clone without [folder] pre-selects URL-matched profile ("username") and prompts with suggested folder
+      // 3. Interactive clone without [folder] automatically uses URL-matched stored profile ("username") WITHOUT prompting for profile
       let textPromptDefault = '';
-      let preselectedProfile = '';
+      let interactiveSelectCalls = 0;
       const clonedCustom = await clonePenCommand({
         urlArg: 'https://codepen.io/username/pen/abcde',
         cwd: tmpWork,
@@ -319,19 +341,104 @@ describe('cdpn clone and cdpn pull commands', () => {
             return 'custom-clone';
           },
           select: async (_q, opts, defaultIdx = 0) => {
-            preselectedProfile = opts[defaultIdx]!.value;
-            return preselectedProfile as never;
+            interactiveSelectCalls++;
+            return opts[defaultIdx]!.value;
           },
         },
       });
       assert.ok(clonedCustom);
+      assert.equal(
+        interactiveSelectCalls,
+        0,
+        'Should auto-select matching stored profile without prompting interactively',
+      );
+      assert.equal(clonedCustom.auth.profile, 'username');
       assert.equal(clonedCustom.linked, true);
       assert.equal(clonedCustom.forked, false);
-      assert.equal(preselectedProfile, 'username', 'Should pre-select URL-matching profile interactively');
       assert.equal(textPromptDefault, 'scroll-demo');
       assert.equal(clonedCustom.rootDir, path.resolve(tmpWork, 'custom-clone'));
       const customConfig = await readProjectConfig(path.join(tmpWork, 'custom-clone'));
       assert.equal(customConfig.profile, 'username');
+
+      // 4. Cloning by raw Pen ID (no owner in input URL) automatically switches to matching stored profile once Pen owner is known
+      let confirmCalledForIdClone = false;
+      const clonedById = await clonePenCommand({
+        urlArg: PEN_ID,
+        folderArg: 'id-clone',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: false,
+        env: {},
+        homeDir: tmpHome,
+        prompts: {
+          confirm: async () => {
+            confirmCalledForIdClone = true;
+            return true;
+          },
+        },
+      });
+      assert.ok(clonedById);
+      assert.equal(confirmCalledForIdClone, false);
+      assert.equal(clonedById.auth.profile, 'username');
+      assert.equal(clonedById.linked, true);
+      assert.equal(clonedById.forked, false);
+      const idConfig = await readProjectConfig(path.join(tmpWork, 'id-clone'));
+      assert.equal(idConfig.profile, 'username');
+
+      // 5. Explicit --profile override still wins and detects ownership mismatch (offers to fork / creates unlinked clone if declined)
+      let overrideConfirmCalled = false;
+      const explicitOverride = await clonePenCommand({
+        urlArg: 'https://codepen.io/username/pen/abcde',
+        folderArg: 'override-clone',
+        explicitProfile: 'bramus',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpHome,
+        prompts: {
+          confirm: async () => {
+            overrideConfirmCalled = true;
+            return false;
+          },
+        },
+      });
+      assert.ok(explicitOverride);
+      assert.equal(overrideConfirmCalled, true);
+      assert.equal(explicitOverride.auth.profile, 'bramus');
+      assert.equal(explicitOverride.linked, false);
+      assert.equal(explicitOverride.project, null);
+
+      // 6. CodePen 2.0 editor URL (`https://codepen.io/editor/bramus/pen/<cpid>`) auto-selects "bramus" with zero prompts
+      let v2SelectCalls = 0;
+      let v2ConfirmCalls = 0;
+      const clonedV2Url = await clonePenCommand({
+        urlArg: 'https://codepen.io/editor/bramus/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08',
+        folderArg: 'v2-editor-clone',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpHome,
+        prompts: {
+          select: async (_q, opts, defaultIdx = 0) => {
+            v2SelectCalls++;
+            return opts[defaultIdx]!.value;
+          },
+          confirm: async () => {
+            v2ConfirmCalls++;
+            return true;
+          },
+        },
+      });
+      assert.ok(clonedV2Url);
+      assert.equal(v2SelectCalls, 0, 'Must not prompt for profile on /editor/<username>/pen/<cpid> URL');
+      assert.equal(v2ConfirmCalls, 0, 'Must not offer to fork when /editor/<username>/pen/<cpid> matches profile');
+      assert.equal(clonedV2Url.auth.profile, 'bramus');
+      assert.equal(clonedV2Url.linked, true);
+      assert.equal(clonedV2Url.forked, false);
+      const v2Config = await readProjectConfig(path.join(tmpWork, 'v2-editor-clone'));
+      assert.equal(v2Config.profile, 'bramus');
     } finally {
       await fs.rm(tmpHome, { recursive: true, force: true });
       await fs.rm(tmpWork, { recursive: true, force: true });

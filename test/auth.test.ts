@@ -305,6 +305,20 @@ describe('auth configuration (~/.cdpn & multi-profile)', () => {
   it('matches CodePen URL owners to stored profiles case-insensitively', () => {
     const profiles = ['bramus', 'username'];
     assert.equal(findMatchingProfile(profiles, 'https://codepen.io/bramus/pen/abcde'), 'bramus');
+    assert.equal(
+      findMatchingProfile(
+        profiles,
+        'https://codepen.io/editor/bramus/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08',
+      ),
+      'bramus',
+    );
+    assert.equal(
+      findMatchingProfile(
+        profiles,
+        'https://codepen.io/editor/team/USERNAME/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08',
+      ),
+      'username',
+    );
     assert.equal(findMatchingProfile(profiles, 'https://codepen.io/USERNAME/editor/abcde'), 'username');
     assert.equal(findMatchingProfile(profiles, 'https://codepen.io/team/username/pen/abcde'), 'username');
     assert.equal(findMatchingProfile(profiles, 'https://codepen.io/someone-else/pen/abcde'), null);

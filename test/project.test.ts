@@ -76,9 +76,29 @@ describe('project config (.cdpn.json)', () => {
 
   it('extracts user and team owners from CodePen URLs', () => {
     assert.equal(extractCodePenOwnerFromUrl('https://codepen.io/bramus/pen/abcde'), 'bramus');
+    assert.equal(
+      extractCodePenOwnerFromUrl(
+        'https://codepen.io/editor/bramus/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08',
+      ),
+      'bramus',
+    );
+    assert.equal(
+      extractCodePenOwnerFromUrl(
+        'https://codepen.io/editor/bramus/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08/abcd',
+      ),
+      'bramus',
+    );
+    assert.equal(
+      extractCodePenOwnerFromUrl(
+        'https://codepen.io/editor/team/username/pen/01a11c78-9eba-777b-98a7-fa51e8b7cb08',
+      ),
+      'username',
+    );
     assert.equal(extractCodePenOwnerFromUrl('https://codepen.io/username/editor/xyz12'), 'username');
     assert.equal(extractCodePenOwnerFromUrl('https://codepen.io/team/username/pen/xyz12'), 'username');
     assert.equal(extractCodePenOwnerFromUrl('https://codepen.io/pen/abcde'), null);
+    assert.equal(extractCodePenOwnerFromUrl('https://codepen.io/editor/pen/abcde'), null);
+    assert.equal(extractCodePenOwnerFromUrl('https://codepen.io/editor/abcde'), null);
     assert.equal(extractCodePenOwnerFromUrl('https://89bb1234.codepen.dev/'), null);
     assert.equal(extractCodePenOwnerFromUrl('not-a-url'), null);
   });

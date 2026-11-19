@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { DEFAULT_PROFILE_NAME, type ResolvedAuth } from '../config/auth.js';
+import { DEFAULT_PROFILE_NAME, findMatchingProfile, type ResolvedAuth } from '../config/auth.js';
 import {
   buildSyncedFileMap,
   extractCodePenOwnerFromUrl,
@@ -197,24 +197,55 @@ export async function clonePenCommand(
     }
   }
 
-  const auth = await resolveCommandAuth({
+  let auth = await resolveCommandAuth({
     explicitProfile: options.explicitProfile,
     urlHint: originalUrl ?? options.urlArg,
+    autoSelectUrlMatch: true,
     promptMessage: 'Which CodePen profile should be used for this Pen?',
     interactive,
     env: options.env,
     homeDir: options.homeDir,
     selectProfile: selectImpl,
   });
-  const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
+  let client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
+
+  if (
+    !options.explicitProfile &&
+    auth.source === 'file' &&
+    auth.profile &&
+    auth.availableProfiles.length > 1 &&
+    findMatchingProfile(auth.availableProfiles, originalUrl ?? options.urlArg) === auth.profile
+  ) {
+    console.log(fmt.dim(`Using profile "${auth.profile}" (matches Pen owner).`));
+  }
 
   console.log(`Fetching Pen ${fmt.cyan(apiIdentifier)}…`);
   const pen = await client.getPen(apiIdentifier);
 
-  // Check whether this Pen belongs to another user
+  // Check whether this Pen belongs to a stored profile (handles Pen IDs / preview URLs without an owner in the input)
   const penOwner =
     extractCodePenOwnerFromUrl(pen.urls.editor) ??
     (originalUrl ? extractCodePenOwnerFromUrl(originalUrl) : null);
+
+  if (
+    penOwner &&
+    !options.explicitProfile &&
+    auth.source === 'file' &&
+    auth.profile?.toLowerCase() !== penOwner.toLowerCase()
+  ) {
+    const matchedStoredProfile = findMatchingProfile(auth.availableProfiles, pen.urls.editor);
+    if (matchedStoredProfile && matchedStoredProfile !== auth.profile) {
+      auth = await resolveCommandAuth({
+        explicitProfile: matchedStoredProfile,
+        interactive,
+        env: options.env,
+        homeDir: options.homeDir,
+      });
+      client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
+      console.log(fmt.dim(`Using profile "${matchedStoredProfile}" (matches Pen owner).`));
+    }
+  }
+
   const currentUsername = penOwner ? await resolveCurrentUsername(client, auth, penOwner) : null;
   const isOwnedByAnotherUser = Boolean(
     penOwner && currentUsername && penOwner.toLowerCase() !== currentUsername.toLowerCase(),
