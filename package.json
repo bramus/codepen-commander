@@ -1,5 +1,5 @@
 {
-  "name": "cdpn",
+  "name": "codepen-commander",
   "version": "1.0.0",
   "description": "Sync local folders with CodePen 2.0 Pens via the CodePen API v2",
   "license": "MIT",

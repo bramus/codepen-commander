@@ -1,4 +1,4 @@
-# `cdpn` — CodePen Sync CLI
+# `cdpn` — CodePen Commander
 
 Sync local folders with [CodePen 2.0](https://codepen.io) Pens using the [CodePen API v2](https://blog.codepen.io/docs/api/api-v2/).
 
@@ -10,7 +10,7 @@ Sync local folders with [CodePen 2.0](https://codepen.io) Pens using the [CodePe
 ## Installation
 
 ```bash
-npm install -g cdpn
+npm install -g codepen-commander
 ```
 
 Requires Node.js 20 or newer.

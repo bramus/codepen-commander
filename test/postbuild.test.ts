@@ -16,7 +16,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     const distPkgRaw = await fs.readFile(path.join(distDir, 'package.json'), 'utf8');
     const distPkg = JSON.parse(distPkgRaw) as Record<string, unknown>;
 
-    assert.equal(distPkg.name, 'cdpn');
+    assert.equal(distPkg.name, 'codepen-commander');
     assert.equal('main' in distPkg, false);
     assert.equal('types' in distPkg, false);
     assert.equal('exports' in distPkg, false);
