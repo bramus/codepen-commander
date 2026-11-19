@@ -48,6 +48,37 @@ export async function requireProject(startDir: string = process.cwd()): Promise<
   return project;
 }
 
+/**
+ * Requires `.cdpn.json` to exist directly inside `dir` (does NOT walk upward to parent directories).
+ */
+export async function requireProjectInDir(dir: string = process.cwd()): Promise<ProjectLocation> {
+  const resolvedDir = path.resolve(dir);
+  if (await hasProjectConfigInDir(resolvedDir)) {
+    const config = await readProjectConfig(resolvedDir);
+    return {
+      rootDir: resolvedDir,
+      configPath: path.join(resolvedDir, PROJECT_CONFIG_FILENAME),
+      config,
+    };
+  }
+
+  const parentDir = path.dirname(resolvedDir);
+  if (parentDir !== resolvedDir) {
+    const parentProject = await findProject(parentDir);
+    if (parentProject) {
+      throw new Error(
+        `No ${PROJECT_CONFIG_FILENAME} found in ${resolvedDir}.\n` +
+          `This command only works directly inside a folder containing ${PROJECT_CONFIG_FILENAME} (found one in parent folder: ${parentProject.rootDir}).`,
+      );
+    }
+  }
+
+  throw new Error(
+    `No ${PROJECT_CONFIG_FILENAME} found in ${resolvedDir}.\n` +
+      `This command only works in a folder with a ${PROJECT_CONFIG_FILENAME} file in it.`,
+  );
+}
+
 export async function hasProjectConfigInDir(dir: string): Promise<boolean> {
   try {
     const stat = await fs.lstat(path.join(path.resolve(dir), PROJECT_CONFIG_FILENAME));

@@ -39,6 +39,7 @@ export {
   PROJECT_CONFIG_FILENAME,
   readProjectConfig,
   requireProject,
+  requireProjectInDir,
   slugifyTitle,
   suggestFolderName,
   writeProjectConfig,

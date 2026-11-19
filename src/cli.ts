@@ -13,6 +13,7 @@ import { registerListCommand } from './commands/list.js';
 import { registerMetaCommands } from './commands/meta.js';
 import { registerNewCommand } from './commands/new.js';
 import { registerOpenCommand } from './commands/open.js';
+import { registerPrivacyCommand } from './commands/privacy.js';
 import { registerPullCommand } from './commands/pull.js';
 import { registerPushCommand } from './commands/push.js';
 import { registerStatusCommand } from './commands/status.js';
@@ -56,6 +57,7 @@ export function createProgram(): Command {
   registerDeployCommands(program);
   registerDomainsCommand(program);
   registerNewCommand(program);
+  registerPrivacyCommand(program);
   registerOpenCommand(program);
   registerListCommand(program);
   registerVersionCommands(program);

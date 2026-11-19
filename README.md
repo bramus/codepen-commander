@@ -133,6 +133,7 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn list [--search ...] [--templates] [--deployed] [--editor V2\|Classic]` | List and search your Pens (or Templates) on CodePen (alias: `cdpn ls`) |
 | `cdpn versions [--limit <n>]` | List saved versions with build status, labels, and markers (`head`, `local`, `deployed`) |
 | `cdpn rollback [version-id] [-m <label>] [--yes]` | Restore an older saved version to head and sync files locally |
+| `cdpn privacy [level] [--password <pw>] [--show] [--json]` | View or update Pen privacy (`Public`, `Private`, `Protected`, `Collaborators`; alias: `cdpn access`; requires `.cdpn.json` in current folder) |
 | `cdpn info [--title ...] [--tags ...] [--access ...] [--template true\|false]` | View or update Pen metadata |
 | `cdpn settings [--auto-deploy ...] [--indent-with ...]` | View or update Pen editor & deployment settings |
 

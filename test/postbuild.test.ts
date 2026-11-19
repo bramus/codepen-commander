@@ -55,6 +55,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       'undeploy',
       'domains',
       'new',
+      'privacy',
       'open',
       'list',
       'versions',
