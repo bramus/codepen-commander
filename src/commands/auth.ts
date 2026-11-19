@@ -360,7 +360,7 @@ export function registerAuthCommands(program: Command): void {
                   : undefined;
 
             for (;;) {
-              const entered = await promptText('Profile name (e.g. bramus, username)', suggested);
+              const entered = await promptText('Profile name', suggested);
               if (isValidProfileName(entered)) {
                 profileName = entered.trim();
                 break;
