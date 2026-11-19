@@ -24,10 +24,14 @@ describe('cdpn clone and cdpn pull commands', () => {
   const OTHER_PEN_ID = 'pen-other-99';
   const FORKED_PEN_ID = 'pen-forked-1';
   const FORKED_VERSION_ID = 'ver-fork-1';
+  const CLASSIC_PEN_SLUG = 'v1old';
+  const CLASSIC_CONVERTED_ID = '01a22b33-4c5d-6e7f-8a9b-0c1d2e3f4a5b';
 
   let currentVersionId = 'ver-1';
   let currentFiles: PenFile[] = [];
   let otherFiles: PenFile[] = [];
+  let classicFiles: PenFile[] = [];
+  let classicConverted = false;
   let forkCalls = 0;
 
   const makeTextFile = (
@@ -53,7 +57,8 @@ describe('cdpn clone and cdpn pull commands', () => {
     title: string;
     owner: string;
     slug: string;
-    versionId: string;
+    versionId: string | null;
+    editor?: 'V2' | 'Classic';
     withBuild?: boolean;
   }): Pen => ({
     id: overrides.id,
@@ -66,7 +71,7 @@ describe('cdpn clone and cdpn pull commands', () => {
     popularity: 0,
     views_count: 0,
     loves_count: 0,
-    editor: 'V2',
+    editor: overrides.editor ?? 'V2',
     created_at: '2026-09-01T12:00:00Z',
     updated_at: '2026-09-10T12:00:00Z',
     urls: {
@@ -74,17 +79,19 @@ describe('cdpn clone and cdpn pull commands', () => {
       preview: `https://${overrides.slug}.codepen.dev/`,
     },
     screenshot_urls: null,
-    saved_version: {
-      id: overrides.versionId,
-      pen_id: overrides.id,
-      hash: `hash-${overrides.versionId}`,
-      created_at: '2026-09-10T12:00:00Z',
-      deployed: false,
-      saved: true,
-      label: null,
-      build: null,
-      preview_url: null,
-    },
+    saved_version: overrides.versionId
+      ? {
+          id: overrides.versionId,
+          pen_id: overrides.id,
+          hash: `hash-${overrides.versionId}`,
+          created_at: '2026-09-10T12:00:00Z',
+          deployed: false,
+          saved: true,
+          label: null,
+          build: null,
+          preview_url: null,
+        }
+      : null,
     deployment: null,
     settings: {
       auto_deploy: false,
@@ -93,7 +100,7 @@ describe('cdpn clone and cdpn pull commands', () => {
       indent_with: 'spaces',
       tab_size: 2,
     },
-    ...(overrides.withBuild
+    ...(overrides.withBuild && overrides.versionId
       ? {
           build: {
             id: 'build-fork-1',
@@ -242,6 +249,46 @@ describe('cdpn clone and cdpn pull commands', () => {
 
       if (req.method === 'GET' && url.pathname === `/v2/pens/${FORKED_PEN_ID}/files`) {
         return sendJson(200, otherFiles);
+      }
+
+      // Classic (v1) Pen owned by "bramus" that can optionally be converted to V2 in-place
+      if (
+        req.method === 'GET' &&
+        (url.pathname === `/v2/pens/${CLASSIC_PEN_SLUG}` ||
+          url.pathname === `/v2/pens/${CLASSIC_CONVERTED_ID}`)
+      ) {
+        if (classicConverted || url.pathname === `/v2/pens/${CLASSIC_CONVERTED_ID}`) {
+          const converted = makePen({
+            id: CLASSIC_CONVERTED_ID,
+            title: 'Legacy Classic Demo',
+            owner: 'bramus',
+            slug: CLASSIC_CONVERTED_ID,
+            versionId: 'ver-converted-1',
+            editor: 'V2',
+          });
+          converted.urls.editor = `https://codepen.io/editor/bramus/pen/${CLASSIC_CONVERTED_ID}`;
+          return sendJson(200, converted);
+        }
+
+        return sendJson(
+          200,
+          makePen({
+            id: CLASSIC_PEN_SLUG,
+            title: 'Legacy Classic Demo',
+            owner: 'bramus',
+            slug: CLASSIC_PEN_SLUG,
+            versionId: null,
+            editor: 'Classic',
+          }),
+        );
+      }
+
+      if (
+        req.method === 'GET' &&
+        (url.pathname === `/v2/pens/${CLASSIC_PEN_SLUG}/files` ||
+          url.pathname === `/v2/pens/${CLASSIC_CONVERTED_ID}/files`)
+      ) {
+        return sendJson(200, classicFiles);
       }
 
       sendJson(404, { code: 'NOT_FOUND', message: 'Not found' });
@@ -907,5 +954,280 @@ describe('cdpn clone and cdpn pull commands', () => {
       await fs.rm(tmpWork, { recursive: true, force: true });
     }
   });
+
+  it('offers to convert Classic (v1) Pens in browser or clone them unlinked without .cdpn.json', async () => {
+    const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-classic-home-'));
+    const tmpWork = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-classic-work-'));
+
+    const CLASSIC_URL = `https://codepen.io/bramus/pen/${CLASSIC_PEN_SLUG}`;
+    const CONVERTED_V2_URL = `https://codepen.io/editor/bramus/pen/${CLASSIC_CONVERTED_ID}`;
+
+    try {
+      await saveProfileToFile('bramus', KEY_BRAMUS, { homeDir: tmpHome, setAsDefault: true });
+      classicFiles = [
+        makeTextFile('cf1', '/index.html', 'ch1', '<h1>Classic Pen</h1>\n'),
+        makeTextFile('cf2', '/style.css', 'ch2', 'body { color: rebeccapurple; }\n'),
+      ];
+
+      // 1. Interactive choice: "Just clone without linking" -> downloads files without .cdpn.json and never opens browser
+      classicConverted = false;
+      let capturedOptions: Array<{ value: string; label: string }> = [];
+      let capturedDefaultIndex: number | undefined;
+      const unlinkedInteractive = await clonePenCommand({
+        urlArg: CLASSIC_URL,
+        folderArg: 'classic-unlinked',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpHome,
+        openBrowser: async () => {
+          throw new Error('Must not open browser when user chooses clone-unlinked');
+        },
+        prompts: {
+          select: async (_question, opts, defaultIndex) => {
+            capturedOptions = opts.map((o) => ({ value: o.value, label: o.label }));
+            capturedDefaultIndex = defaultIndex;
+            return 'clone-unlinked' as never;
+          },
+        },
+      });
+
+      assert.ok(unlinkedInteractive);
+      assert.equal(capturedDefaultIndex, 0);
+      assert.deepEqual(
+        capturedOptions.map((o) => o.value),
+        ['convert', 'clone-unlinked'],
+      );
+      assert.equal(unlinkedInteractive.linked, false);
+      assert.equal(unlinkedInteractive.forked, false);
+      assert.equal(unlinkedInteractive.project, null);
+      assert.equal(unlinkedInteractive.pen.editor, 'Classic');
+      assert.equal(
+        await fs.readFile(path.join(tmpWork, 'classic-unlinked', 'index.html'), 'utf8'),
+        '<h1>Classic Pen</h1>\n',
+      );
+      await assert.rejects(
+        () => fs.stat(path.join(tmpWork, 'classic-unlinked', PROJECT_CONFIG_FILENAME)),
+        /ENOENT/,
+        'Classic unlinked clone must not create .cdpn.json',
+      );
+
+      // 2. Interactive choice: "Open the Pen to convert it first" -> converts in-place -> Enter -> clones linked V2 Pen
+      classicConverted = false;
+      const openedInPlace: string[] = [];
+      const convertedInPlace = await clonePenCommand({
+        urlArg: CLASSIC_URL,
+        folderArg: 'classic-converted-inplace',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpHome,
+        openBrowser: async (url) => {
+          openedInPlace.push(url);
+          return true;
+        },
+        prompts: {
+          select: async () => 'convert' as never,
+          text: async () => {
+            // Simulate the user converting the Pen to CodePen 2.0 in the browser before pressing Enter
+            classicConverted = true;
+            return '';
+          },
+        },
+      });
+
+      assert.ok(convertedInPlace);
+      assert.deepEqual(openedInPlace, [CLASSIC_URL]);
+      assert.equal(convertedInPlace.linked, true);
+      assert.equal(convertedInPlace.forked, false);
+      assert.equal(convertedInPlace.pen.editor, 'V2');
+      assert.equal(convertedInPlace.pen.id, CLASSIC_CONVERTED_ID);
+      assert.ok(convertedInPlace.project);
+
+      const inPlaceConfig = await readProjectConfig(path.join(tmpWork, 'classic-converted-inplace'));
+      assert.equal(inPlaceConfig.pen_id, CLASSIC_CONVERTED_ID);
+      assert.equal(inPlaceConfig.url, CONVERTED_V2_URL);
+      assert.equal(inPlaceConfig.editor, 'V2');
+      assert.equal(inPlaceConfig.profile, 'bramus');
+      assert.equal(inPlaceConfig.last_synced_version_id, 'ver-converted-1');
+
+      // 3. Interactive choice: "Open the Pen to convert it first" -> user pastes a new 2.0 Pen URL -> clones linked
+      classicConverted = false;
+      const openedPasted: string[] = [];
+      const convertedPasted = await clonePenCommand({
+        urlArg: CLASSIC_URL,
+        folderArg: 'classic-converted-pasted',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpHome,
+        openBrowser: async (url) => {
+          openedPasted.push(url);
+          return true;
+        },
+        prompts: {
+          select: async () => 'convert' as never,
+          text: async () => CONVERTED_V2_URL,
+        },
+      });
+
+      assert.ok(convertedPasted);
+      assert.deepEqual(openedPasted, [CLASSIC_URL]);
+      assert.equal(convertedPasted.linked, true);
+      assert.equal(convertedPasted.pen.editor, 'V2');
+      assert.equal(convertedPasted.pen.id, CLASSIC_CONVERTED_ID);
+      const pastedConfig = await readProjectConfig(path.join(tmpWork, 'classic-converted-pasted'));
+      assert.equal(pastedConfig.pen_id, CLASSIC_CONVERTED_ID);
+      assert.equal(pastedConfig.url, CONVERTED_V2_URL);
+      assert.equal(pastedConfig.editor, 'V2');
+
+      // 4. Pen still Classic on first Enter -> retry menu -> user retries after converting -> browser only opened once
+      classicConverted = false;
+      const openedRetry: string[] = [];
+      const selectAnswersRetry = ['convert', 'retry'];
+      let textCallsRetry = 0;
+      const retriedThenConverted = await clonePenCommand({
+        urlArg: CLASSIC_URL,
+        folderArg: 'classic-retried',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpHome,
+        openBrowser: async (url) => {
+          openedRetry.push(url);
+          return true;
+        },
+        prompts: {
+          select: async () => selectAnswersRetry.shift()! as never,
+          text: async () => {
+            textCallsRetry++;
+            if (textCallsRetry === 2) {
+              classicConverted = true;
+            }
+            return '';
+          },
+        },
+      });
+
+      assert.ok(retriedThenConverted);
+      assert.equal(openedRetry.length, 1, 'Should not reopen the browser on retry');
+      assert.equal(textCallsRetry, 2);
+      assert.equal(retriedThenConverted.linked, true);
+      assert.equal(retriedThenConverted.pen.editor, 'V2');
+
+      // 5. Pen still Classic on Enter (or invalid pasted URL) -> retry menu -> user chooses clone-unlinked or cancel
+      classicConverted = false;
+      const selectAnswersFallback = ['convert', 'clone-unlinked'];
+      const fallbackUnlinked = await clonePenCommand({
+        urlArg: CLASSIC_URL,
+        folderArg: 'classic-retry-unlinked',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpHome,
+        openBrowser: async () => true,
+        prompts: {
+          select: async () => selectAnswersFallback.shift()! as never,
+          text: async () => 'https://example.com/not-codepen',
+        },
+      });
+      assert.ok(fallbackUnlinked);
+      assert.equal(fallbackUnlinked.linked, false);
+      assert.equal(fallbackUnlinked.project, null);
+      await assert.rejects(
+        () => fs.stat(path.join(tmpWork, 'classic-retry-unlinked', PROJECT_CONFIG_FILENAME)),
+        /ENOENT/,
+      );
+
+      classicConverted = false;
+      const selectAnswersCancel = ['convert', 'cancel'];
+      const canceled = await clonePenCommand({
+        urlArg: CLASSIC_URL,
+        folderArg: 'classic-canceled',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: true,
+        env: {},
+        homeDir: tmpHome,
+        openBrowser: async () => true,
+        prompts: {
+          select: async () => selectAnswersCancel.shift()! as never,
+          text: async () => '',
+        },
+      });
+      assert.equal(canceled, null);
+      await assert.rejects(
+        () => fs.stat(path.join(tmpWork, 'classic-canceled')),
+        /ENOENT/,
+        'Canceled clone must not create target folder',
+      );
+
+      // 6. Non-interactive & --json clone of a Classic Pen -> unlinked local copy without prompting or opening browser
+      classicConverted = false;
+      const nonInteractiveClassic = await clonePenCommand({
+        urlArg: CLASSIC_URL,
+        folderArg: 'classic-ci',
+        cwd: tmpWork,
+        baseUrl,
+        interactive: false,
+        env: {},
+        homeDir: tmpHome,
+        openBrowser: async () => {
+          throw new Error('Must not open browser non-interactively');
+        },
+      });
+      assert.ok(nonInteractiveClassic);
+      assert.equal(nonInteractiveClassic.linked, false);
+      assert.equal(nonInteractiveClassic.project, null);
+      assert.equal(nonInteractiveClassic.pen.editor, 'Classic');
+      await assert.rejects(
+        () => fs.stat(path.join(tmpWork, 'classic-ci', PROJECT_CONFIG_FILENAME)),
+        /ENOENT/,
+      );
+
+      const jsonLogs: string[] = [];
+      const origLog = console.log;
+      console.log = (...args: unknown[]) => {
+        jsonLogs.push(args.map(String).join(' '));
+      };
+      try {
+        await clonePenCommand({
+          urlArg: CLASSIC_URL,
+          folderArg: 'classic-json',
+          cwd: tmpWork,
+          baseUrl,
+          json: true,
+          interactive: false,
+          env: {},
+          homeDir: tmpHome,
+        });
+      } finally {
+        console.log = origLog;
+      }
+
+      const parsedJson = JSON.parse(jsonLogs.join('\n')) as {
+        status: { code: number; message: string };
+        contents: { linked: boolean; config_path: string | null; pen: Pen };
+      };
+      assert.equal(parsedJson.status.code, 200);
+      assert.equal(parsedJson.contents.linked, false);
+      assert.equal(parsedJson.contents.config_path, null);
+      assert.equal(parsedJson.contents.pen.editor, 'Classic');
+      await assert.rejects(
+        () => fs.stat(path.join(tmpWork, 'classic-json', PROJECT_CONFIG_FILENAME)),
+        /ENOENT/,
+      );
+    } finally {
+      classicConverted = false;
+      await fs.rm(tmpHome, { recursive: true, force: true });
+      await fs.rm(tmpWork, { recursive: true, force: true });
+    }
+  });
 });
+
 

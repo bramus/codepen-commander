@@ -17,6 +17,7 @@ import {
 import { isDirectoryNonEmpty } from '../sync/fs.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { Pen } from '../types.js';
+import { openBrowser, validateBrowserUrl } from '../utils/browser.js';
 import { fmt, shortId } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
 import {
@@ -88,10 +89,75 @@ export interface ClonePenResult {
   auth: ResolvedAuth;
   /** True when the user chose to fork instead of creating an unlinked local clone. */
   forked: boolean;
-  /** True when `.cdpn.json` was written (linked to a Pen owned by the current user). */
+  /** True when `.cdpn.json` was written (linked to a CodePen 2.0 Pen owned by the current user). */
   linked: boolean;
-  /** Populated when `linked` is true; `null` for unlinked local copies of another user's Pen. */
+  /** Populated when `linked` is true; `null` for unlinked local copies (another user's Pen or unconverted Classic Pen). */
   project: ProjectLocation | null;
+}
+
+type ClassicCloneAction = 'convert' | 'clone-unlinked';
+type ClassicRetryAction = 'retry' | 'clone-unlinked' | 'cancel';
+
+interface ClassicPenResolution {
+  action: 'clone-linked' | 'clone-unlinked' | 'cancel';
+  pen: Pen;
+  effectiveUrl: string;
+  auth: ResolvedAuth;
+  client: CodePenClient;
+  isOwnedByAnotherUser: boolean;
+  penOwner: string | null;
+  currentUsername: string | null;
+}
+
+function validateEditorBrowserUrl(rawUrl: string): string {
+  let candidate = rawUrl.trim();
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol === 'http:') {
+      parsed.protocol = 'https:';
+    }
+    candidate = parsed.toString();
+  } catch {
+    // Let validateBrowserUrl throw a clean validation error
+  }
+
+  const safeUrl = validateBrowserUrl(candidate);
+  const host = new URL(safeUrl).hostname.toLowerCase();
+  const isCodePenHost = host === 'codepen.io' || host.endsWith('.codepen.io');
+  if (!isCodePenHost) {
+    throw new CliError(400, `Refusing to open non-CodePen URL in browser: ${host}`);
+  }
+  return safeUrl;
+}
+
+async function promptClassicRetryChoice(
+  selectImpl: <T extends string>(
+    question: string,
+    options: SelectOption<T>[],
+    defaultIndex?: number,
+  ) => Promise<T>,
+): Promise<ClassicRetryAction> {
+  return selectImpl<ClassicRetryAction>(
+    'How would you like to proceed?',
+    [
+      {
+        value: 'retry',
+        label: 'Check again / paste 2.0 Pen URL',
+        description: 're-fetch after converting or enter the new URL',
+      },
+      {
+        value: 'clone-unlinked',
+        label: 'Just clone without linking',
+        description: `download files without ${PROJECT_CONFIG_FILENAME}`,
+      },
+      {
+        value: 'cancel',
+        label: 'Cancel',
+        description: 'abort clone',
+      },
+    ],
+    0,
+  );
 }
 
 async function resolveCurrentUsername(
@@ -127,6 +193,222 @@ async function resolveCurrentUsername(
   }
 
   return null;
+}
+
+async function handleClassicPenClone(params: {
+  pen: Pen;
+  apiIdentifier: string;
+  effectiveUrl: string;
+  auth: ResolvedAuth;
+  client: CodePenClient;
+  options: ClonePenCommandOptions;
+  selectImpl: <T extends string>(
+    question: string,
+    options: SelectOption<T>[],
+    defaultIndex?: number,
+  ) => Promise<T>;
+  textImpl: (question: string, defaultValue?: string) => Promise<string>;
+}): Promise<ClassicPenResolution> {
+  const { pen, apiIdentifier, effectiveUrl, options, selectImpl, textImpl } = params;
+  let currentAuth = params.auth;
+  let currentClient = params.client;
+  let fallbackPen = pen;
+
+  const makeFallbackResult = (action: 'clone-unlinked' | 'cancel'): ClassicPenResolution => ({
+    action,
+    pen: fallbackPen,
+    effectiveUrl,
+    auth: currentAuth,
+    client: currentClient,
+    isOwnedByAnotherUser: false,
+    penOwner: null,
+    currentUsername: null,
+  });
+
+  console.log(
+    `\n${fmt.yellow('This is a Classic (v1) Pen, which is read-only through CodePen API v2 and cannot be synced.')}`,
+  );
+  console.log(
+    'You can convert it to a CodePen 2.0 Pen in the browser using the dropdown on the Save button.\n',
+  );
+
+  const initialChoice = await selectImpl<ClassicCloneAction>(
+    'How would you like to proceed?',
+    [
+      {
+        value: 'convert',
+        label: 'Open the Pen to convert it first',
+        description: 'open in browser, then clone linked',
+      },
+      {
+        value: 'clone-unlinked',
+        label: 'Just clone without linking',
+        description: `download files without ${PROJECT_CONFIG_FILENAME}`,
+      },
+    ],
+    0,
+  );
+
+  if (initialChoice === 'clone-unlinked') {
+    return makeFallbackResult('clone-unlinked');
+  }
+
+  const editorUrl = validateEditorBrowserUrl(pen.urls.editor || effectiveUrl);
+  const openImpl = options.openBrowser ?? openBrowser;
+  const opened = await openImpl(editorUrl);
+  if (opened) {
+    console.log(`\n${fmt.green('✓')} Opened ${fmt.cyan(editorUrl)} in your browser.`);
+  } else {
+    console.log(
+      `\n${fmt.yellow('!')} Could not launch a browser automatically. Open this URL manually:\n  ${fmt.cyan(editorUrl)}`,
+    );
+  }
+  console.log(
+    fmt.dim('In CodePen, use the dropdown on the Save button to convert this Pen to CodePen 2.0.'),
+  );
+
+  for (;;) {
+    console.log('');
+    const pasted = (
+      await textImpl(
+        'Press Enter once converted to re-fetch & clone (or paste the new 2.0 Pen URL)',
+      )
+    ).trim();
+
+    let targetApiId = apiIdentifier;
+    let pastedOriginalUrl: string | undefined;
+
+    if (pasted) {
+      try {
+        const normalized = normalizePenReference(pasted);
+        targetApiId = normalized.apiIdentifier;
+        pastedOriginalUrl = normalized.originalUrl;
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(`\n${fmt.yellow('!')} ${msg}\n`);
+        const nextAction = await promptClassicRetryChoice(selectImpl);
+        if (nextAction === 'retry') continue;
+        if (nextAction === 'clone-unlinked') return makeFallbackResult('clone-unlinked');
+        console.log('Aborted.');
+        return makeFallbackResult('cancel');
+      }
+
+      if (!options.explicitProfile && currentAuth.source === 'file' && pastedOriginalUrl) {
+        const matchedProfile = findMatchingProfile(currentAuth.availableProfiles, pastedOriginalUrl);
+        if (matchedProfile && matchedProfile !== currentAuth.profile) {
+          currentAuth = await resolveCommandAuth({
+            explicitProfile: matchedProfile,
+            interactive: true,
+            env: options.env,
+            homeDir: options.homeDir,
+          });
+          currentClient = new CodePenClient({ apiKey: currentAuth.apiKey, baseUrl: options.baseUrl });
+          console.log(fmt.dim(`Using profile "${matchedProfile}" (matches Pen owner).`));
+        }
+      }
+    }
+
+    console.log(`Fetching Pen ${fmt.cyan(targetApiId)}…`);
+
+    let refetched: Pen;
+    try {
+      refetched = await currentClient.getPen(targetApiId);
+    } catch (error) {
+      const msg =
+        error instanceof CodePenApiError
+          ? error.formatForUser()
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      console.log(`\n${fmt.yellow('!')} Could not fetch Pen ${targetApiId}: ${msg}\n`);
+      const nextAction = await promptClassicRetryChoice(selectImpl);
+      if (nextAction === 'retry') continue;
+      if (nextAction === 'clone-unlinked') return makeFallbackResult('clone-unlinked');
+      console.log('Aborted.');
+      return makeFallbackResult('cancel');
+    }
+
+    const refetchedOwner =
+      extractCodePenOwnerFromUrl(refetched.urls.editor) ??
+      (pastedOriginalUrl ? extractCodePenOwnerFromUrl(pastedOriginalUrl) : null);
+
+    if (
+      refetchedOwner &&
+      !options.explicitProfile &&
+      currentAuth.source === 'file' &&
+      currentAuth.profile?.toLowerCase() !== refetchedOwner.toLowerCase()
+    ) {
+      const matchedStoredProfile = findMatchingProfile(
+        currentAuth.availableProfiles,
+        refetched.urls.editor,
+      );
+      if (matchedStoredProfile && matchedStoredProfile !== currentAuth.profile) {
+        currentAuth = await resolveCommandAuth({
+          explicitProfile: matchedStoredProfile,
+          interactive: true,
+          env: options.env,
+          homeDir: options.homeDir,
+        });
+        currentClient = new CodePenClient({ apiKey: currentAuth.apiKey, baseUrl: options.baseUrl });
+        console.log(fmt.dim(`Using profile "${matchedStoredProfile}" (matches Pen owner).`));
+      }
+    }
+
+    if (refetched.editor !== 'Classic') {
+      const detectedUsername = refetchedOwner
+        ? await resolveCurrentUsername(currentClient, currentAuth, refetchedOwner)
+        : null;
+      const ownedByOther = Boolean(
+        refetchedOwner &&
+          detectedUsername &&
+          refetchedOwner.toLowerCase() !== detectedUsername.toLowerCase(),
+      );
+
+      const resolvedUrl = pasted
+        ? (pastedOriginalUrl ?? refetched.urls.editor)
+        : (refetched.urls.editor || effectiveUrl);
+
+      if (!ownedByOther) {
+        console.log(
+          `\n${fmt.green('✓')} Pen is now CodePen 2.0 ${fmt.dim(`(${refetched.id})`)} — continuing linked clone.`,
+        );
+      }
+
+      return {
+        action: ownedByOther ? 'clone-unlinked' : 'clone-linked',
+        pen: refetched,
+        effectiveUrl: resolvedUrl,
+        auth: currentAuth,
+        client: currentClient,
+        isOwnedByAnotherUser: ownedByOther,
+        penOwner: refetchedOwner,
+        currentUsername: detectedUsername,
+      };
+    }
+
+    if (!pasted) {
+      fallbackPen = refetched;
+    }
+
+    console.log(
+      `\n${fmt.yellow('!')} ${fmt.bold(refetched.title || 'Untitled')} is still a Classic (v1) Pen on CodePen.`,
+    );
+    console.log(
+      fmt.dim(
+        'Make sure you converted it to 2.0 via the Save button dropdown (or paste the new 2.0 Pen URL if CodePen opened a new one).\n',
+      ),
+    );
+
+    const nextAction = await promptClassicRetryChoice(selectImpl);
+    if (nextAction === 'retry') {
+      continue;
+    }
+    if (nextAction === 'clone-unlinked') {
+      return makeFallbackResult('clone-unlinked');
+    }
+    console.log('Aborted.');
+    return makeFallbackResult('cancel');
+  }
 }
 
 async function ensureCloneTargetReady(
@@ -181,6 +463,10 @@ async function ensureCloneTargetReady(
  * When the Pen's owner does not match the current authenticated account, offers to fork it
  * instead (interactively). If not forked, downloads files locally without writing `.cdpn.json`
  * so the local folder is not linked to an online Pen owned by another user.
+ *
+ * When the Pen is a Classic (v1) Pen (read-only through CodePen API v2), interactively offers
+ * a choice to open it in the browser to convert to CodePen 2.0 first (waiting to re-fetch or
+ * accept the new 2.0 URL for a linked clone) or to clone it locally without writing `.cdpn.json`.
  *
  * Returns `null` if the user cancels interactively.
  */
@@ -299,7 +585,7 @@ export async function clonePenCommand(
   }
 
   // Check whether this Pen belongs to a stored profile (handles Pen IDs / preview URLs without an owner in the input)
-  const penOwner =
+  let penOwner =
     extractCodePenOwnerFromUrl(pen.urls.editor) ??
     (originalUrl ? extractCodePenOwnerFromUrl(originalUrl) : null);
 
@@ -324,10 +610,11 @@ export async function clonePenCommand(
     }
   }
 
-  const currentUsername = penOwner ? await resolveCurrentUsername(client, auth, penOwner) : null;
-  const isOwnedByAnotherUser = Boolean(
+  let currentUsername = penOwner ? await resolveCurrentUsername(client, auth, penOwner) : null;
+  let isOwnedByAnotherUser = Boolean(
     penOwner && currentUsername && penOwner.toLowerCase() !== currentUsername.toLowerCase(),
   );
+  let effectiveUrl = originalUrl ?? pen.urls.editor;
 
   if (isOwnedByAnotherUser && penOwner && currentUsername) {
     if (!jsonMode) {
@@ -381,6 +668,29 @@ export async function clonePenCommand(
     }
   }
 
+  if (pen.editor === 'Classic' && !isOwnedByAnotherUser && interactive) {
+    const classicResolution = await handleClassicPenClone({
+      pen,
+      apiIdentifier,
+      effectiveUrl,
+      auth,
+      client,
+      options,
+      selectImpl,
+      textImpl,
+    });
+    if (classicResolution.action === 'cancel') {
+      return null;
+    }
+    pen = classicResolution.pen;
+    effectiveUrl = classicResolution.effectiveUrl;
+    auth = classicResolution.auth;
+    client = classicResolution.client;
+    isOwnedByAnotherUser = classicResolution.isOwnedByAnotherUser;
+    penOwner = classicResolution.penOwner;
+    currentUsername = classicResolution.currentUsername;
+  }
+
   if (!targetDir) {
     const defaultFolder = suggestFolderName(pen);
     if (interactive) {
@@ -409,7 +719,9 @@ export async function clonePenCommand(
     pruneRemoved: false,
   });
 
-  if (isOwnedByAnotherUser) {
+  const isUnlinked = isOwnedByAnotherUser || pen.editor === 'Classic';
+
+  if (isUnlinked) {
     if (jsonMode) {
       printJsonResponse(
         200,
@@ -430,14 +742,24 @@ export async function clonePenCommand(
       console.log(
         `\n${fmt.green('✓')} Cloned ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} into ${fmt.cyan(targetFolderDisplay)} ${fmt.dim('(unlinked local copy)')}`,
       );
-      console.log(`  Source:  ${fmt.dim(originalUrl ?? pen.urls.editor)}`);
+      console.log(`  Source:  ${fmt.dim(effectiveUrl)}`);
       console.log(`  Files:   ${result.writtenPaths.length} downloaded`);
-      console.log(
-        fmt.yellow(
-          `\nNote: No ${PROJECT_CONFIG_FILENAME} was created because this Pen belongs to ${penOwner}, not ${currentUsername}.\n` +
-            `Run \`cdpn push\` inside ${targetFolderDisplay} later to publish it as a new Pen under your account, or \`cdpn fork ${originalUrl ?? pen.urls.editor}\` to fork it on CodePen.`,
-        ),
-      );
+
+      if (isOwnedByAnotherUser) {
+        console.log(
+          fmt.yellow(
+            `\nNote: No ${PROJECT_CONFIG_FILENAME} was created because this Pen belongs to ${penOwner}, not ${currentUsername}.\n` +
+              `Run \`cdpn push\` inside ${targetFolderDisplay} later to publish it as a new Pen under your account, or \`cdpn fork ${effectiveUrl}\` to fork it on CodePen.`,
+          ),
+        );
+      } else {
+        console.log(
+          fmt.yellow(
+            `\nNote: No ${PROJECT_CONFIG_FILENAME} was created because this is a Classic (v1) Pen (read-only through CodePen API v2).\n` +
+              `Run \`cdpn push\` inside ${targetFolderDisplay} later to publish it as a new CodePen 2.0 Pen, or convert it to 2.0 on CodePen via the Save button dropdown and re-clone.`,
+          ),
+        );
+      }
     }
 
     return {
@@ -453,7 +775,7 @@ export async function clonePenCommand(
 
   const syncedFiles = buildSyncedFileMap(remoteFiles, result.localSha256ByPath);
   const config = {
-    url: originalUrl ?? pen.urls.editor,
+    url: effectiveUrl,
     pen_id: pen.id,
     ...(auth.profile ? { profile: auth.profile } : {}),
     last_synced_version_id: pen.saved_version?.id ?? null,
@@ -490,14 +812,6 @@ export async function clonePenCommand(
       console.log(`  Version: ${fmt.dim(shortId(pen.saved_version.id))}`);
     }
     console.log(`  Config:  ${fmt.dim(path.join(targetFolderDisplay, PROJECT_CONFIG_FILENAME))}`);
-
-    if (pen.editor === 'Classic') {
-      console.log(
-        fmt.yellow(
-          '\nNote: This is a Classic Pen (read-only through CodePen API v2). You can clone and pull files, but pushing and deploying require a CodePen 2.0 Pen.',
-        ),
-      );
-    }
   }
 
   return {
@@ -518,7 +832,9 @@ export async function clonePenCommand(
 export function registerCloneCommand(program: Command): void {
   program
     .command('clone <url> [folder]')
-    .description('Clone a CodePen Pen into a local folder (offers to fork if owned by another user)')
+    .description(
+      'Clone a CodePen Pen into a local folder (offers to convert Classic Pens or fork unowned Pens)',
+    )
     .option('-f, --force', 'Overwrite files if the target directory already exists and is not empty')
     .option('--json', 'Output clone result as JSON')
     .action(
