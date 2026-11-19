@@ -213,7 +213,7 @@ export async function createPenFromDirectory(
   if (scanned.size === 0) {
     throw new Error(
       `No ${PROJECT_CONFIG_FILENAME} found and no syncable files in ${targetDir}.\n` +
-        'Run `cdpn pull <url>` to download an existing Pen or `cdpn new` to scaffold a brand-new Pen.',
+        'Run `cdpn clone <url>` to clone an existing Pen or `cdpn new` to scaffold a brand-new Pen.',
     );
   }
 

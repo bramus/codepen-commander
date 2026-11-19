@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { isCodePenApiError } from './api/errors.js';
 import { registerAuthCommands } from './commands/auth.js';
+import { registerCloneCommand } from './commands/clone.js';
 import { registerDeployCommands } from './commands/deploy.js';
 import { registerDomainsCommand } from './commands/domains.js';
 import { registerForkCommand } from './commands/fork.js';
@@ -50,8 +51,9 @@ export function createProgram(): Command {
     .option('--profile <name>', 'Use a specific API key profile from ~/.cdpn');
 
   registerAuthCommands(program);
-  registerPullCommand(program);
+  registerCloneCommand(program);
   registerForkCommand(program);
+  registerPullCommand(program);
   registerStatusCommand(program);
   registerPushCommand(program);
   registerDeployCommands(program);

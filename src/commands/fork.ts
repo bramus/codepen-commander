@@ -46,6 +46,12 @@ export interface ForkPenCommandOptions {
   password?: string;
   /** Wait for initial build to settle (defaults to true). */
   wait?: boolean;
+  /** Pre-resolved auth (avoids double-prompting when invoked from `cdpn clone`). */
+  resolvedAuth?: ResolvedAuth;
+  /** Pre-fetched source Pen (avoids duplicate `GET /v2/pens/{id}` when invoked from `cdpn clone`). */
+  sourcePen?: Pen;
+  /** Allow writing into an explicitly provided non-empty folder (used when `cdpn clone --force` delegates to fork). */
+  allowOverwrite?: boolean;
   /** Injectable API base URL (for testing). */
   baseUrl?: string;
   /** Injectable interactivity flag (for testing). */
@@ -71,6 +77,7 @@ export interface ForkPenResult {
   pen: Pen;
   versionId: string | null;
   build: Build | null;
+  writtenPaths: string[];
   auth: ResolvedAuth;
   project: ProjectLocation;
 }
@@ -145,25 +152,34 @@ export async function forkPenCommand(options: ForkPenCommandOptions): Promise<Fo
   let folderDisplay = options.folderArg?.trim() || '';
   if (folderDisplay) {
     targetDir = path.resolve(cwd, folderDisplay);
-    await assertEmptyTargetDirectory(targetDir, folderDisplay, {
-      commandName: 'fork',
-      nonEmptyHint: FORK_NON_EMPTY_HINT,
-    });
+    if (!options.allowOverwrite) {
+      await assertEmptyTargetDirectory(targetDir, folderDisplay, {
+        commandName: 'fork',
+        nonEmptyHint: FORK_NON_EMPTY_HINT,
+      });
+    }
   }
 
-  const auth = await resolveCommandAuth({
-    explicitProfile: options.explicitProfile,
-    urlHint: originalUrl ?? options.urlArg,
-    promptMessage: 'Which CodePen profile should be used to fork this Pen?',
-    interactive,
-    env: options.env,
-    homeDir: options.homeDir,
-    selectProfile: selectImpl,
-  });
+  const auth =
+    options.resolvedAuth ??
+    (await resolveCommandAuth({
+      explicitProfile: options.explicitProfile,
+      urlHint: originalUrl ?? options.urlArg,
+      promptMessage: 'Which CodePen profile should be used to fork this Pen?',
+      interactive,
+      env: options.env,
+      homeDir: options.homeDir,
+      selectProfile: selectImpl,
+    }));
   const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
 
-  console.log(`Fetching Pen ${fmt.cyan(apiIdentifier)}…`);
-  const sourcePen = await client.getPen(apiIdentifier);
+  let sourcePen: Pen;
+  if (options.sourcePen) {
+    sourcePen = options.sourcePen;
+  } else {
+    console.log(`Fetching Pen ${fmt.cyan(apiIdentifier)}…`);
+    sourcePen = await client.getPen(apiIdentifier);
+  }
 
   // CodePen API requires a password when forking a Protected Pen (unless access is overridden)
   const effectiveAccess = explicitAccess ?? sourcePen.access;
@@ -271,6 +287,7 @@ export async function forkPenCommand(options: ForkPenCommandOptions): Promise<Fo
     pen: forked,
     versionId: finalVersionId,
     build: finalBuild,
+    writtenPaths: materialized.writtenPaths,
     auth,
     project: {
       rootDir: targetDir,

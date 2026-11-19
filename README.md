@@ -2,7 +2,7 @@
 
 Sync local folders with [CodePen 2.0](https://codepen.io) Pens using the [CodePen API v2](https://blog.codepen.io/docs/api/api-v2/).
 
-- Pull Pens (text & binary files) to a local folder
+- Clone Pens (text & binary files) to a local folder and pull remote updates
 - Track diffs between local files and the online saved head
 - Push additions, edits, and deletions as a single version — waiting for builds and syncing compiler patches back locally
 - Deploy, undeploy, manage custom domains, browse versions & roll back, inspect/edit metadata & settings
@@ -57,8 +57,8 @@ cdpn auth list
 cdpn auth login bramus
 cdpn auth login username
 
-# 2. Pull an existing Pen into a local folder (prompts for profile if multiple exist)
-cdpn pull https://codepen.io/username/pen/abcde my-pen
+# 2. Clone an existing Pen into a local folder (prompts for profile if multiple exist)
+cdpn clone https://codepen.io/username/pen/abcde my-pen
 cd my-pen
 
 # 3. Edit files locally, then check differences (automatically uses "username")
@@ -121,7 +121,8 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn auth logout [profile] [--all]` | Remove a specific profile or delete `~/.cdpn` completely |
 | `cdpn new [folder] [--template <id\|url\|title>] [--as-template]` | Scaffold a brand-new 2.0 Pen from a CodePen Template (or CodePen default starter) into a new or empty folder |
 | `cdpn fork <url> [folder] [--title ...] [--access ...]` | Fork an existing CodePen Pen and download it into a local folder (prompts/generates folder when omitted) |
-| `cdpn pull [url] [folder] [--force]` | Pull a Pen into a new folder (prompts if omitted), or update the current synced folder |
+| `cdpn clone <url> [folder] [--force]` | Clone an existing CodePen Pen into a local folder (offers to fork if owned by another user; creates an unlinked local copy if declined) |
+| `cdpn pull [--force]` | Pull latest remote changes into an existing cloned folder (requires `.cdpn.json`) |
 | `cdpn status [--json]` | Show active profile, file diffs (added/modified/deleted), remote head, build & deployment status |
 | `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait]` | Push local changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (checks `index.html`, asks account, title, and visibility) |
 | `cdpn deploy [--no-push] [--version <id>] [--force]` | Push local changes (creating a Pen first if unlinked) and deploy to CodePen Hosting |

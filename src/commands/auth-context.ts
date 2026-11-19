@@ -174,13 +174,19 @@ export async function resolveCommandAuth(
         : 'Which CodePen profile should be used?');
 
     chosenProfile = await selectImpl(question, selectOptions, defaultIndex);
-  } else if (store.defaultProfile && Object.hasOwn(store.profiles, store.defaultProfile)) {
-    chosenProfile = store.defaultProfile;
   } else {
-    throw new Error(
-      `Multiple profiles exist in ~/${API_KEY_FILENAME} (${availableProfiles.join(', ')}).\n` +
-        'Pass `--profile <name>` or set a default profile with `cdpn auth default <name>`.',
-    );
+    const effectiveUrlHint = options.urlHint ?? options.project?.config.url;
+    const matchedProfile = findMatchingProfile(availableProfiles, effectiveUrlHint);
+    if (matchedProfile) {
+      chosenProfile = matchedProfile;
+    } else if (store.defaultProfile && Object.hasOwn(store.profiles, store.defaultProfile)) {
+      chosenProfile = store.defaultProfile;
+    } else {
+      throw new Error(
+        `Multiple profiles exist in ~/${API_KEY_FILENAME} (${availableProfiles.join(', ')}).\n` +
+          'Pass `--profile <name>` or set a default profile with `cdpn auth default <name>`.',
+      );
+    }
   }
 
   // Persist chosen profile into an existing .cdpn.json that didn't have one yet

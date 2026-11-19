@@ -47,8 +47,9 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     assert.ok(stdout.includes('--profile'), 'Expected CLI help to list global --profile option');
     for (const cmd of [
       'auth',
-      'pull',
+      'clone',
       'fork',
+      'pull',
       'status',
       'push',
       'deploy',
@@ -76,6 +77,23 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     assert.equal(newHelp.includes('--scaffold'), false);
     assert.equal(newHelp.includes('--files'), false);
     assert.equal(newHelp.includes('--from'), false);
+
+    // `cdpn clone` without mandatory <url> must fail
+    await assert.rejects(
+      () => execFileAsync(process.execPath, [path.join(distDir, 'cli.js'), 'clone']),
+      /missing required argument 'url'/i,
+    );
+
+    // `cdpn pull` takes no positional arguments (rejects passing a URL)
+    await assert.rejects(
+      () =>
+        execFileAsync(process.execPath, [
+          path.join(distDir, 'cli.js'),
+          'pull',
+          'https://codepen.io/username/pen/abcde',
+        ]),
+      /too many arguments/i,
+    );
 
     // `cdpn fork` without mandatory <url> must fail
     await assert.rejects(

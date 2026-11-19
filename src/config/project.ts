@@ -42,7 +42,7 @@ export async function requireProject(startDir: string = process.cwd()): Promise<
   const project = await findProject(startDir);
   if (!project) {
     throw new Error(
-      `No ${PROJECT_CONFIG_FILENAME} found in this directory or any parent directory.\nRun \`cdpn pull <url>\` to download a Pen or \`cdpn new\` to create one.`,
+      `No ${PROJECT_CONFIG_FILENAME} found in this directory or any parent directory.\nRun \`cdpn clone <url>\` to clone a Pen or \`cdpn new\` to create one.`,
     );
   }
   return project;

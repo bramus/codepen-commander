@@ -39,7 +39,7 @@ export function registerDeployCommands(program: Command): void {
         if (options.push === false || options.version) {
           throw new Error(
             `No ${PROJECT_CONFIG_FILENAME} found in this directory or any parent directory.\n` +
-              'Run `cdpn pull <url>` to link a Pen or run `cdpn deploy` without --no-push/--version to create one first.',
+              'Run `cdpn clone <url>` to clone a Pen or run `cdpn deploy` without --no-push/--version to create one first.',
           );
         }
 
