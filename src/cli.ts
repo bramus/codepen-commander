@@ -44,7 +44,8 @@ export function createProgram(): Command {
   program
     .name('cdpn')
     .description('Sync local folders with CodePen 2.0 Pens via the CodePen API v2')
-    .version(readPackageVersion(), '-v, --version');
+    .version(readPackageVersion(), '-v, --version')
+    .option('--profile <name>', 'Use a specific API key profile from ~/.cdpn');
 
   registerAuthCommands(program);
   registerPullCommand(program);

@@ -1,12 +1,12 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { requireAuth } from '../config/auth.js';
 import {
   buildSyncedFileMap,
   requireProject,
   writeProjectConfig,
   type ProjectLocation,
 } from '../config/project.js';
+import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 import { computeSyncDiff, hasDiffChanges } from '../sync/diff.js';
 import { scanLocalFiles } from '../sync/fs.js';
 import { applyCompilerPatchesToDisk } from '../sync/materialize.js';
@@ -175,6 +175,7 @@ export async function executePush(
   await writeProjectConfig(project.rootDir, {
     url: project.config.url || updatedPen.urls.editor,
     pen_id: updatedPen.id,
+    ...(project.config.profile ? { profile: project.config.profile } : {}),
     last_synced_version_id: finalVersionId,
     editor: updatedPen.editor,
     files: buildSyncedFileMap(finalRemoteFiles, localShaByPath),
@@ -203,13 +204,16 @@ export function registerPushCommand(program: Command): void {
     .option('-f, --force', 'Overwrite remote head even if it moved since last sync')
     .option('--dry-run', 'Build proposed changes without saving them to the Pen head')
     .option('--no-wait', 'Return as soon as files are saved without waiting for the build')
-    .action(async (options: PushOptions) => {
+    .action(async (options: PushOptions, command: Command) => {
       if (options.label && options.label.length > 80) {
         throw new Error('Version label must be at most 80 characters.');
       }
 
-      const auth = await requireAuth();
       const project = await requireProject();
+      const auth = await resolveCommandAuth({
+        explicitProfile: getGlobalProfileOption(command),
+        project,
+      });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
       await executePush(client, project, options);

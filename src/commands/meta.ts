@@ -1,6 +1,5 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { requireAuth } from '../config/auth.js';
 import { requireProject } from '../config/project.js';
 import type {
   IndentWith,
@@ -11,6 +10,7 @@ import type {
   SettingsUpdateRequest,
 } from '../types.js';
 import { fmt, formatDate, shortId } from '../utils/format.js';
+import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 const VALID_ACCESS = new Set(['public', 'private', 'protected', 'collaborators']);
 
@@ -21,8 +21,11 @@ function parseBooleanOption(raw: string, flagName: string): boolean {
   throw new Error(`Invalid boolean value "${raw}" for ${flagName}. Use true or false.`);
 }
 
-function renderPenInfo(pen: Pen): void {
+function renderPenInfo(pen: Pen, profile?: string | null): void {
   console.log(`${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}`);
+  if (profile) {
+    console.log(`Profile:     ${fmt.cyan(profile)}`);
+  }
   if (pen.description) {
     console.log(`Description: ${pen.description}`);
   }
@@ -65,17 +68,25 @@ export function registerMetaCommands(program: Command): void {
     .option('--template <bool>', 'Set template flag (true/false)')
     .option('--json', 'Output Pen metadata as JSON')
     .action(
-      async (options: {
-        title?: string;
-        description?: string;
-        tags?: string;
-        access?: string;
-        password?: string;
-        template?: string;
-        json?: boolean;
-      }) => {
-        const auth = await requireAuth();
+      async (
+        options: {
+          title?: string;
+          description?: string;
+          tags?: string;
+          access?: string;
+          password?: string;
+          template?: string;
+          json?: boolean;
+        },
+        command: Command,
+      ) => {
         const project = await requireProject();
+        const auth = await resolveCommandAuth({
+          explicitProfile: getGlobalProfileOption(command),
+          project,
+          interactive: !options.json,
+          persistProfileToProject: !options.json,
+        });
         const client = new CodePenClient({ apiKey: auth.apiKey });
 
         const patch: PenUpdateRequest = {};
@@ -119,7 +130,7 @@ export function registerMetaCommands(program: Command): void {
         if (hasUpdates) {
           console.log(`${fmt.green('✓')} Updated Pen metadata.\n`);
         }
-        renderPenInfo(pen);
+        renderPenInfo(pen, auth.profile);
       },
     );
 
@@ -133,16 +144,24 @@ export function registerMetaCommands(program: Command): void {
     .option('--tab-size <n>', 'Tab size (integer between 1 and 6)')
     .option('--json', 'Output settings as JSON')
     .action(
-      async (options: {
-        autoDeploy?: string;
-        autoRun?: string;
-        autoSave?: string;
-        indentWith?: string;
-        tabSize?: string;
-        json?: boolean;
-      }) => {
-        const auth = await requireAuth();
+      async (
+        options: {
+          autoDeploy?: string;
+          autoRun?: string;
+          autoSave?: string;
+          indentWith?: string;
+          tabSize?: string;
+          json?: boolean;
+        },
+        command: Command,
+      ) => {
         const project = await requireProject();
+        const auth = await resolveCommandAuth({
+          explicitProfile: getGlobalProfileOption(command),
+          project,
+          interactive: !options.json,
+          persistProfileToProject: !options.json,
+        });
         const client = new CodePenClient({ apiKey: auth.apiKey });
 
         const patch: SettingsUpdateRequest = {};

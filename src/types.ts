@@ -278,6 +278,7 @@ export interface SyncedFileEntry {
 export interface CdpnConfig {
   url: string;
   pen_id: string;
+  profile?: string;
   last_synced_version_id: string | null;
   editor?: PenEditor;
   files?: Record<string, SyncedFileEntry>;

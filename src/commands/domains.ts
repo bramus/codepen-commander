@@ -1,10 +1,10 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { requireAuth } from '../config/auth.js';
 import { requireProject } from '../config/project.js';
 import type { PenDomain } from '../types.js';
 import { fmt, formatTable } from '../utils/format.js';
 import { isInteractive, promptConfirm } from '../utils/prompts.js';
+import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 function renderDomains(domains: PenDomain[]): void {
   if (domains.length === 0) {
@@ -43,9 +43,14 @@ export function registerDomainsCommand(program: Command): void {
     .command('domains')
     .description('Manage custom domains for the Pen’s deployment')
     .option('--json', 'Output domains as JSON')
-    .action(async (options: { json?: boolean }) => {
-      const auth = await requireAuth();
+    .action(async (options: { json?: boolean }, command: Command) => {
       const project = await requireProject();
+      const auth = await resolveCommandAuth({
+        explicitProfile: getGlobalProfileOption(command),
+        project,
+        interactive: !options.json,
+        persistProfileToProject: !options.json,
+      });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
       const domains = await client.listDomains(project.config.pen_id);
@@ -61,9 +66,14 @@ export function registerDomainsCommand(program: Command): void {
     .alias('ls')
     .description('List custom domains and required DNS records')
     .option('--json', 'Output domains as JSON')
-    .action(async (options: { json?: boolean }) => {
-      const auth = await requireAuth();
+    .action(async (options: { json?: boolean }, command: Command) => {
       const project = await requireProject();
+      const auth = await resolveCommandAuth({
+        explicitProfile: getGlobalProfileOption(command),
+        project,
+        interactive: !options.json,
+        persistProfileToProject: !options.json,
+      });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
       const domains = await client.listDomains(project.config.pen_id);
@@ -78,14 +88,19 @@ export function registerDomainsCommand(program: Command): void {
     .command('add <host>')
     .description('Attach a custom domain (e.g. www.example.com) to this Pen’s deployment')
     .option('--json', 'Output updated domains as JSON')
-    .action(async (host: string, options: { json?: boolean }) => {
+    .action(async (host: string, options: { json?: boolean }, command: Command) => {
       const cleanHost = host.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
       if (!cleanHost || !/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(cleanHost)) {
         throw new Error(`Invalid domain host: "${host}". Provide a hostname like www.example.com.`);
       }
 
-      const auth = await requireAuth();
       const project = await requireProject();
+      const auth = await resolveCommandAuth({
+        explicitProfile: getGlobalProfileOption(command),
+        project,
+        interactive: !options.json,
+        persistProfileToProject: !options.json,
+      });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
       const domains = await client.addDomain(project.config.pen_id, cleanHost);
@@ -104,7 +119,7 @@ export function registerDomainsCommand(program: Command): void {
     .description('Remove a custom domain from this Pen’s deployment')
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Output remaining domains as JSON')
-    .action(async (host: string, options: { yes?: boolean; json?: boolean }) => {
+    .action(async (host: string, options: { yes?: boolean; json?: boolean }, command: Command) => {
       const cleanHost = host.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
 
       if (!options.yes) {
@@ -118,8 +133,13 @@ export function registerDomainsCommand(program: Command): void {
         }
       }
 
-      const auth = await requireAuth();
       const project = await requireProject();
+      const auth = await resolveCommandAuth({
+        explicitProfile: getGlobalProfileOption(command),
+        project,
+        interactive: !options.json,
+        persistProfileToProject: !options.json,
+      });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
       const remaining = await client.removeDomain(project.config.pen_id, cleanHost);

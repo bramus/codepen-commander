@@ -83,6 +83,11 @@ export async function readProjectConfig(rootDir: string): Promise<CdpnConfig> {
     throw new Error(`Invalid ${PROJECT_CONFIG_FILENAME}: missing required "url" string.`);
   }
 
+  const profile =
+    typeof record.profile === 'string' && record.profile.trim()
+      ? record.profile.trim()
+      : undefined;
+
   const lastSynced =
     record.last_synced_version_id === null || typeof record.last_synced_version_id === 'string'
       ? record.last_synced_version_id
@@ -116,6 +121,7 @@ export async function readProjectConfig(rootDir: string): Promise<CdpnConfig> {
   return {
     url: record.url.trim(),
     pen_id: record.pen_id.trim(),
+    ...(profile ? { profile } : {}),
     last_synced_version_id: lastSynced,
     ...(editor ? { editor } : {}),
     ...(files ? { files } : {}),
@@ -124,9 +130,11 @@ export async function readProjectConfig(rootDir: string): Promise<CdpnConfig> {
 
 export async function writeProjectConfig(rootDir: string, config: CdpnConfig): Promise<string> {
   const configPath = path.join(path.resolve(rootDir), PROJECT_CONFIG_FILENAME);
+  const trimmedProfile = config.profile?.trim();
   const ordered: CdpnConfig = {
     url: config.url,
     pen_id: config.pen_id,
+    ...(trimmedProfile ? { profile: trimmedProfile } : {}),
     last_synced_version_id: config.last_synced_version_id,
     ...(config.editor ? { editor: config.editor } : {}),
     ...(config.files ? { files: sortRecordKeys(config.files) } : {}),
@@ -222,4 +230,64 @@ export function suggestFolderName(pen: Pick<Pen, 'id' | 'title'>): string {
     }
   }
   return pen.id.replace(/[^A-Za-z0-9_-]/g, '-');
+}
+
+const RESERVED_CODEPEN_SEGMENTS = new Set([
+  'pen',
+  'editor',
+  'full',
+  'details',
+  'debug',
+  'live',
+  'embed',
+  'settings',
+  'trending',
+  'following',
+  'your-work',
+  'collections',
+  'project',
+  'projects',
+  'api',
+]);
+
+/**
+ * Extracts the CodePen username or team slug from a `codepen.io` URL, if present.
+ * Supports both personal (`https://codepen.io/bramus/pen/...`) and team
+ * (`https://codepen.io/team/username/pen/...` or `https://codepen.io/username/pen/...`) URLs.
+ */
+export function extractCodePenOwnerFromUrl(rawUrl: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
+    return null;
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (host !== 'codepen.io' && host !== 'www.codepen.io') {
+    return null;
+  }
+
+  const segments = parsed.pathname.split('/').filter(Boolean);
+  if (segments.length < 2) {
+    return null;
+  }
+
+  if (segments[0]?.toLowerCase() === 'team' && segments.length >= 3) {
+    const teamSlug = segments[1]?.trim();
+    if (teamSlug && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(teamSlug)) {
+      return teamSlug;
+    }
+    return null;
+  }
+
+  const first = segments[0]?.trim();
+  if (!first || RESERVED_CODEPEN_SEGMENTS.has(first.toLowerCase())) {
+    return null;
+  }
+
+  if (/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(first)) {
+    return first;
+  }
+  return null;
 }

@@ -15,36 +15,53 @@ npm install -g cdpn
 
 Requires Node.js 20 or newer.
 
-## Authentication
+## Authentication & Profiles
 
-Generate a personal (`cp_user_…`) or team (`cp_team_…`) API key at [codepen.io/settings/api](https://codepen.io/settings/api), or run:
+Generate personal (`cp_user_…`) and/or team (`cp_team_…`) API keys at [codepen.io/settings/api](https://codepen.io/settings/api), or run:
 
 ```bash
-cdpn auth login
+cdpn auth login              # Add a profile (e.g. bramus)
+cdpn auth login username     # Add another profile (e.g. a team account)
 ```
 
-`cdpn` resolves your API key in this order:
+`cdpn` stores named profiles in **`~/.cdpn`** (with strict `0600` owner-only permissions):
 
-1. The `CODEPEN_API_KEY` environment variable
-2. `~/.codepen` (saved with `0600` owner-only permissions when configured via `cdpn auth login`)
+```json
+{
+  "default": "bramus",
+  "profiles": {
+    "bramus": "cp_user_...",
+    "username": "cp_team_..."
+  }
+}
+```
 
-Check your current authentication status at any time:
+When running commands, `cdpn` resolves credentials in this order:
+
+1. An explicit `--profile <name>` flag (e.g. `cdpn list --profile username`)
+2. The `CODEPEN_API_KEY` environment variable (useful in CI)
+3. The `"profile"` stored in the Pen folder’s `.cdpn.json`
+4. Your sole profile in `~/.cdpn`, or—when multiple profiles exist and the Pen isn’t associated with one yet—an interactive prompt (automatically pre-selecting a matching username/team from the Pen URL)
+
+Check your authentication status or list profiles at any time:
 
 ```bash
 cdpn auth status
+cdpn auth list
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Authenticate
-cdpn auth login
+# 1. Authenticate (add one or more profiles)
+cdpn auth login bramus
+cdpn auth login username
 
-# 2. Pull an existing Pen into a local folder
+# 2. Pull an existing Pen into a local folder (prompts for profile if multiple exist)
 cdpn pull https://codepen.io/username/pen/abcde my-pen
 cd my-pen
 
-# 3. Edit files locally, then check differences
+# 3. Edit files locally, then check differences (automatically uses "username")
 cdpn status
 
 # 4. Push local changes (additions, edits, and deletions) to CodePen
@@ -62,6 +79,7 @@ Every synced Pen folder contains a `.cdpn.json` file at its root:
 {
   "url": "https://codepen.io/username/pen/abcde",
   "pen_id": "01a08738-73f0-7847-b6a8-5789d289c158",
+  "profile": "username",
   "last_synced_version_id": "01a08738-73f0-7848-b8bf-e8e7e91b1ae2"
 }
 ```
@@ -73,13 +91,17 @@ You can also add an optional `.cdpnignore` file in a Pen folder to exclude extra
 
 ## Commands
 
+All commands accept the global `--profile <name>` flag to override the active profile.
+
 | Command | Description |
 | --- | --- |
-| `cdpn auth status [--offline]` | Show where the API key is loaded from and verify it against CodePen API v2 |
-| `cdpn auth login [--no-open]` | Open CodePen API settings, verify key, and save to `~/.codepen` or print shell export lines |
-| `cdpn auth logout` | Remove `~/.codepen` |
+| `cdpn auth status [--offline]` | Show loaded API keys/profiles (`CODEPEN_API_KEY` & `~/.cdpn`) and verify them |
+| `cdpn auth login [profile] [--default] [--no-open]` | Open CodePen API settings, verify key, and save a profile to `~/.cdpn` or print shell export lines |
+| `cdpn auth list` | List stored profiles in `~/.cdpn` (alias: `cdpn auth ls`) |
+| `cdpn auth default [profile]` | Set the default profile in `~/.cdpn` |
+| `cdpn auth logout [profile] [--all]` | Remove a specific profile or delete `~/.cdpn` completely |
 | `cdpn pull [url] [folder] [--force]` | Pull a Pen into a new folder (prompts if omitted), or update the current synced folder |
-| `cdpn status [--json]` | Show file diffs (added/modified/deleted), remote head status, build & deployment status |
+| `cdpn status [--json]` | Show active profile, file diffs (added/modified/deleted), remote head, build & deployment status |
 | `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait]` | Push local changes (text & binary + deletions), wait for build, and sync compiler patches back |
 | `cdpn deploy [--no-push] [--version <id>] [--force]` | Push local changes and deploy to CodePen Hosting |
 | `cdpn undeploy [--yes]` | Take down the live deployment (Pen & versions remain intact) |

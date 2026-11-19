@@ -174,10 +174,20 @@ export class CodePenClient {
 
   /**
    * Verifies that the configured API key is accepted by CodePen API v2.
-   * CodePen API v2 does not expose a `/me` endpoint; listing 1 Pen validates auth.
+   * CodePen API v2 does not expose a `/me` endpoint; listing 1 Pen validates auth
+   * and optionally lets callers inspect a sample Pen URL to suggest a profile name.
    */
-  public async verifyAuth(): Promise<void> {
-    await this.requestRaw('GET', '/v2/pens', { query: { per_page: 1 } });
+  public async verifyAuth(): Promise<Pen | null> {
+    const response = await this.requestRaw('GET', '/v2/pens', { query: { per_page: 1 } });
+    try {
+      const items = (await response.json()) as unknown;
+      if (Array.isArray(items) && items.length > 0 && items[0] && typeof items[0] === 'object') {
+        return items[0] as Pen;
+      }
+    } catch {
+      // Ignore empty or non-JSON bodies; 2xx status already verified the key
+    }
+    return null;
   }
 
   public async listPens(params: ListPensParams = {}): Promise<PaginatedResult<Pen>> {

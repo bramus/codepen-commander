@@ -64,11 +64,16 @@ export async function promptSelect<T extends string>(
       }
 
       const num = Number.parseInt(answer, 10);
-      if (!Number.isNaN(num) && num >= 1 && num <= options.length) {
+      if (!Number.isNaN(num) && num >= 1 && num <= options.length && String(num) === answer) {
         return options[num - 1]!.value;
       }
 
-      console.log(fmt.yellow(`Please enter a number between 1 and ${options.length}.`));
+      const byValue = options.find((opt) => opt.value.toLowerCase() === answer.toLowerCase());
+      if (byValue) {
+        return byValue.value;
+      }
+
+      console.log(fmt.yellow(`Please enter a number between 1 and ${options.length} (or an option name).`));
     }
   } finally {
     rl.close();

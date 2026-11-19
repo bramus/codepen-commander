@@ -1,9 +1,9 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { requireAuth } from '../config/auth.js';
 import { requireProject } from '../config/project.js';
 import { openBrowser } from '../utils/browser.js';
 import { fmt } from '../utils/format.js';
+import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 export interface OpenOptions {
   preview?: boolean;
@@ -16,13 +16,16 @@ export function registerOpenCommand(program: Command): void {
     .description('Open the Pen in your browser (editor by default, or --preview / --live)')
     .option('-p, --preview', 'Open the saved head preview URL')
     .option('-l, --live', 'Open the live deployed URL')
-    .action(async (options: OpenOptions) => {
+    .action(async (options: OpenOptions, command: Command) => {
       if (options.preview && options.live) {
         throw new Error('Specify at most one of --preview or --live.');
       }
 
-      const auth = await requireAuth();
       const project = await requireProject();
+      const auth = await resolveCommandAuth({
+        explicitProfile: getGlobalProfileOption(command),
+        project,
+      });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
       const pen = await client.getPen(project.config.pen_id);

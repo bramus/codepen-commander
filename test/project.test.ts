@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import {
+  extractCodePenOwnerFromUrl,
   findProject,
   normalizePenReference,
   readProjectConfig,
@@ -12,15 +13,16 @@ import {
 } from '../src/config/project.js';
 
 describe('project config (.cdpn.json)', () => {
-  it('writes, reads, and walks upward to find .cdpn.json', async () => {
+  it('writes, reads (including profile), and walks upward to find .cdpn.json', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-project-test-'));
     try {
       const nestedDir = path.join(tmpDir, 'src', 'components');
       await fs.mkdir(nestedDir, { recursive: true });
 
       await writeProjectConfig(tmpDir, {
-        url: 'https://codepen.io/bramus/pen/abcde',
+        url: 'https://codepen.io/username/pen/abcde',
         pen_id: '01a08738-73f0-7847-b6a8-5789d289c158',
+        profile: 'username',
         last_synced_version_id: '01a08738-73f0-7848-b8bf-e8e7e91b1ae2',
         editor: 'V2',
         files: {
@@ -40,8 +42,9 @@ describe('project config (.cdpn.json)', () => {
       });
 
       const readBack = await readProjectConfig(tmpDir);
-      assert.equal(readBack.url, 'https://codepen.io/bramus/pen/abcde');
+      assert.equal(readBack.url, 'https://codepen.io/username/pen/abcde');
       assert.equal(readBack.pen_id, '01a08738-73f0-7847-b6a8-5789d289c158');
+      assert.equal(readBack.profile, 'username');
       assert.equal(readBack.last_synced_version_id, '01a08738-73f0-7848-b8bf-e8e7e91b1ae2');
       assert.deepEqual(Object.keys(readBack.files ?? {}), ['/index.html', '/style.css']);
 
@@ -49,6 +52,7 @@ describe('project config (.cdpn.json)', () => {
       assert.ok(discovered);
       assert.equal(discovered.rootDir, path.resolve(tmpDir));
       assert.equal(discovered.config.pen_id, '01a08738-73f0-7847-b6a8-5789d289c158');
+      assert.equal(discovered.config.profile, 'username');
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
@@ -68,6 +72,15 @@ describe('project config (.cdpn.json)', () => {
 
     assert.throws(() => normalizePenReference('https://evil.example.com/pen/123'), /CodePen URL/);
     assert.throws(() => normalizePenReference('bad/id/with/slashes'), /Invalid Pen ID/);
+  });
+
+  it('extracts user and team owners from CodePen URLs', () => {
+    assert.equal(extractCodePenOwnerFromUrl('https://codepen.io/bramus/pen/abcde'), 'bramus');
+    assert.equal(extractCodePenOwnerFromUrl('https://codepen.io/username/editor/xyz12'), 'username');
+    assert.equal(extractCodePenOwnerFromUrl('https://codepen.io/team/username/pen/xyz12'), 'username');
+    assert.equal(extractCodePenOwnerFromUrl('https://codepen.io/pen/abcde'), null);
+    assert.equal(extractCodePenOwnerFromUrl('https://89bb1234.codepen.dev/'), null);
+    assert.equal(extractCodePenOwnerFromUrl('not-a-url'), null);
   });
 
   it('suggests safe folder names from Pen titles', () => {

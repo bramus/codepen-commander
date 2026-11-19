@@ -2,7 +2,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { requireAuth } from '../config/auth.js';
 import {
   buildSyncedFileMap,
   hasProjectConfigInDir,
@@ -15,6 +14,7 @@ import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { BinaryUploadPart, PenAccess, PenFileRequest } from '../types.js';
 import { fmt, printBuildSummary, shortId } from '../utils/format.js';
 import { isInteractive, promptText } from '../utils/prompts.js';
+import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 export interface NewPenOptions {
   title?: string;
@@ -48,10 +48,7 @@ export function registerNewCommand(program: Command): void {
     .option('--password <password>', 'Password (min 8 chars; required with --access Protected)')
     .option('--template', 'Mark the Pen as a template')
     .option('--starter', 'Create with CodePen starter files instead of uploading local files')
-    .action(async (folderArg: string | undefined, options: NewPenOptions) => {
-      const auth = await requireAuth();
-      const client = new CodePenClient({ apiKey: auth.apiKey });
-
+    .action(async (folderArg: string | undefined, options: NewPenOptions, command: Command) => {
       const access = normalizeAccess(options.access);
       if (access === 'Protected' && (!options.password || options.password.length < 8)) {
         throw new Error('Protected Pens require --password with at least 8 characters.');
@@ -82,6 +79,12 @@ export function registerNewCommand(program: Command): void {
           `${targetDir} already contains ${PROJECT_CONFIG_FILENAME}. Use \`cdpn push\` to update the existing Pen or specify a different folder.`,
         );
       }
+
+      const auth = await resolveCommandAuth({
+        explicitProfile: getGlobalProfileOption(command),
+        promptMessage: 'Which CodePen profile should own this new Pen?',
+      });
+      const client = new CodePenClient({ apiKey: auth.apiKey });
 
       const hasExistingFiles = await isDirectoryNonEmpty(targetDir);
       if (hasExistingFiles && !options.starter) {
@@ -162,12 +165,16 @@ export function registerNewCommand(program: Command): void {
       await writeProjectConfig(targetDir, {
         url: created.urls.editor,
         pen_id: created.id,
+        ...(auth.profile ? { profile: auth.profile } : {}),
         last_synced_version_id: finalVersionId,
         editor: created.editor,
         files: buildSyncedFileMap(remoteFiles, materialized.localSha256ByPath),
       });
 
       console.log(`\n${fmt.green('✓')} Created Pen ${fmt.bold(created.title || 'Untitled')} ${fmt.dim(`(${created.id})`)}`);
+      if (auth.profile) {
+        console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+      }
       console.log(`  Folder:  ${fmt.cyan(folderDisplay)}`);
       console.log(`  Editor:  ${fmt.cyan(created.urls.editor)}`);
       console.log(`  Preview: ${fmt.cyan(created.urls.preview)}`);

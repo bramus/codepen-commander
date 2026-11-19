@@ -1,9 +1,9 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { requireAuth } from '../config/auth.js';
 import { requireProject } from '../config/project.js';
 import { fmt, shortId } from '../utils/format.js';
 import { isInteractive, promptConfirm } from '../utils/prompts.js';
+import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 import { executePush } from './push.js';
 
 export interface DeployOptions {
@@ -21,9 +21,12 @@ export function registerDeployCommands(program: Command): void {
     .option('--version <version-id>', 'Deploy a specific saved version ID instead of pushing')
     .option('-f, --force', 'Overwrite remote head if it moved since last sync when pushing')
     .option('-m, --label <label>', 'Label for the saved version created by push')
-    .action(async (options: DeployOptions) => {
-      const auth = await requireAuth();
+    .action(async (options: DeployOptions, command: Command) => {
       const project = await requireProject();
+      const auth = await resolveCommandAuth({
+        explicitProfile: getGlobalProfileOption(command),
+        project,
+      });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
       let versionIdToDeploy = options.version;
@@ -53,6 +56,9 @@ export function registerDeployCommands(program: Command): void {
       const deployment = await client.deployPen(project.config.pen_id, versionIdToDeploy);
 
       console.log(`${fmt.green('✓')} Deployed successfully!`);
+      if (auth.profile) {
+        console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+      }
       console.log(`  URL:     ${fmt.cyan(deployment.url)}`);
       console.log(`  Version: ${fmt.dim(shortId(deployment.version_id))}`);
       if (deployment.custom_domains.length > 0) {
@@ -64,9 +70,12 @@ export function registerDeployCommands(program: Command): void {
     .command('undeploy')
     .description('Take down the Pen’s live deployment (Pen and versions stay intact)')
     .option('-y, --yes', 'Skip confirmation prompt')
-    .action(async (options: { yes?: boolean }) => {
-      const auth = await requireAuth();
+    .action(async (options: { yes?: boolean }, command: Command) => {
       const project = await requireProject();
+      const auth = await resolveCommandAuth({
+        explicitProfile: getGlobalProfileOption(command),
+        project,
+      });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
       const pen = await client.getPen(project.config.pen_id);

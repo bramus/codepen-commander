@@ -1,19 +1,25 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { requireAuth } from '../config/auth.js';
+import { API_KEY_ENV_VAR } from '../config/auth.js';
 import { requireProject } from '../config/project.js';
 import { computeSyncDiff, detectLocalChangesFromBaseline, hasDiffChanges } from '../sync/diff.js';
 import { scanLocalFiles } from '../sync/fs.js';
 import { fmt, shortId } from '../utils/format.js';
+import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 export function registerStatusCommand(program: Command): void {
   program
     .command('status')
     .description('Compare local files with the online version on CodePen')
     .option('--json', 'Output status as JSON')
-    .action(async (options: { json?: boolean }) => {
-      const auth = await requireAuth();
+    .action(async (options: { json?: boolean }, command: Command) => {
       const project = await requireProject();
+      const auth = await resolveCommandAuth({
+        explicitProfile: getGlobalProfileOption(command),
+        project,
+        interactive: !options.json,
+        persistProfileToProject: !options.json,
+      });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
       const [pen, remoteFiles, localFiles] = await Promise.all([
@@ -41,6 +47,8 @@ export function registerStatusCommand(program: Command): void {
               pen_id: pen.id,
               title: pen.title,
               editor: pen.editor,
+              profile: auth.profile ?? project.config.profile ?? null,
+              auth_source: auth.source,
               url: project.config.url,
               local_version_id: localHead,
               remote_version_id: remoteHead,
@@ -62,6 +70,9 @@ export function registerStatusCommand(program: Command): void {
       }
 
       console.log(`${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id}, ${pen.editor})`)}`);
+      console.log(
+        `Profile:  ${auth.profile ? fmt.cyan(auth.profile) : fmt.dim(`env (${API_KEY_ENV_VAR})`)}`,
+      );
       console.log(`URL:      ${fmt.cyan(project.config.url)}`);
       console.log(`Synced:   ${fmt.dim(shortId(localHead))}`);
       console.log(

@@ -42,8 +42,9 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     assert.equal(stderr.includes('was invalid and removed'), false, `npm removed bin entry: ${stderr}`);
   });
 
-  it('executes compiled dist/cli.js --help with all registered commands', async () => {
+  it('executes compiled dist/cli.js --help with all registered commands and global --profile flag', async () => {
     const { stdout } = await execFileAsync(process.execPath, [path.join(distDir, 'cli.js'), '--help']);
+    assert.ok(stdout.includes('--profile'), 'Expected CLI help to list global --profile option');
     for (const cmd of [
       'auth',
       'pull',
@@ -62,6 +63,16 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     ]) {
       assert.ok(stdout.includes(cmd), `Expected CLI help to list command "${cmd}"`);
     }
+
+    const { stdout: authHelp } = await execFileAsync(process.execPath, [
+      path.join(distDir, 'cli.js'),
+      'auth',
+      '--help',
+    ]);
+    for (const sub of ['status', 'list', 'default', 'login', 'logout']) {
+      assert.ok(authHelp.includes(sub), `Expected auth help to list subcommand "${sub}"`);
+    }
+    assert.ok(authHelp.includes('~/.cdpn'), 'Expected auth help to reference ~/.cdpn');
   });
 
   it('validates browser URLs strictly (HTTPS only, no control chars)', () => {

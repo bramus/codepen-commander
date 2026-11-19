@@ -1,7 +1,6 @@
 import path from 'node:path';
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { requireAuth } from '../config/auth.js';
 import {
   buildSyncedFileMap,
   findProject,
@@ -10,12 +9,14 @@ import {
   PROJECT_CONFIG_FILENAME,
   suggestFolderName,
   writeProjectConfig,
+  type ProjectLocation,
 } from '../config/project.js';
 import { detectLocalChangesFromBaseline } from '../sync/diff.js';
 import { isDirectoryNonEmpty, scanLocalFiles } from '../sync/fs.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import { fmt, shortId } from '../utils/format.js';
 import { isInteractive, promptConfirm, promptText } from '../utils/prompts.js';
+import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 export interface PullOptions {
   force?: boolean;
@@ -26,113 +27,131 @@ export function registerPullCommand(program: Command): void {
     .command('pull [url] [folder]')
     .description('Download a CodePen Pen to a local folder, or update an existing synced folder')
     .option('-f, --force', 'Overwrite local changes without prompting')
-    .action(async (urlArg: string | undefined, folderArg: string | undefined, options: PullOptions) => {
-      const auth = await requireAuth();
-      const client = new CodePenClient({ apiKey: auth.apiKey });
+    .action(
+      async (
+        urlArg: string | undefined,
+        folderArg: string | undefined,
+        options: PullOptions,
+        command: Command,
+      ) => {
+        const explicitProfile = getGlobalProfileOption(command);
 
-      // Mode 1: `cdpn pull` with no URL inside an existing synced folder -> update current Pen
-      if (!urlArg && !folderArg) {
-        const existingProject = await findProject(process.cwd());
-        if (existingProject) {
-          await pullIntoExistingProject(client, existingProject.rootDir, existingProject.config, options);
-          return;
+        // Mode 1: `cdpn pull` with no URL inside an existing synced folder -> update current Pen
+        if (!urlArg && !folderArg) {
+          const existingProject = await findProject(process.cwd());
+          if (existingProject) {
+            const auth = await resolveCommandAuth({
+              explicitProfile,
+              project: existingProject,
+            });
+            const client = new CodePenClient({ apiKey: auth.apiKey });
+            await pullIntoExistingProject(client, existingProject, auth.profile, options);
+            return;
+          }
         }
-      }
 
-      // Mode 2: Download a new Pen into a target folder
-      let rawUrl = urlArg;
-      if (!rawUrl) {
-        if (!isInteractive()) {
-          throw new Error(
-            'Missing Pen URL or ID. Usage: `cdpn pull <url> [folder]` (or run `cdpn pull` inside an existing synced folder).',
+        // Mode 2: Download a new Pen into a target folder
+        let rawUrl = urlArg;
+        if (!rawUrl) {
+          if (!isInteractive()) {
+            throw new Error(
+              'Missing Pen URL or ID. Usage: `cdpn pull <url> [folder]` (or run `cdpn pull` inside an existing synced folder).',
+            );
+          }
+          rawUrl = await promptText('CodePen URL or Pen ID');
+        }
+
+        const { apiIdentifier, originalUrl } = normalizePenReference(rawUrl);
+
+        const auth = await resolveCommandAuth({
+          explicitProfile,
+          urlHint: originalUrl ?? rawUrl,
+          promptMessage: 'Which CodePen profile should be used for this Pen?',
+        });
+        const client = new CodePenClient({ apiKey: auth.apiKey });
+
+        console.log(`Fetching Pen ${fmt.cyan(apiIdentifier)}…`);
+        const pen = await client.getPen(apiIdentifier);
+        const defaultFolder = suggestFolderName(pen);
+
+        let targetFolderInput = folderArg;
+        if (!targetFolderInput) {
+          if (isInteractive()) {
+            targetFolderInput = await promptText('Target folder', defaultFolder);
+          } else {
+            targetFolderInput = defaultFolder;
+          }
+        }
+
+        const targetDir = path.resolve(process.cwd(), targetFolderInput);
+
+        // Guard against accidentally overwriting an existing non-empty folder
+        const hasExistingConfig = await hasProjectConfigInDir(targetDir);
+        const nonEmpty = await isDirectoryNonEmpty(targetDir);
+        if ((nonEmpty || hasExistingConfig) && !options.force) {
+          if (!isInteractive()) {
+            throw new Error(
+              `Target directory ${targetDir} is not empty. Pass --force to overwrite.`,
+            );
+          }
+          const ok = await promptConfirm(
+            `Directory ${fmt.bold(targetFolderInput)} already exists and is not empty. Continue and overwrite matching files?`,
+            false,
           );
+          if (!ok) {
+            console.log('Aborted.');
+            return;
+          }
         }
-        rawUrl = await promptText('CodePen URL or Pen ID');
-      }
 
-      const { apiIdentifier, originalUrl } = normalizePenReference(rawUrl);
+        const remoteFiles = await client.getPenFiles(pen.id);
+        const result = await syncRemoteFilesToDisk({
+          client,
+          rootDir: targetDir,
+          remoteFiles,
+          pruneRemoved: false,
+        });
 
-      console.log(`Fetching Pen ${fmt.cyan(apiIdentifier)}…`);
-      const pen = await client.getPen(apiIdentifier);
-      const defaultFolder = suggestFolderName(pen);
+        const syncedFiles = buildSyncedFileMap(remoteFiles, result.localSha256ByPath);
+        await writeProjectConfig(targetDir, {
+          url: originalUrl ?? pen.urls.editor,
+          pen_id: pen.id,
+          ...(auth.profile ? { profile: auth.profile } : {}),
+          last_synced_version_id: pen.saved_version?.id ?? null,
+          editor: pen.editor,
+          files: syncedFiles,
+        });
 
-      let targetFolderInput = folderArg;
-      if (!targetFolderInput) {
-        if (isInteractive()) {
-          targetFolderInput = await promptText('Target folder', defaultFolder);
-        } else {
-          targetFolderInput = defaultFolder;
-        }
-      }
-
-      const targetDir = path.resolve(process.cwd(), targetFolderInput);
-
-      // Guard against accidentally overwriting an existing non-empty folder
-      const hasExistingConfig = await hasProjectConfigInDir(targetDir);
-      const nonEmpty = await isDirectoryNonEmpty(targetDir);
-      if ((nonEmpty || hasExistingConfig) && !options.force) {
-        if (!isInteractive()) {
-          throw new Error(
-            `Target directory ${targetDir} is not empty. Pass --force to overwrite.`,
-          );
-        }
-        const ok = await promptConfirm(
-          `Directory ${fmt.bold(targetFolderInput)} already exists and is not empty. Continue and overwrite matching files?`,
-          false,
-        );
-        if (!ok) {
-          console.log('Aborted.');
-          return;
-        }
-      }
-
-      const remoteFiles = await client.getPenFiles(pen.id);
-      const result = await syncRemoteFilesToDisk({
-        client,
-        rootDir: targetDir,
-        remoteFiles,
-        pruneRemoved: false,
-      });
-
-      const syncedFiles = buildSyncedFileMap(remoteFiles, result.localSha256ByPath);
-      await writeProjectConfig(targetDir, {
-        url: originalUrl ?? pen.urls.editor,
-        pen_id: pen.id,
-        last_synced_version_id: pen.saved_version?.id ?? null,
-        editor: pen.editor,
-        files: syncedFiles,
-      });
-
-      console.log(
-        `\n${fmt.green('✓')} Pulled ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} into ${fmt.cyan(targetFolderInput)}`,
-      );
-      console.log(`  Files:   ${result.writtenPaths.length} downloaded`);
-      if (pen.saved_version) {
-        console.log(`  Version: ${fmt.dim(shortId(pen.saved_version.id))}`);
-      }
-      console.log(`  Config:  ${fmt.dim(path.join(targetFolderInput, PROJECT_CONFIG_FILENAME))}`);
-
-      if (pen.editor === 'Classic') {
         console.log(
-          fmt.yellow(
-            '\nNote: This is a Classic Pen (read-only through CodePen API v2). You can pull files, but pushing and deploying require a CodePen 2.0 Pen.',
-          ),
+          `\n${fmt.green('✓')} Pulled ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} into ${fmt.cyan(targetFolderInput)}`,
         );
-      }
-    });
+        if (auth.profile) {
+          console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+        }
+        console.log(`  Files:   ${result.writtenPaths.length} downloaded`);
+        if (pen.saved_version) {
+          console.log(`  Version: ${fmt.dim(shortId(pen.saved_version.id))}`);
+        }
+        console.log(`  Config:  ${fmt.dim(path.join(targetFolderInput, PROJECT_CONFIG_FILENAME))}`);
+
+        if (pen.editor === 'Classic') {
+          console.log(
+            fmt.yellow(
+              '\nNote: This is a Classic Pen (read-only through CodePen API v2). You can pull files, but pushing and deploying require a CodePen 2.0 Pen.',
+            ),
+          );
+        }
+      },
+    );
 }
 
 async function pullIntoExistingProject(
   client: CodePenClient,
-  rootDir: string,
-  config: {
-    url: string;
-    pen_id: string;
-    last_synced_version_id: string | null;
-    files?: Record<string, { id: string; content_hash: string; local_sha256: string; is_binary: boolean }>;
-  },
+  project: ProjectLocation,
+  resolvedProfile: string | null,
   options: PullOptions,
 ): Promise<void> {
+  const { rootDir, config } = project;
   console.log(`Pulling latest changes for ${fmt.cyan(config.pen_id)}…`);
 
   const localFiles = await scanLocalFiles(rootDir);
@@ -171,15 +190,20 @@ async function pullIntoExistingProject(
   });
 
   const syncedFiles = buildSyncedFileMap(remoteFiles, result.localSha256ByPath);
+  const profileToPersist = config.profile ?? resolvedProfile ?? undefined;
   await writeProjectConfig(rootDir, {
     url: config.url || pen.urls.editor,
     pen_id: pen.id,
+    ...(profileToPersist ? { profile: profileToPersist } : {}),
     last_synced_version_id: pen.saved_version?.id ?? null,
     editor: pen.editor,
     files: syncedFiles,
   });
 
   console.log(`\n${fmt.green('✓')} Synced ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}`);
+  if (resolvedProfile) {
+    console.log(`  Profile: ${fmt.cyan(resolvedProfile)}`);
+  }
   console.log(
     `  Updated: ${result.writtenPaths.length} file(s)` +
       (result.deletedPaths.length > 0 ? `, removed ${result.deletedPaths.length} deleted file(s)` : ''),

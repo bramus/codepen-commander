@@ -1,8 +1,8 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { requireAuth } from '../config/auth.js';
 import type { Pen, PenEditor, PenSortField, SortDirection } from '../types.js';
 import { fmt, formatDate, formatTable } from '../utils/format.js';
+import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 export interface ListOptions {
   search?: string;
@@ -35,7 +35,7 @@ export function registerListCommand(program: Command): void {
     .option('--direction <dir>', 'Sort direction: asc or desc', 'desc')
     .option('-n, --limit <count>', 'Maximum number of Pens to show', '20')
     .option('--json', 'Output Pens as JSON')
-    .action(async (options: ListOptions) => {
+    .action(async (options: ListOptions, command: Command) => {
       if (options.deployed && options.notDeployed) {
         throw new Error('Cannot combine --deployed and --not-deployed.');
       }
@@ -65,7 +65,11 @@ export function registerListCommand(program: Command): void {
 
       const deployed = options.deployed ? true : options.notDeployed ? false : undefined;
 
-      const auth = await requireAuth();
+      const auth = await resolveCommandAuth({
+        explicitProfile: getGlobalProfileOption(command),
+        interactive: !options.json,
+        promptMessage: 'Which CodePen profile would you like to list Pens for?',
+      });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
       const pens: Pen[] = [];
