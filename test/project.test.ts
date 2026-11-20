@@ -6,11 +6,16 @@ import { describe, it } from 'node:test';
 import {
   extractCodePenOwnerFromUrl,
   extractPenIdFromUrl,
+  findNearestConfig,
   findProject,
   normalizePenReference,
   readProjectConfig,
+  readProjectConfigFile,
+  requireProject,
+  requireProjectInDir,
   suggestFolderName,
   writeProjectConfig,
+  writeUnlinkedProjectInfo,
 } from '../src/config/project.js';
 
 describe('project config (.cdpn.json)', () => {
@@ -161,6 +166,101 @@ describe('project config (.cdpn.json)', () => {
       await assert.rejects(() => readProjectConfig(tmpDir), /info\.access.*invalid/i);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('writes and reads unlinked info-only .cdpn.json and stops upward linked-project lookup at it', async () => {
+    const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-project-unlinked-test-'));
+    try {
+      // Parent folder is a linked Pen
+      await writeProjectConfig(tmpRoot, {
+        url: 'https://codepen.io/username/pen/parent-1',
+        pen_id: 'parent-1',
+        profile: 'username',
+        last_synced_version_id: 'ver-parent',
+      });
+
+      // Child folder contains an unlinked info-only .cdpn.json
+      const childDir = path.join(tmpRoot, 'child-demo');
+      const nestedChildDir = path.join(childDir, 'src');
+      await fs.mkdir(nestedChildDir, { recursive: true });
+
+      await writeUnlinkedProjectInfo(childDir, {
+        template: true,
+        access: 'Private',
+        tags: ['css', 'grid'],
+        description: 'Retained description',
+        title: 'Retained Title',
+      });
+
+      const raw = await fs.readFile(path.join(childDir, '.cdpn.json'), 'utf8');
+      const parsedRaw = JSON.parse(raw) as Record<string, unknown>;
+      assert.deepEqual(Object.keys(parsedRaw), ['info']);
+      assert.deepEqual(Object.keys(parsedRaw.info as Record<string, unknown>), [
+        'title',
+        'description',
+        'tags',
+        'access',
+        'template',
+      ]);
+
+      const parsedFile = await readProjectConfigFile(childDir);
+      assert.equal(parsedFile.linked, false);
+      assert.deepEqual(parsedFile.config, {
+        info: {
+          title: 'Retained Title',
+          description: 'Retained description',
+          tags: ['css', 'grid'],
+          access: 'Private',
+          template: true,
+        },
+      });
+
+      // findNearestConfig finds the unlinked child config (from childDir and its subdirs)
+      const nearestFromChild = await findNearestConfig(childDir);
+      assert.ok(nearestFromChild);
+      assert.equal(nearestFromChild.linked, false);
+      assert.equal(nearestFromChild.rootDir, path.resolve(childDir));
+
+      const nearestFromNested = await findNearestConfig(nestedChildDir);
+      assert.ok(nearestFromNested);
+      assert.equal(nearestFromNested.linked, false);
+      assert.equal(nearestFromNested.rootDir, path.resolve(childDir));
+
+      // findProject returns null (does NOT walk past childDir to the parent linked Pen)
+      assert.equal(await findProject(childDir), null);
+      assert.equal(await findProject(nestedChildDir), null);
+
+      // requireProject / requireProjectInDir / readProjectConfig throw 404 noting it is unlinked
+      await assert.rejects(() => readProjectConfig(childDir), /not linked to an online Pen/i);
+      await assert.rejects(() => requireProject(nestedChildDir), /not linked to an online Pen/i);
+      await assert.rejects(() => requireProjectInDir(childDir), /not linked to an online Pen/i);
+
+      // Invalid configs remain rejected with 400
+      const invalidDir = path.join(tmpRoot, 'invalid-unlinked');
+      await fs.mkdir(invalidDir, { recursive: true });
+
+      await fs.writeFile(path.join(invalidDir, '.cdpn.json'), JSON.stringify({ info: null }), 'utf8');
+      await assert.rejects(() => readProjectConfigFile(invalidDir), /"info" must be a JSON object/i);
+
+      await fs.writeFile(
+        path.join(invalidDir, '.cdpn.json'),
+        JSON.stringify({ info: { access: 'Protected', password: 'secretpassword' } }),
+        'utf8',
+      );
+      await assert.rejects(() => readProjectConfigFile(invalidDir), /info\.password.*not supported/i);
+
+      await fs.writeFile(
+        path.join(invalidDir, '.cdpn.json'),
+        JSON.stringify({ pen_id: 'only-id', info: { title: 'x' } }),
+        'utf8',
+      );
+      await assert.rejects(() => readProjectConfigFile(invalidDir), /missing required "url"/i);
+
+      await fs.writeFile(path.join(invalidDir, '.cdpn.json'), JSON.stringify({}), 'utf8');
+      await assert.rejects(() => readProjectConfigFile(invalidDir), /missing required "pen_id"/i);
+    } finally {
+      await fs.rm(tmpRoot, { recursive: true, force: true });
     }
   });
 

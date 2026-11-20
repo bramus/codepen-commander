@@ -17,7 +17,11 @@ import { scaffoldNewPen } from '../src/commands/new.js';
 import { managePenPrivacy } from '../src/commands/privacy.js';
 import { pullPenCommand } from '../src/commands/pull.js';
 import { saveProfileToFile } from '../src/config/auth.js';
-import { buildSyncedFileMap, writeProjectConfig } from '../src/config/project.js';
+import {
+  buildSyncedFileMap,
+  writeProjectConfig,
+  writeUnlinkedProjectInfo,
+} from '../src/config/project.js';
 import type { Build, Pen, PenAccess, PenFile } from '../src/types.js';
 import {
   CliError,
@@ -757,7 +761,51 @@ describe('end-to-end compiled CLI --json envelopes', () => {
       assert.equal(openJson.json.status.code, 400);
       assert.match(openJson.json.status.message, /unknown option '--json'/i);
 
-      // 7. Linked project with no auth -> 401
+      // 7. Unlinked info-only .cdpn.json -> linked commands return 404, push --dry-run returns 400, auth status returns 200 with project_profile null
+      const unlinkedInfoDir = path.join(tmpWork, 'retained-info');
+      await fs.mkdir(unlinkedInfoDir, { recursive: true });
+      await writeUnlinkedProjectInfo(unlinkedInfoDir, {
+        title: 'Saved Title',
+        description: 'Saved description',
+        tags: ['css'],
+        access: 'Private',
+        template: false,
+      });
+
+      const unlinkedStatus = await runCliJson(['status', '--json'], {
+        cwd: unlinkedInfoDir,
+        homeDir: tmpHome,
+      });
+      assert.equal(unlinkedStatus.exitCode, 1);
+      assert.equal(unlinkedStatus.stderr, '');
+      assert.equal(unlinkedStatus.json.status.code, 404);
+      assert.match(unlinkedStatus.json.status.message, /not linked to an online Pen/i);
+
+      const unlinkedDelete = await runCliJson(['delete', '--yes', '--json'], {
+        cwd: unlinkedInfoDir,
+        homeDir: tmpHome,
+      });
+      assert.equal(unlinkedDelete.exitCode, 1);
+      assert.equal(unlinkedDelete.json.status.code, 404);
+      assert.match(unlinkedDelete.json.status.message, /not linked to an online Pen/i);
+
+      const unlinkedDryPush = await runCliJson(['push', '--dry-run', '--json'], {
+        cwd: unlinkedInfoDir,
+        homeDir: tmpHome,
+      });
+      assert.equal(unlinkedDryPush.exitCode, 1);
+      assert.equal(unlinkedDryPush.json.status.code, 400);
+      assert.match(unlinkedDryPush.json.status.message, /not linked to an online Pen/i);
+
+      const unlinkedDeployNoPush = await runCliJson(['deploy', '--no-push', '--json'], {
+        cwd: unlinkedInfoDir,
+        homeDir: tmpHome,
+      });
+      assert.equal(unlinkedDeployNoPush.exitCode, 1);
+      assert.equal(unlinkedDeployNoPush.json.status.code, 404);
+      assert.match(unlinkedDeployNoPush.json.status.message, /not linked to an online Pen/i);
+
+      // 8. Linked project with no auth -> 401
       await writeProjectConfig(tmpWork, {
         url: 'https://codepen.io/bramus/pen/pen-json-1',
         pen_id: 'pen-json-1',

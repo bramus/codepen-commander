@@ -97,6 +97,8 @@ The `info` section tracks the Pen’s editable metadata (`title`, `description`,
 
 Older `.cdpn.json` files created without an `info` section remain fully supported: `cdpn` will never overwrite remote metadata when `info` is absent, and will seamlessly populate `info` on your next `cdpn pull` or `cdpn push`.
 
+You can also run `cdpn delete --keep-info` to delete the online Pen while stripping `.cdpn.json` down to only its `info` section (unlinked). When you later push the folder for the first time with `cdpn push` or `cdpn deploy`, the saved `title`, `description`, `tags`, `access`, and `template` are reused automatically without re-prompting for title or visibility (explicit `--title` / `--access` flags still override them, and `Protected` Pens still prompt for or require `--password`).
+
 > **Why `.cdpn.json` instead of `.codepen`?**  
 > CodePen 2.0 Pens already contain a `.codepen/` directory (housing `.codepen/pen.config.json`). Using `.cdpn.json` avoids filesystem collisions while allowing `.codepen/pen.config.json` to sync cleanly with CodePen.
 
@@ -139,7 +141,7 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn clone <url> [folder] [--force] [--json]` | Clone a CodePen Pen into a local folder (auto-matches stored profile by URL owner; offers to convert Classic Pens or clone them unlinked; offers browser fork-and-clone fallback for unowned Pens) |
 | `cdpn pull [--force] [--json]` | Pull latest remote file and Pen info changes into an existing cloned folder (requires `.cdpn.json`) |
 | `cdpn status [--json]` | Show active profile, file and Pen info diffs, remote head, build & deployment status |
-| `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait] [--json]` | Push local file and `.cdpn.json` Pen info changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (checks `index.html`, asks account, title, and visibility) |
+| `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait] [--json]` | Push local file and `.cdpn.json` Pen info changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (reuses retained `.cdpn.json` `info` if present; otherwise checks `index.html`, asks account, title, and visibility) |
 | `cdpn deploy [--no-push] [--version <id>] [--force] [--json]` | Push local changes (creating a Pen first if unlinked) and deploy to CodePen Hosting |
 | `cdpn undeploy [--yes] [--json]` | Take down the live deployment (Pen & versions remain intact) |
 | `cdpn domains [list] [--json]` | Show the default deployed URL, custom domains, verification status, and required DNS records |
@@ -150,7 +152,7 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn versions [--limit <n>] [--json]` | List saved versions with build status, labels, and markers (`head`, `local`, `deployed`) |
 | `cdpn rollback [version-id] [-m <label>] [--yes] [--json]` | Restore an older saved version to head and sync files locally |
 | `cdpn privacy [level] [--password <pw>] [--show] [--json]` | View or update Pen privacy (`Public`, `Private`, `Protected`, `Collaborators`; alias: `cdpn access`; requires `.cdpn.json` in current folder) |
-| `cdpn delete [--yes] [--json]` | Delete the online Pen on CodePen (moves to Deleted Items for 3 days) and remove `.cdpn.json` while keeping local files untouched (aliases: `cdpn del`, `cdpn rm`) |
+| `cdpn delete [--keep-info] [--yes] [--json]` | Delete the online Pen on CodePen (moves to Deleted Items for 3 days) and remove `.cdpn.json` — or keep only its `info` section with `--keep-info` for a later first push — while keeping local files untouched (aliases: `cdpn del`, `cdpn rm`) |
 | `cdpn info [--title ...] [--tags ...] [--access ...] [--template true\|false] [--json]` | View or update Pen metadata |
 | `cdpn settings [--auto-deploy ...] [--indent-with ...] [--json]` | View or update Pen editor & deployment settings |
 

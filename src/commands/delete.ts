@@ -5,9 +5,11 @@ import type { ResolvedAuth } from '../config/auth.js';
 import {
   PROJECT_CONFIG_FILENAME,
   requireProjectInDir,
+  writeUnlinkedProjectInfo,
   type ProjectLocation,
 } from '../config/project.js';
-import type { Pen } from '../types.js';
+import { analyzeInfoSync, extractPenInfo, normalizePartialPenInfo } from '../sync/info.js';
+import type { CompletePenInfo, Pen } from '../types.js';
 import { fmt } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
 import {
@@ -22,12 +24,15 @@ export const CODEPEN_DELETED_ITEMS_URL = 'https://codepen.io/your-work?item_type
 
 export interface DeleteCliOptions {
   yes?: boolean;
+  keepInfo?: boolean;
   json?: boolean;
 }
 
 export interface DeletePenCommandOptions {
   /** Skip confirmation prompt (required in non-interactive mode). */
   yes?: boolean;
+  /** Retain the `info` section in `.cdpn.json` (unlinked) instead of removing `.cdpn.json`. */
+  keepInfo?: boolean;
   /** Output structured JSON response instead of human-readable logs. */
   json?: boolean;
   /** Working directory (must contain `.cdpn.json` directly; defaults to `process.cwd()`). */
@@ -58,12 +63,15 @@ export interface DeletePenResult {
   project: ProjectLocation;
   auth: ResolvedAuth;
   configRemoved: boolean;
+  infoRetained: boolean;
+  retainedInfo?: CompletePenInfo;
 }
 
 /**
  * Deletes the online Pen linked to `.cdpn.json` directly inside `options.cwd`
  * (moves it to CodePen Deleted Items, restorable for 3 days) and removes `.cdpn.json`
- * only after the remote deletion succeeds. Local project files are kept untouched.
+ * (or retains only its `info` section when `keepInfo` is true) only after the remote
+ * deletion succeeds. Local project files are kept untouched.
  *
  * Returns `null` if the user cancels at the confirmation prompt.
  */
@@ -71,6 +79,7 @@ export async function deletePenCommand(
   options: DeletePenCommandOptions = {},
 ): Promise<DeletePenResult | null> {
   const cwd = options.cwd ?? process.cwd();
+  const keepInfo = Boolean(options.keepInfo);
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
   const selectImpl = options.prompts?.select ?? promptSelect;
@@ -107,12 +116,16 @@ export async function deletePenCommand(
     }
     console.log(
       fmt.dim(
-        `\nLocal files will stay untouched; ${PROJECT_CONFIG_FILENAME} will be removed after deletion succeeds.`,
+        keepInfo
+          ? `\nLocal files will stay untouched; only the "info" section will be kept in ${PROJECT_CONFIG_FILENAME} after deletion succeeds.`
+          : `\nLocal files will stay untouched; ${PROJECT_CONFIG_FILENAME} will be removed after deletion succeeds.`,
       ),
     );
 
     const ok = await confirmImpl(
-      `Delete this Pen on CodePen (moves to Deleted Items for 3 days) and remove ${PROJECT_CONFIG_FILENAME}?`,
+      keepInfo
+        ? `Delete this Pen on CodePen (moves to Deleted Items for 3 days) and keep only "info" in ${PROJECT_CONFIG_FILENAME}?`
+        : `Delete this Pen on CodePen (moves to Deleted Items for 3 days) and remove ${PROJECT_CONFIG_FILENAME}?`,
       false,
     );
     if (!ok) {
@@ -123,39 +136,85 @@ export async function deletePenCommand(
 
   await client.deletePen(project.config.pen_id);
 
-  // Remove `.cdpn.json` only after remote deletion succeeded
-  await fs.unlink(project.configPath);
+  // Modify or remove `.cdpn.json` only after remote deletion succeeded
+  let retainedInfo: CompletePenInfo | undefined;
+  if (keepInfo) {
+    const remoteInfo = extractPenInfo(pen);
+    const infoAnalysis = analyzeInfoSync(
+      project.config.info,
+      project.config.last_synced_info_hash,
+      pen,
+    );
+    retainedInfo =
+      infoAnalysis.localChanged && project.config.info
+        ? { ...remoteInfo, ...normalizePartialPenInfo(project.config.info) }
+        : remoteInfo;
+    await writeUnlinkedProjectInfo(project.rootDir, retainedInfo);
+  } else {
+    await fs.unlink(project.configPath);
+  }
 
   if (options.json) {
-    printJsonResponse(
-      200,
-      `Deleted ${pen.title || 'Untitled'} (${pen.id}) on CodePen and removed ${PROJECT_CONFIG_FILENAME}.`,
-      {
-        pen_id: pen.id,
-        title: pen.title,
-        profile: auth.profile,
-        editor_url: pen.urls.editor,
-        deleted: true,
-        config_removed: true,
-        restore_url: CODEPEN_DELETED_ITEMS_URL,
-      },
-    );
+    if (keepInfo) {
+      printJsonResponse(
+        200,
+        `Deleted ${pen.title || 'Untitled'} (${pen.id}) on CodePen and retained info in ${PROJECT_CONFIG_FILENAME}.`,
+        {
+          pen_id: pen.id,
+          title: pen.title,
+          profile: auth.profile,
+          editor_url: pen.urls.editor,
+          deleted: true,
+          config_removed: false,
+          info_retained: true,
+          info: retainedInfo,
+          restore_url: CODEPEN_DELETED_ITEMS_URL,
+        },
+      );
+    } else {
+      printJsonResponse(
+        200,
+        `Deleted ${pen.title || 'Untitled'} (${pen.id}) on CodePen and removed ${PROJECT_CONFIG_FILENAME}.`,
+        {
+          pen_id: pen.id,
+          title: pen.title,
+          profile: auth.profile,
+          editor_url: pen.urls.editor,
+          deleted: true,
+          config_removed: true,
+          info_retained: false,
+          restore_url: CODEPEN_DELETED_ITEMS_URL,
+        },
+      );
+    }
   } else {
     console.log(
       `\n${fmt.green('✓')} Deleted ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} on CodePen ${fmt.dim('(moved to Deleted Items; restorable for 3 days)')}`,
     );
-    if (auth.profile) {
-      console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+    if (keepInfo) {
+      if (auth.profile) {
+        console.log(`  Profile:  ${fmt.cyan(auth.profile)}`);
+      }
+      console.log(
+        `  Retained: ${fmt.cyan(`info in ${PROJECT_CONFIG_FILENAME}`)} ${fmt.dim('(unlinked; local files were kept untouched)')}`,
+      );
+      console.log(`  Restore:  ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
+    } else {
+      if (auth.profile) {
+        console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+      }
+      console.log(`  Removed: ${fmt.cyan(PROJECT_CONFIG_FILENAME)} ${fmt.dim('(local files were kept untouched)')}`);
+      console.log(`  Restore: ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
     }
-    console.log(`  Removed: ${fmt.cyan(PROJECT_CONFIG_FILENAME)} ${fmt.dim('(local files were kept untouched)')}`);
-    console.log(`  Restore: ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
   }
 
   return {
     pen,
     project,
     auth,
-    configRemoved: true,
+    configRemoved: !keepInfo,
+    infoRetained: keepInfo,
+    ...(retainedInfo ? { retainedInfo } : {}),
   };
 }
 
@@ -167,11 +226,13 @@ export function registerDeleteCommand(program: Command): void {
     .description(
       `Delete the online Pen on CodePen (moves to Deleted Items) and remove ${PROJECT_CONFIG_FILENAME}`,
     )
+    .option('--keep-info', `Keep Pen info in ${PROJECT_CONFIG_FILENAME} so it is reused on the next push`)
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Output deletion result as JSON')
     .action(async (options: DeleteCliOptions, command: Command) => {
       await deletePenCommand({
         yes: options.yes,
+        keepInfo: options.keepInfo,
         json: options.json,
         explicitProfile: getGlobalProfileOption(command),
       });

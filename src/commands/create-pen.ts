@@ -6,13 +6,14 @@ import {
   buildSyncedFileMap,
   hasProjectConfigInDir,
   PROJECT_CONFIG_FILENAME,
+  readProjectConfigFile,
   writeProjectConfig,
   type ProjectLocation,
 } from '../config/project.js';
 import { scanLocalFiles } from '../sync/fs.js';
-import { buildPenInfoConfigFields } from '../sync/info.js';
+import { buildPenInfoConfigFields, hasAnyPenInfoFields } from '../sync/info.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
-import type { BinaryUploadPart, Build, Pen, PenAccess, PenFileRequest } from '../types.js';
+import type { BinaryUploadPart, Build, Pen, PenAccess, PenFileRequest, PenInfo } from '../types.js';
 import { fmt, printBuildSummary, shortId } from '../utils/format.js';
 import { extractHtmlTitle } from '../utils/html.js';
 import { CliError } from '../utils/json.js';
@@ -183,12 +184,15 @@ export function printMissingIndexHtmlWarning(targetDir: string, fileCount: numbe
 
 /**
  * First-time Pen creation flow used by `cdpn push` and `cdpn deploy` when invoked inside
- * an unlinked local demo folder:
+ * an unlinked local demo folder (including one with retained `info` in `.cdpn.json` from
+ * `cdpn delete --keep-info`):
  *
  * 1. Checks for `/index.html`; if absent, displays a prominent warning and asks for confirmation.
  * 2. Resolves or asks which CodePen account/profile to push to (when multiple keys are in `~/.cdpn`).
- * 3. Asks for a title (pre-filled from `index.html`'s `<title>` when available).
- * 4. Asks for visibility (`Public` default, `Private`, `Protected`, or `Collaborators`).
+ * 3. Uses retained `info.title` (or `--title`), otherwise asks for a title (pre-filled from `index.html`'s `<title>`).
+ * 4. Uses retained `info.access` (or `--access`), otherwise asks for visibility (`Public` default, `Private`,
+ *    `Protected`, or `Collaborators`), prompting for a password if `Protected`.
+ * 5. Carries over retained `description`, `tags`, and `template` from `.cdpn.json` when present.
  */
 export async function createPenFromDirectory(
   options: CreatePenFlowOptions,
@@ -199,31 +203,62 @@ export async function createPenFromDirectory(
   const textImpl = options.prompts?.text ?? promptText;
   const selectImpl = options.prompts?.select ?? promptSelect;
 
-  // Validate --access / --password early before prompting or scanning
-  const prevalidatedAccess = normalizeAccess(options.access);
-  if (prevalidatedAccess === 'Protected' && options.password !== undefined && options.password.length < 8) {
+  // Validate explicit CLI --access / --password early before reading config or scanning
+  const explicitAccess = normalizeAccess(options.access);
+  if (explicitAccess === 'Protected' && options.password !== undefined && options.password.length < 8) {
     throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
   }
-  if (prevalidatedAccess === 'Protected' && !options.password && !interactive) {
+  if (explicitAccess === 'Protected' && !options.password && !interactive) {
     throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
   }
 
   const targetDir = path.resolve(options.targetDir);
   const folderDisplay = options.folderDisplay;
 
+  let retainedInfo: PenInfo | undefined;
   if (await hasProjectConfigInDir(targetDir)) {
+    const existing = await readProjectConfigFile(targetDir);
+    if (existing.linked) {
+      throw new CliError(
+        409,
+        `${targetDir} already contains ${PROJECT_CONFIG_FILENAME}. Use \`cdpn push\` to update the existing Pen.`,
+      );
+    }
+    retainedInfo = existing.config.info;
+  }
+
+  const effectiveRawAccess = options.access ?? retainedInfo?.access;
+  const effectiveAccess = normalizeAccess(effectiveRawAccess);
+  const effectiveDescription =
+    options.description !== undefined ? options.description : retainedInfo?.description;
+  const effectiveTags = options.tags !== undefined ? options.tags : retainedInfo?.tags;
+  const effectiveTemplate =
+    options.template !== undefined ? options.template : retainedInfo?.template;
+
+  // Validate effective metadata constraints early before scanning or prompting
+  if (effectiveTags && effectiveTags.length > 5) {
     throw new CliError(
-      409,
-      `${targetDir} already contains ${PROJECT_CONFIG_FILENAME}. Use \`cdpn push\` to update the existing Pen.`,
+      400,
+      `CodePen allows at most 5 tags per Pen (found ${effectiveTags.length}${
+        options.tags === undefined ? ` in ${PROJECT_CONFIG_FILENAME}` : ''
+      }).`,
     );
+  }
+  if (effectiveAccess === 'Protected' && options.password !== undefined && options.password.length < 8) {
+    throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
+  }
+  if (effectiveAccess === 'Protected' && !options.password && !interactive) {
+    throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
   }
 
   const scanned = await scanLocalFiles(targetDir);
   if (scanned.size === 0) {
     throw new CliError(
       400,
-      `No ${PROJECT_CONFIG_FILENAME} found and no syncable files in ${targetDir}.\n` +
-        'Run `cdpn clone <url>` to clone an existing Pen or `cdpn new` to scaffold a brand-new Pen.',
+      retainedInfo !== undefined
+        ? `No syncable files found in ${targetDir} (only an unlinked ${PROJECT_CONFIG_FILENAME} is present).`
+        : `No ${PROJECT_CONFIG_FILENAME} found and no syncable files in ${targetDir}.\n` +
+            'Run `cdpn clone <url>` to clone an existing Pen or `cdpn new` to scaffold a brand-new Pen.',
     );
   }
 
@@ -263,16 +298,16 @@ export async function createPenFromDirectory(
   });
   const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
 
-  // 3. Determine title (defaulting to index.html's <title> when present)
-  const htmlTitle =
-    indexFile && !indexFile.isBinary && indexFile.textContent
-      ? extractHtmlTitle(indexFile.textContent)
-      : null;
-  const fallbackTitle = path.basename(targetDir) || 'Untitled';
-  const defaultTitle = htmlTitle ?? fallbackTitle;
-
-  let title = options.title?.trim();
+  // 3. Determine title (explicit --title > retained info.title > index.html <title> > folder basename)
+  let title = options.title?.trim() || retainedInfo?.title?.trim();
   if (!title) {
+    const htmlTitle =
+      indexFile && !indexFile.isBinary && indexFile.textContent
+        ? extractHtmlTitle(indexFile.textContent)
+        : null;
+    const fallbackTitle = path.basename(targetDir) || 'Untitled';
+    const defaultTitle = htmlTitle ?? fallbackTitle;
+
     if (interactive) {
       title = (await textImpl('Pen title', defaultTitle)).trim() || defaultTitle;
     } else {
@@ -280,9 +315,9 @@ export async function createPenFromDirectory(
     }
   }
 
-  // 4. Ask for visibility (Public by default, Private, Protected, or Collaborators)
+  // 4. Resolve visibility (explicit --access > retained info.access > interactive picker / Public default)
   const { access, password } = await resolveVisibilityAndPassword({
-    rawAccess: options.access,
+    rawAccess: effectiveRawAccess,
     rawPassword: options.password,
     interactive,
     prompts: options.prompts,
@@ -302,17 +337,20 @@ export async function createPenFromDirectory(
   const shouldWait = options.wait !== false;
 
   if (!silent) {
+    if (hasAnyPenInfoFields(retainedInfo)) {
+      console.log(fmt.dim(`Using saved Pen info from ${PROJECT_CONFIG_FILENAME}.`));
+    }
     console.log(`\nCreating new Pen from ${textFiles.length + binaryFiles.length} local file(s)…`);
   }
 
   const created = await client.createPen(
     {
       ...(title ? { title } : {}),
-      ...(options.description ? { description: options.description } : {}),
-      ...(options.tags && options.tags.length > 0 ? { tags: options.tags } : {}),
+      ...(effectiveDescription ? { description: effectiveDescription } : {}),
+      ...(effectiveTags && effectiveTags.length > 0 ? { tags: effectiveTags } : {}),
       access,
       ...(password ? { password } : {}),
-      ...(options.template ? { template: true } : {}),
+      ...(effectiveTemplate ? { template: true } : {}),
       files: textFiles,
       wait: shouldWait ? 45 : 0,
     },

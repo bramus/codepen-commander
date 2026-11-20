@@ -1,8 +1,9 @@
+import path from 'node:path';
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
 import {
   buildSyncedFileMap,
-  findProject,
+  findNearestConfig,
   PROJECT_CONFIG_FILENAME,
   writeProjectConfig,
   type ProjectLocation,
@@ -416,25 +417,34 @@ export function registerPushCommand(program: Command): void {
       }
 
       const explicitProfile = getGlobalProfileOption(command);
-      const project = await findProject(process.cwd());
+      const nearest = await findNearestConfig(process.cwd());
 
-      // First-time push: no .cdpn.json found -> push local folder as a brand-new CodePen 2.0 Pen
-      if (!project) {
+      // First-time push: no linked .cdpn.json found -> push local folder as a brand-new CodePen 2.0 Pen
+      if (!nearest || !nearest.linked) {
         if (options.dryRun) {
           throw new CliError(
             400,
-            `No ${PROJECT_CONFIG_FILENAME} found. --dry-run is only supported for an existing synced Pen.`,
+            nearest
+              ? `${PROJECT_CONFIG_FILENAME} in ${nearest.rootDir} is not linked to an online Pen yet. --dry-run is only supported for an existing synced Pen.`
+              : `No ${PROJECT_CONFIG_FILENAME} found. --dry-run is only supported for an existing synced Pen.`,
           );
         }
 
+        const targetDir = nearest ? nearest.rootDir : process.cwd();
+        const folderDisplay = path.relative(process.cwd(), targetDir) || '.';
+
         if (!options.json) {
           console.log(
-            fmt.dim(`No ${PROJECT_CONFIG_FILENAME} found — pushing this local folder as a new CodePen 2.0 Pen.`),
+            fmt.dim(
+              nearest
+                ? `Found unlinked ${PROJECT_CONFIG_FILENAME} with saved Pen info — pushing this local folder as a new CodePen 2.0 Pen.`
+                : `No ${PROJECT_CONFIG_FILENAME} found — pushing this local folder as a new CodePen 2.0 Pen.`,
+            ),
           );
         }
         const created = await createPenFromDirectory({
-          targetDir: process.cwd(),
-          folderDisplay: '.',
+          targetDir,
+          folderDisplay,
           explicitProfile,
           title: options.title,
           access: options.access,
@@ -461,7 +471,7 @@ export function registerPushCommand(program: Command): void {
               dry_run: false,
               pen: created.pen,
               profile: created.auth.profile,
-              folder: '.',
+              folder: folderDisplay,
               root_dir: created.project.rootDir,
               config_path: created.project.configPath,
               version_id: created.versionId,
@@ -471,6 +481,12 @@ export function registerPushCommand(program: Command): void {
         }
         return;
       }
+
+      const project: ProjectLocation = {
+        rootDir: nearest.rootDir,
+        configPath: nearest.configPath,
+        config: nearest.config,
+      };
 
       const auth = await resolveCommandAuth({
         explicitProfile,

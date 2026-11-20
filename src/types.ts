@@ -306,3 +306,8 @@ export interface CdpnConfig {
   info?: PenInfo;
   files?: Record<string, SyncedFileEntry>;
 }
+
+/** Unlinked `.cdpn.json` containing only retained or pre-populated Pen metadata (`info`). */
+export interface UnlinkedCdpnConfig {
+  info: PenInfo;
+}

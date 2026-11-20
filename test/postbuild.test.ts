@@ -137,13 +137,14 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
         ]),
       /too many arguments/i,
     );
-    for (const alias of ['del', 'rm']) {
+    for (const alias of ['delete', 'del', 'rm']) {
       const { stdout: aliasHelp } = await execFileAsync(process.execPath, [
         path.join(distDir, 'cli.js'),
         alias,
         '--help',
       ]);
       assert.ok(aliasHelp.includes('Usage: cdpn delete'), `Expected "${alias}" to alias "delete"`);
+      assert.ok(aliasHelp.includes('--keep-info'), `Expected "${alias} --help" to include --keep-info`);
     }
 
     // `cdpn fork` without mandatory <url> must fail

@@ -1,6 +1,12 @@
+import path from 'node:path';
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { findProject, PROJECT_CONFIG_FILENAME, requireProject } from '../config/project.js';
+import {
+  findNearestConfig,
+  PROJECT_CONFIG_FILENAME,
+  requireProject,
+  type ProjectLocation,
+} from '../config/project.js';
 import { fmt, shortId } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
 import { isInteractive, promptConfirm } from '../utils/prompts.js';
@@ -37,7 +43,14 @@ export function registerDeployCommands(program: Command): void {
       }
 
       const explicitProfile = getGlobalProfileOption(command);
-      let project = await findProject(process.cwd());
+      const nearest = await findNearestConfig(process.cwd());
+      let project: ProjectLocation | null = nearest?.linked
+        ? {
+            rootDir: nearest.rootDir,
+            configPath: nearest.configPath,
+            config: nearest.config,
+          }
+        : null;
       let versionIdToDeploy = options.version;
       let client: CodePenClient;
       let activeProfile: string | null;
@@ -48,19 +61,29 @@ export function registerDeployCommands(program: Command): void {
         if (options.push === false || options.version) {
           throw new CliError(
             404,
-            `No ${PROJECT_CONFIG_FILENAME} found in this directory or any parent directory.\n` +
-              'Run `cdpn clone <url>` to clone a Pen or run `cdpn deploy` without --no-push/--version to create one first.',
+            nearest
+              ? `${PROJECT_CONFIG_FILENAME} in ${nearest.rootDir} only contains Pen info and is not linked to an online Pen yet.\n` +
+                  'Run `cdpn deploy` without --no-push/--version to create and link it first.'
+              : `No ${PROJECT_CONFIG_FILENAME} found in this directory or any parent directory.\n` +
+                  'Run `cdpn clone <url>` to clone a Pen or run `cdpn deploy` without --no-push/--version to create one first.',
           );
         }
 
+        const targetDir = nearest ? nearest.rootDir : process.cwd();
+        const folderDisplay = path.relative(process.cwd(), targetDir) || '.';
+
         if (!options.json) {
           console.log(
-            fmt.dim(`No ${PROJECT_CONFIG_FILENAME} found — pushing this local folder as a new CodePen 2.0 Pen before deploying.`),
+            fmt.dim(
+              nearest
+                ? `Found unlinked ${PROJECT_CONFIG_FILENAME} with saved Pen info — pushing this local folder as a new CodePen 2.0 Pen before deploying.`
+                : `No ${PROJECT_CONFIG_FILENAME} found — pushing this local folder as a new CodePen 2.0 Pen before deploying.`,
+            ),
           );
         }
         const created = await createPenFromDirectory({
-          targetDir: process.cwd(),
-          folderDisplay: '.',
+          targetDir,
+          folderDisplay,
           explicitProfile,
           title: options.title,
           access: options.access,
