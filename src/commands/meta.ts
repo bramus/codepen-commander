@@ -1,6 +1,8 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { requireProject } from '../config/project.js';
+import type { ResolvedAuth } from '../config/auth.js';
+import { requireProject, writeProjectConfig, type ProjectLocation } from '../config/project.js';
+import { mergeUpdatedPenInfoIntoConfig } from '../sync/info.js';
 import type {
   IndentWith,
   Pen,
@@ -11,9 +13,38 @@ import type {
 } from '../types.js';
 import { fmt, formatDate, shortId } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
+import type { SelectOption } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 
 const VALID_ACCESS = new Set(['public', 'private', 'protected', 'collaborators']);
+
+export interface InfoPenCommandOptions {
+  title?: string;
+  description?: string;
+  tags?: string;
+  access?: string;
+  password?: string;
+  template?: string;
+  json?: boolean;
+  cwd?: string;
+  explicitProfile?: string;
+  baseUrl?: string;
+  interactive?: boolean;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  selectProfile?: (
+    question: string,
+    options: SelectOption<string>[],
+    defaultIndex: number,
+  ) => Promise<string>;
+}
+
+export interface InfoPenResult {
+  pen: Pen;
+  updated: boolean;
+  auth: ResolvedAuth;
+  project: ProjectLocation;
+}
 
 function parseBooleanOption(raw: string, flagName: string): boolean {
   const lower = raw.trim().toLowerCase();
@@ -57,6 +88,79 @@ function renderPenSettings(settings: PenSettings): void {
   console.log(`tab_size:    ${fmt.cyan(String(settings.tab_size))}`);
 }
 
+export async function infoPenCommand(options: InfoPenCommandOptions = {}): Promise<InfoPenResult> {
+  const project = await requireProject(options.cwd ?? process.cwd());
+  const auth = await resolveCommandAuth({
+    explicitProfile: options.explicitProfile,
+    project,
+    interactive: options.json ? false : options.interactive,
+    persistProfileToProject: !options.json,
+    env: options.env,
+    homeDir: options.homeDir,
+    selectProfile: options.selectProfile,
+  });
+  const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
+
+  const patch: PenUpdateRequest = {};
+  if (options.title !== undefined) patch.title = options.title;
+  if (options.description !== undefined) patch.description = options.description;
+  if (options.tags !== undefined) {
+    const parsedTags = options.tags
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (parsedTags.length > 5) {
+      throw new CliError(400, 'CodePen allows at most 5 tags per Pen.');
+    }
+    patch.tags = parsedTags;
+  }
+  if (options.access !== undefined) {
+    const lower = options.access.trim().toLowerCase();
+    if (!VALID_ACCESS.has(lower)) {
+      throw new CliError(
+        400,
+        `Invalid --access "${options.access}". Use: Public, Private, Protected, or Collaborators.`,
+      );
+    }
+    patch.access = (lower[0]!.toUpperCase() + lower.slice(1)) as PenAccess;
+  }
+  if (options.password !== undefined) {
+    if (options.password.length < 8) {
+      throw new CliError(400, 'Password must be at least 8 characters.');
+    }
+    patch.password = options.password;
+  }
+  if (options.template !== undefined) {
+    patch.template = parseBooleanOption(options.template, '--template');
+  }
+
+  const hasUpdates = Object.keys(patch).length > 0;
+  const pen = hasUpdates
+    ? await client.updatePen(project.config.pen_id, patch)
+    : await client.getPen(project.config.pen_id);
+
+  if (hasUpdates) {
+    const nextConfig = mergeUpdatedPenInfoIntoConfig(project.config, pen, patch);
+    await writeProjectConfig(project.rootDir, nextConfig);
+    project.config = nextConfig;
+  }
+
+  if (options.json) {
+    printJsonResponse(
+      200,
+      hasUpdates ? 'Updated Pen metadata.' : 'Fetched Pen metadata.',
+      pen,
+    );
+    return { pen, updated: hasUpdates, auth, project };
+  }
+
+  if (hasUpdates) {
+    console.log(`${fmt.green('✓')} Updated Pen metadata.\n`);
+  }
+  renderPenInfo(pen, auth.profile);
+  return { pen, updated: hasUpdates, auth, project };
+}
+
 export function registerMetaCommands(program: Command): void {
   program
     .command('info')
@@ -81,62 +185,10 @@ export function registerMetaCommands(program: Command): void {
         },
         command: Command,
       ) => {
-        const project = await requireProject();
-        const auth = await resolveCommandAuth({
+        await infoPenCommand({
+          ...options,
           explicitProfile: getGlobalProfileOption(command),
-          project,
-          interactive: options.json ? false : undefined,
-          persistProfileToProject: !options.json,
         });
-        const client = new CodePenClient({ apiKey: auth.apiKey });
-
-        const patch: PenUpdateRequest = {};
-        if (options.title !== undefined) patch.title = options.title;
-        if (options.description !== undefined) patch.description = options.description;
-        if (options.tags !== undefined) {
-          patch.tags = options.tags
-            .split(',')
-            .map((t) => t.trim())
-            .filter(Boolean);
-        }
-        if (options.access !== undefined) {
-          const lower = options.access.trim().toLowerCase();
-          if (!VALID_ACCESS.has(lower)) {
-            throw new CliError(
-              400,
-              `Invalid --access "${options.access}". Use: Public, Private, Protected, or Collaborators.`,
-            );
-          }
-          patch.access = (lower[0]!.toUpperCase() + lower.slice(1)) as PenAccess;
-        }
-        if (options.password !== undefined) {
-          if (options.password.length < 8) {
-            throw new CliError(400, 'Password must be at least 8 characters.');
-          }
-          patch.password = options.password;
-        }
-        if (options.template !== undefined) {
-          patch.template = parseBooleanOption(options.template, '--template');
-        }
-
-        const hasUpdates = Object.keys(patch).length > 0;
-        const pen = hasUpdates
-          ? await client.updatePen(project.config.pen_id, patch)
-          : await client.getPen(project.config.pen_id);
-
-        if (options.json) {
-          printJsonResponse(
-            200,
-            hasUpdates ? 'Updated Pen metadata.' : 'Fetched Pen metadata.',
-            pen,
-          );
-          return;
-        }
-
-        if (hasUpdates) {
-          console.log(`${fmt.green('✓')} Updated Pen metadata.\n`);
-        }
-        renderPenInfo(pen, auth.profile);
       },
     );
 

@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { normalizePartialPenInfo, parsePenInfoInput } from '../sync/info.js';
 import type { CdpnConfig, Pen, PenFile, SyncedFileEntry } from '../types.js';
 import { CliError } from '../utils/json.js';
 
@@ -128,8 +129,15 @@ export async function readProjectConfig(rootDir: string): Promise<CdpnConfig> {
       ? record.last_synced_version_id
       : null;
 
+  const lastSyncedInfoHash =
+    typeof record.last_synced_info_hash === 'string' && record.last_synced_info_hash.trim()
+      ? record.last_synced_info_hash.trim()
+      : undefined;
+
   const editor =
     record.editor === 'V2' || record.editor === 'Classic' ? record.editor : undefined;
+
+  const info = parsePenInfoInput(record.info, PROJECT_CONFIG_FILENAME);
 
   let files: Record<string, SyncedFileEntry> | undefined;
   if (record.files && typeof record.files === 'object' && !Array.isArray(record.files)) {
@@ -158,7 +166,9 @@ export async function readProjectConfig(rootDir: string): Promise<CdpnConfig> {
     pen_id: record.pen_id.trim(),
     ...(profile ? { profile } : {}),
     last_synced_version_id: lastSynced,
+    ...(lastSyncedInfoHash ? { last_synced_info_hash: lastSyncedInfoHash } : {}),
     ...(editor ? { editor } : {}),
+    ...(info !== undefined ? { info } : {}),
     ...(files ? { files } : {}),
   };
 }
@@ -166,12 +176,16 @@ export async function readProjectConfig(rootDir: string): Promise<CdpnConfig> {
 export async function writeProjectConfig(rootDir: string, config: CdpnConfig): Promise<string> {
   const configPath = path.join(path.resolve(rootDir), PROJECT_CONFIG_FILENAME);
   const trimmedProfile = config.profile?.trim();
+  const trimmedInfoHash = config.last_synced_info_hash?.trim();
+  const normalizedInfo = config.info !== undefined ? normalizePartialPenInfo(config.info) : undefined;
   const ordered: CdpnConfig = {
     url: config.url,
     pen_id: config.pen_id,
     ...(trimmedProfile ? { profile: trimmedProfile } : {}),
     last_synced_version_id: config.last_synced_version_id,
+    ...(trimmedInfoHash ? { last_synced_info_hash: trimmedInfoHash } : {}),
     ...(config.editor ? { editor: config.editor } : {}),
+    ...(normalizedInfo !== undefined ? { info: normalizedInfo } : {}),
     ...(config.files ? { files: sortRecordKeys(config.files) } : {}),
   };
   await fs.writeFile(configPath, `${JSON.stringify(ordered, null, 2)}\n`, 'utf8');

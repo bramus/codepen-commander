@@ -1,155 +1,263 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import { API_KEY_ENV_VAR } from '../config/auth.js';
-import { requireProject } from '../config/project.js';
-import { computeSyncDiff, detectLocalChangesFromBaseline, hasDiffChanges } from '../sync/diff.js';
+import { API_KEY_ENV_VAR, type ResolvedAuth } from '../config/auth.js';
+import { PROJECT_CONFIG_FILENAME, requireProject, type ProjectLocation } from '../config/project.js';
+import {
+  computeSyncDiff,
+  detectLocalChangesFromBaseline,
+  hasDiffChanges,
+  type SyncDiff,
+} from '../sync/diff.js';
 import { scanLocalFiles } from '../sync/fs.js';
+import { analyzeInfoSync, formatInfoValue, type InfoSyncAnalysis } from '../sync/info.js';
+import type { Pen } from '../types.js';
 import { fmt, shortId } from '../utils/format.js';
 import { printJsonResponse } from '../utils/json.js';
+import type { SelectOption } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
+
+export interface StatusPenCommandOptions {
+  json?: boolean;
+  cwd?: string;
+  explicitProfile?: string;
+  baseUrl?: string;
+  interactive?: boolean;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  selectProfile?: (
+    question: string,
+    options: SelectOption<string>[],
+    defaultIndex: number,
+  ) => Promise<string>;
+}
+
+export interface StatusPenResult {
+  pen: Pen;
+  auth: ResolvedAuth;
+  project: ProjectLocation;
+  diff: SyncDiff;
+  infoAnalysis: InfoSyncAnalysis;
+  remoteMoved: boolean;
+  upToDate: boolean;
+}
+
+export async function statusPenCommand(
+  options: StatusPenCommandOptions = {},
+): Promise<StatusPenResult> {
+  const cwd = options.cwd ?? process.cwd();
+  const project = await requireProject(cwd);
+  const auth = await resolveCommandAuth({
+    explicitProfile: options.explicitProfile,
+    project,
+    interactive: options.json ? false : options.interactive,
+    persistProfileToProject: !options.json,
+    env: options.env,
+    homeDir: options.homeDir,
+    selectProfile: options.selectProfile,
+  });
+  const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
+
+  const [pen, remoteFiles, localFiles] = await Promise.all([
+    client.getPen(project.config.pen_id),
+    client.getPenFiles(project.config.pen_id),
+    scanLocalFiles(project.rootDir),
+  ]);
+
+  const diff = await computeSyncDiff({
+    localFiles,
+    remoteFiles,
+    baseline: project.config.files,
+    downloadFile: (url) => client.downloadFile(url),
+  });
+
+  const infoAnalysis = analyzeInfoSync(
+    project.config.info,
+    project.config.last_synced_info_hash,
+    pen,
+  );
+
+  const localHead = project.config.last_synced_version_id;
+  const remoteHead = pen.saved_version?.id ?? null;
+  const remoteMoved = Boolean(remoteHead && localHead && remoteHead !== localHead);
+  const localBaselineChanges = detectLocalChangesFromBaseline(localFiles, project.config.files);
+
+  const fileChangeCount = diff.added.length + diff.modified.length + diff.deleted.length;
+  const infoChangeCount = infoAnalysis.changes.length;
+  const totalChanges = fileChangeCount + infoChangeCount;
+  const upToDate = totalChanges === 0 && !remoteMoved;
+
+  if (options.json) {
+    let message: string;
+    if (totalChanges === 0) {
+      message = remoteMoved
+        ? 'Local files match remote content, but version metadata is behind.'
+        : `Up to date with CodePen (${diff.unchanged.length} file(s)).`;
+    } else if (fileChangeCount > 0 && infoChangeCount > 0) {
+      message = `Found ${fileChangeCount} file difference(s) and ${infoChangeCount} Pen info difference(s).`;
+    } else if (fileChangeCount > 0) {
+      message = `Found ${fileChangeCount} difference(s) between local folder and remote head.`;
+    } else {
+      message = `Found ${infoChangeCount} Pen info difference(s) between ${PROJECT_CONFIG_FILENAME} and CodePen.`;
+    }
+
+    printJsonResponse(200, message, {
+      pen_id: pen.id,
+      title: pen.title,
+      editor: pen.editor,
+      profile: auth.profile ?? project.config.profile ?? null,
+      auth_source: auth.source,
+      url: project.config.url,
+      local_version_id: localHead,
+      remote_version_id: remoteHead,
+      remote_ahead: remoteMoved,
+      up_to_date: upToDate,
+      build_status: pen.saved_version?.build?.status ?? null,
+      deployment: pen.deployment,
+      changes: {
+        added: diff.added.map((i) => i.path),
+        modified: diff.modified.map((i) => i.path),
+        deleted: diff.deleted.map((i) => i.path),
+        unchanged: diff.unchanged.map((i) => i.path),
+      },
+      info_tracked: infoAnalysis.tracked,
+      info_local_changed: infoAnalysis.localChanged,
+      info_remote_changed: infoAnalysis.remoteChanged,
+      info_changes: infoAnalysis.changes,
+    });
+    return { pen, auth, project, diff, infoAnalysis, remoteMoved, upToDate };
+  }
+
+  console.log(`${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id}, ${pen.editor})`)}`);
+  console.log(
+    `Profile:  ${auth.profile ? fmt.cyan(auth.profile) : fmt.dim(`env (${API_KEY_ENV_VAR})`)}`,
+  );
+  console.log(`URL:      ${fmt.cyan(project.config.url)}`);
+  console.log(`Synced:   ${fmt.dim(shortId(localHead))}`);
+  console.log(
+    `Remote:   ${fmt.dim(shortId(remoteHead))}` +
+      (remoteMoved ? ` ${fmt.yellow('(remote head has moved since last sync!)')}` : ''),
+  );
+
+  const buildStatus = pen.saved_version?.build?.status;
+  if (buildStatus) {
+    const colored =
+      buildStatus === 'Success'
+        ? fmt.green(buildStatus)
+        : buildStatus === 'Failed'
+          ? fmt.red(buildStatus)
+          : fmt.yellow(buildStatus);
+    console.log(`Build:    ${colored}`);
+  }
+
+  if (pen.deployment) {
+    const deployedIsHead = pen.deployment.version_id === remoteHead;
+    const deployNote = deployedIsHead
+      ? fmt.green('up to date')
+      : fmt.yellow(`older version ${shortId(pen.deployment.version_id)}`);
+    console.log(`Deployed: ${fmt.cyan(pen.deployment.url)} ${fmt.dim(`(${deployNote})`)}`);
+    if (pen.deployment.custom_domains.length > 0) {
+      console.log(`Domains:  ${pen.deployment.custom_domains.join(', ')}`);
+    }
+  } else {
+    console.log(`Deployed: ${fmt.dim('not deployed')}`);
+  }
+
+  console.log('');
+
+  const hasFileChanges = hasDiffChanges(diff);
+  const hasInfoChanges = infoAnalysis.changes.length > 0;
+
+  if (!hasFileChanges && !hasInfoChanges) {
+    if (remoteMoved) {
+      console.log(
+        `${fmt.yellow('!')} Local files match remote content, but version metadata is behind. Run \`cdpn pull\` to update ${fmt.dim(PROJECT_CONFIG_FILENAME)}.`,
+      );
+    } else {
+      console.log(`${fmt.green('✓')} Up to date with CodePen (${diff.unchanged.length} file(s)).`);
+    }
+    if (!infoAnalysis.tracked) {
+      console.log(
+        fmt.dim(
+          `Note: ${PROJECT_CONFIG_FILENAME} does not include Pen info yet. Run \`cdpn pull\` or \`cdpn push\` to add it.`,
+        ),
+      );
+    }
+    return { pen, auth, project, diff, infoAnalysis, remoteMoved, upToDate };
+  }
+
+  if (hasFileChanges) {
+    const localModifiedSet = new Set([
+      ...localBaselineChanges.added,
+      ...localBaselineChanges.modified,
+      ...localBaselineChanges.deleted,
+    ]);
+
+    console.log('Differences between local folder and remote head:');
+    for (const item of diff.added) {
+      const hint = remoteMoved && !localModifiedSet.has(item.path) ? fmt.dim(' (deleted remotely)') : '';
+      console.log(`  ${fmt.green('+')} ${item.path}${hint}`);
+    }
+    for (const item of diff.modified) {
+      const hint = remoteMoved && !localModifiedSet.has(item.path) ? fmt.dim(' (changed remotely)') : '';
+      console.log(`  ${fmt.yellow('~')} ${item.path}${hint}`);
+    }
+    for (const item of diff.deleted) {
+      const hint = remoteMoved && !localModifiedSet.has(item.path) ? fmt.dim(' (added remotely)') : '';
+      console.log(`  ${fmt.red('-')} ${item.path}${hint}`);
+    }
+  }
+
+  if (hasInfoChanges) {
+    if (hasFileChanges) {
+      console.log('');
+    }
+    console.log(`Differences in Pen info (${PROJECT_CONFIG_FILENAME}):`);
+    for (const change of infoAnalysis.changes) {
+      const localVal = formatInfoValue(change.field, change.local);
+      const remoteVal = formatInfoValue(change.field, change.remote);
+      if (infoAnalysis.localChanged && infoAnalysis.remoteChanged) {
+        console.log(
+          `  ${fmt.yellow('~')} info.${change.field}: local ${localVal} vs remote ${remoteVal}${fmt.yellow(' (conflict)')}`,
+        );
+      } else if (!infoAnalysis.localChanged && infoAnalysis.remoteChanged) {
+        console.log(
+          `  ${fmt.yellow('~')} info.${change.field}: ${localVal} → ${remoteVal}${fmt.dim(' (changed remotely)')}`,
+        );
+      } else {
+        console.log(`  ${fmt.yellow('~')} info.${change.field}: ${remoteVal} → ${localVal}`);
+      }
+    }
+  }
+
+  console.log('');
+  if (remoteMoved || (infoAnalysis.localChanged && infoAnalysis.remoteChanged)) {
+    console.log(
+      fmt.yellow(
+        'Remote has newer changes. Run `cdpn pull` to sync remote changes, or `cdpn push --force` to overwrite remote with local.',
+      ),
+    );
+  } else if (!hasFileChanges && !infoAnalysis.localChanged && infoAnalysis.remoteChanged) {
+    console.log(
+      fmt.yellow(
+        `Remote Pen info has changed. Run \`cdpn pull\` to update ${PROJECT_CONFIG_FILENAME}, or \`cdpn push --force\` to overwrite remote with local.`,
+      ),
+    );
+  } else {
+    console.log(fmt.dim('Run `cdpn push` to upload these changes, or `cdpn pull` to discard local changes.'));
+  }
+
+  return { pen, auth, project, diff, infoAnalysis, remoteMoved, upToDate };
+}
 
 export function registerStatusCommand(program: Command): void {
   program
     .command('status')
-    .description('Compare local files with the online version on CodePen')
+    .description('Compare local files and Pen info with the online version on CodePen')
     .option('--json', 'Output status as JSON')
     .action(async (options: { json?: boolean }, command: Command) => {
-      const project = await requireProject();
-      const auth = await resolveCommandAuth({
+      await statusPenCommand({
+        json: options.json,
         explicitProfile: getGlobalProfileOption(command),
-        project,
-        interactive: options.json ? false : undefined,
-        persistProfileToProject: !options.json,
       });
-      const client = new CodePenClient({ apiKey: auth.apiKey });
-
-      const [pen, remoteFiles, localFiles] = await Promise.all([
-        client.getPen(project.config.pen_id),
-        client.getPenFiles(project.config.pen_id),
-        scanLocalFiles(project.rootDir),
-      ]);
-
-      const diff = await computeSyncDiff({
-        localFiles,
-        remoteFiles,
-        baseline: project.config.files,
-        downloadFile: (url) => client.downloadFile(url),
-      });
-
-      const localHead = project.config.last_synced_version_id;
-      const remoteHead = pen.saved_version?.id ?? null;
-      const remoteMoved = Boolean(remoteHead && localHead && remoteHead !== localHead);
-      const localBaselineChanges = detectLocalChangesFromBaseline(localFiles, project.config.files);
-
-      if (options.json) {
-        const changeCount = diff.added.length + diff.modified.length + diff.deleted.length;
-        const message =
-          changeCount === 0
-            ? remoteMoved
-              ? 'Local files match remote content, but version metadata is behind.'
-              : `Up to date with CodePen (${diff.unchanged.length} file(s)).`
-            : `Found ${changeCount} difference(s) between local folder and remote head.`;
-
-        printJsonResponse(200, message, {
-          pen_id: pen.id,
-          title: pen.title,
-          editor: pen.editor,
-          profile: auth.profile ?? project.config.profile ?? null,
-          auth_source: auth.source,
-          url: project.config.url,
-          local_version_id: localHead,
-          remote_version_id: remoteHead,
-          remote_ahead: remoteMoved,
-          up_to_date: changeCount === 0 && !remoteMoved,
-          build_status: pen.saved_version?.build?.status ?? null,
-          deployment: pen.deployment,
-          changes: {
-            added: diff.added.map((i) => i.path),
-            modified: diff.modified.map((i) => i.path),
-            deleted: diff.deleted.map((i) => i.path),
-            unchanged: diff.unchanged.map((i) => i.path),
-          },
-        });
-        return;
-      }
-
-      console.log(`${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id}, ${pen.editor})`)}`);
-      console.log(
-        `Profile:  ${auth.profile ? fmt.cyan(auth.profile) : fmt.dim(`env (${API_KEY_ENV_VAR})`)}`,
-      );
-      console.log(`URL:      ${fmt.cyan(project.config.url)}`);
-      console.log(`Synced:   ${fmt.dim(shortId(localHead))}`);
-      console.log(
-        `Remote:   ${fmt.dim(shortId(remoteHead))}` +
-          (remoteMoved ? ` ${fmt.yellow('(remote head has moved since last sync!)')}` : ''),
-      );
-
-      const buildStatus = pen.saved_version?.build?.status;
-      if (buildStatus) {
-        const colored =
-          buildStatus === 'Success'
-            ? fmt.green(buildStatus)
-            : buildStatus === 'Failed'
-              ? fmt.red(buildStatus)
-              : fmt.yellow(buildStatus);
-        console.log(`Build:    ${colored}`);
-      }
-
-      if (pen.deployment) {
-        const deployedIsHead = pen.deployment.version_id === remoteHead;
-        const deployNote = deployedIsHead
-          ? fmt.green('up to date')
-          : fmt.yellow(`older version ${shortId(pen.deployment.version_id)}`);
-        console.log(`Deployed: ${fmt.cyan(pen.deployment.url)} ${fmt.dim(`(${deployNote})`)}`);
-        if (pen.deployment.custom_domains.length > 0) {
-          console.log(`Domains:  ${pen.deployment.custom_domains.join(', ')}`);
-        }
-      } else {
-        console.log(`Deployed: ${fmt.dim('not deployed')}`);
-      }
-
-      console.log('');
-
-      if (!hasDiffChanges(diff)) {
-        if (remoteMoved) {
-          console.log(
-            `${fmt.yellow('!')} Local files match remote content, but version metadata is behind. Run \`cdpn pull\` to update ${fmt.dim('.cdpn.json')}.`,
-          );
-        } else {
-          console.log(`${fmt.green('✓')} Up to date with CodePen (${diff.unchanged.length} file(s)).`);
-        }
-        return;
-      }
-
-      const localModifiedSet = new Set([
-        ...localBaselineChanges.added,
-        ...localBaselineChanges.modified,
-        ...localBaselineChanges.deleted,
-      ]);
-
-      console.log('Differences between local folder and remote head:');
-      for (const item of diff.added) {
-        const hint = remoteMoved && !localModifiedSet.has(item.path) ? fmt.dim(' (deleted remotely)') : '';
-        console.log(`  ${fmt.green('+')} ${item.path}${hint}`);
-      }
-      for (const item of diff.modified) {
-        const hint = remoteMoved && !localModifiedSet.has(item.path) ? fmt.dim(' (changed remotely)') : '';
-        console.log(`  ${fmt.yellow('~')} ${item.path}${hint}`);
-      }
-      for (const item of diff.deleted) {
-        const hint = remoteMoved && !localModifiedSet.has(item.path) ? fmt.dim(' (added remotely)') : '';
-        console.log(`  ${fmt.red('-')} ${item.path}${hint}`);
-      }
-
-      console.log('');
-      if (remoteMoved) {
-        console.log(
-          fmt.yellow(
-            'Remote has newer commits. Run `cdpn pull` to sync remote changes, or `cdpn push --force` to overwrite remote with local.',
-          ),
-        );
-      } else {
-        console.log(fmt.dim('Run `cdpn push` to upload these changes, or `cdpn pull` to discard local changes.'));
-      }
     });
 }

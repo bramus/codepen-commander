@@ -11,8 +11,17 @@ import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 import { createPenFromDirectory } from './create-pen.js';
 import { computeSyncDiff, hasDiffChanges } from '../sync/diff.js';
 import { scanLocalFiles } from '../sync/fs.js';
+import {
+  analyzeInfoSync,
+  buildInfoUpdatePatch,
+  buildPenInfoConfigFields,
+  formatInfoValue,
+  hashPenInfo,
+  isCompletePenInfo,
+  type InfoDiffItem,
+} from '../sync/info.js';
 import { applyCompilerPatchesToDisk } from '../sync/materialize.js';
-import type { BinaryUploadPart, Build, BuildPatch, FileChange, Pen } from '../types.js';
+import type { BinaryUploadPart, Build, BuildPatch, FileChange, Pen, PenFile } from '../types.js';
 import { fmt, printBuildSummary, shortId } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
 import { isInteractive } from '../utils/prompts.js';
@@ -40,7 +49,9 @@ export interface PushExecutionResult {
     modified: string[];
     deleted: string[];
   };
+  infoChanges: InfoDiffItem[];
   appliedPatches: BuildPatch[];
+  remoteInfoChanged?: boolean;
 }
 
 export async function executePush(
@@ -84,10 +95,63 @@ export async function executePush(
     downloadFile: (url) => client.downloadFile(url),
   });
 
-  if (!hasDiffChanges(diff)) {
-    if (!silent) {
-      console.log(`${fmt.green('✓')} Everything is up to date — nothing to push.`);
+  const infoAnalysis = analyzeInfoSync(
+    project.config.info,
+    project.config.last_synced_info_hash,
+    pen,
+  );
+
+  if (infoAnalysis.localChanged && infoAnalysis.remoteChanged && !options.force) {
+    const fields = infoAnalysis.changes.map((c) => c.field).join(', ');
+    throw new CliError(
+      409,
+      `Remote Pen info has changed since your last sync, and you also have local info edits in ${PROJECT_CONFIG_FILENAME} (${fields}).\n` +
+        'Run `cdpn status` to inspect differences, `cdpn pull` to sync remote changes, or `cdpn push --force` to overwrite.',
+      {
+        info_changes: infoAnalysis.changes,
+      },
+    );
+  }
+
+  const hasFileChanges = hasDiffChanges(diff);
+  const shouldPushInfo =
+    infoAnalysis.changes.length > 0 && (infoAnalysis.localChanged || Boolean(options.force));
+  const infoChangesToPush = shouldPushInfo ? infoAnalysis.changes : [];
+  // Validate info patch constraints up-front before making any write API calls
+  const infoPatch = shouldPushInfo ? buildInfoUpdatePatch(infoChangesToPush) : null;
+
+  if (!hasFileChanges && !shouldPushInfo) {
+    let backfilledLegacyInfo = false;
+    if (!options.dryRun && infoAnalysis.changes.length === 0) {
+      const remoteHash = hashPenInfo(infoAnalysis.remoteInfo);
+      const needsInfoUpgrade =
+        !infoAnalysis.tracked ||
+        !isCompletePenInfo(project.config.info) ||
+        project.config.last_synced_info_hash !== remoteHash;
+      if (needsInfoUpgrade) {
+        backfilledLegacyInfo = !infoAnalysis.tracked;
+        const nextConfig = {
+          ...project.config,
+          ...buildPenInfoConfigFields(pen),
+        };
+        await writeProjectConfig(project.rootDir, nextConfig);
+        project.config = nextConfig;
+      }
     }
+
+    if (!silent) {
+      if (infoAnalysis.remoteChanged) {
+        console.log(
+          `${fmt.cyan('ℹ')} No local changes to push. Remote Pen info has changed on CodePen — run \`cdpn pull\` to update ${PROJECT_CONFIG_FILENAME}, or \`cdpn push --force\` to overwrite.`,
+        );
+      } else {
+        console.log(`${fmt.green('✓')} Everything is up to date — nothing to push.`);
+        if (backfilledLegacyInfo) {
+          console.log(fmt.dim(`  Added Pen info to ${PROJECT_CONFIG_FILENAME}.`));
+        }
+      }
+    }
+
     return {
       pushed: false,
       dryRun: Boolean(options.dryRun),
@@ -95,7 +159,9 @@ export async function executePush(
       versionId: remoteHead,
       build: pen.saved_version?.build ?? null,
       changes: { added: [], modified: [], deleted: [] },
+      infoChanges: [],
       appliedPatches: [],
+      remoteInfoChanged: infoAnalysis.remoteChanged,
     };
   }
 
@@ -112,133 +178,193 @@ export async function executePush(
     for (const item of diff.added) console.log(`  ${fmt.green('+')} ${item.path}`);
     for (const item of diff.modified) console.log(`  ${fmt.yellow('~')} ${item.path}`);
     for (const item of diff.deleted) console.log(`  ${fmt.red('-')} ${item.path}`);
-  }
-
-  const fileChanges: FileChange[] = [];
-  const binaryUploads: BinaryUploadPart[] = [];
-
-  for (const item of [...diff.added, ...diff.modified]) {
-    const local = item.local!;
-    // Note: CodePen API returns 400 on empty multipart parts, so 0-byte files always go as text JSON
-    if (local.isBinary && local.buffer.length > 0) {
-      binaryUploads.push({ path: item.path, content: local.buffer });
-    } else {
-      fileChanges.push({
-        path: item.path,
-        content: local.textContent ?? '',
-      });
+    for (const change of infoChangesToPush) {
+      console.log(
+        `  ${fmt.yellow('~')} info.${change.field}: ${formatInfoValue(change.field, change.remote)} → ${formatInfoValue(change.field, change.local)}`,
+      );
     }
   }
 
-  for (const item of diff.deleted) {
-    fileChanges.push({
-      path: item.path,
-      delete: true,
-    });
-  }
+  let finalBuild: Build | null = pen.saved_version?.build ?? null;
+  let finalVersionId: string | null = remoteHead;
+  let appliedPatches: BuildPatch[] = [];
+  let updatedPen: Pen = pen;
+  let finalRemoteFiles: PenFile[] | undefined;
+  let localShaByPath: Map<string, string> | undefined;
 
-  const expectedVersionId = options.force ? undefined : (localHead ?? remoteHead ?? undefined);
-  const shouldWait = options.wait !== false;
+  if (hasFileChanges) {
+    const fileChanges: FileChange[] = [];
+    const binaryUploads: BinaryUploadPart[] = [];
 
-  if (!silent) {
-    console.log(shouldWait ? '\nUploading and building on CodePen…' : '\nUploading to CodePen…');
-  }
+    for (const item of [...diff.added, ...diff.modified]) {
+      const local = item.local!;
+      // Note: CodePen API returns 400 on empty multipart parts, so 0-byte files always go as text JSON
+      if (local.isBinary && local.buffer.length > 0) {
+        binaryUploads.push({ path: item.path, content: local.buffer });
+      } else {
+        fileChanges.push({
+          path: item.path,
+          content: local.textContent ?? '',
+        });
+      }
+    }
 
-  const writeResult = await client.writePenFiles(
-    pen.id,
-    {
-      files: fileChanges,
-      ...(options.label ? { label: options.label } : {}),
-      ...(expectedVersionId ? { expected_version_id: expectedVersionId } : {}),
-      ...(options.dryRun ? { dry_run: true } : {}),
-      wait: shouldWait ? 45 : 0,
-    },
-    binaryUploads,
-  );
+    for (const item of diff.deleted) {
+      fileChanges.push({
+        path: item.path,
+        delete: true,
+      });
+    }
 
-  let finalBuild = writeResult.build;
-  if (finalBuild && shouldWait) {
-    let lastStatus = `${finalBuild.status}:${finalBuild.id}`;
-    finalBuild = await client.settleBuild(finalBuild, {
-      onUpdate: (b) => {
-        if (silent) return;
-        const key = `${b.status}:${b.id}`;
-        if (key !== lastStatus) {
-          lastStatus = key;
-          if (b.status === 'Running' || b.status === 'Queued') {
-            console.log(fmt.dim(`  Build ${shortId(b.id)}: ${b.status}…`));
-          } else if (b.status === 'Canceled' && b.next_id) {
-            console.log(fmt.dim('  Compiler requested patches — waiting for converged rebuild…'));
-          }
-        }
+    const expectedVersionId = options.force ? undefined : (localHead ?? remoteHead ?? undefined);
+    const shouldWait = options.wait !== false;
+
+    if (!silent) {
+      console.log(shouldWait ? '\nUploading and building on CodePen…' : '\nUploading to CodePen…');
+    }
+
+    const writeResult = await client.writePenFiles(
+      pen.id,
+      {
+        files: fileChanges,
+        ...(options.label ? { label: options.label } : {}),
+        ...(expectedVersionId ? { expected_version_id: expectedVersionId } : {}),
+        ...(options.dryRun ? { dry_run: true } : {}),
+        wait: shouldWait ? 45 : 0,
       },
-    });
-  }
+      binaryUploads,
+    );
 
-  if (finalBuild && !silent) {
-    printBuildSummary(finalBuild);
-  }
+    finalBuild = writeResult.build;
+    if (finalBuild && shouldWait) {
+      let lastStatus = `${finalBuild.status}:${finalBuild.id}`;
+      finalBuild = await client.settleBuild(finalBuild, {
+        onUpdate: (b) => {
+          if (silent) return;
+          const key = `${b.status}:${b.id}`;
+          if (key !== lastStatus) {
+            lastStatus = key;
+            if (b.status === 'Running' || b.status === 'Queued') {
+              console.log(fmt.dim(`  Build ${shortId(b.id)}: ${b.status}…`));
+            } else if (b.status === 'Canceled' && b.next_id) {
+              console.log(fmt.dim('  Compiler requested patches — waiting for converged rebuild…'));
+            }
+          }
+        },
+      });
+    }
 
-  const finalVersionId = finalBuild?.version_id ?? writeResult.version?.id ?? null;
-  const appliedPatches = finalBuild?.applied_patches ?? [];
+    if (finalBuild && !silent) {
+      printBuildSummary(finalBuild);
+    }
+
+    finalVersionId = finalBuild?.version_id ?? writeResult.version?.id ?? null;
+    appliedPatches = finalBuild?.applied_patches ?? [];
+    updatedPen = writeResult.pen ?? pen;
+
+    if (!options.dryRun) {
+      // Re-read the converged version's source files so we write back any compiler patches
+      let convergedFiles = writeResult.version?.files;
+      if (finalVersionId && (appliedPatches.length > 0 || !convergedFiles)) {
+        const version = await client.getVersion(finalVersionId);
+        convergedFiles = version.files;
+      }
+
+      if (finalBuild && appliedPatches.length > 0) {
+        await applyCompilerPatchesToDisk({
+          client,
+          rootDir: project.rootDir,
+          patches: appliedPatches,
+          convergedFiles,
+        });
+        if (!silent) {
+          console.log(fmt.cyan('✓ Synced compiler patches back to local folder.'));
+        }
+      }
+
+      // Re-scan local hashes so .cdpn.json reflects exact post-patch local state
+      const postPushLocalFiles = await scanLocalFiles(project.rootDir);
+      localShaByPath = new Map<string, string>();
+      for (const [p, lf] of postPushLocalFiles) {
+        localShaByPath.set(p, lf.sha256);
+      }
+
+      finalRemoteFiles = convergedFiles ?? (await client.getPenFiles(pen.id));
+
+      // If an info PATCH is still pending, persist the synced file manifest now while preserving
+      // unpushed local `info` so a subsequent info validation error never leaves version metadata stale.
+      if (shouldPushInfo) {
+        const intermediateConfig = {
+          url: project.config.url || updatedPen.urls.editor,
+          pen_id: updatedPen.id,
+          ...(project.config.profile ? { profile: project.config.profile } : {}),
+          last_synced_version_id: finalVersionId,
+          ...(project.config.last_synced_info_hash
+            ? { last_synced_info_hash: project.config.last_synced_info_hash }
+            : {}),
+          editor: updatedPen.editor,
+          ...(project.config.info !== undefined ? { info: project.config.info } : {}),
+          files: buildSyncedFileMap(finalRemoteFiles, localShaByPath),
+        };
+        await writeProjectConfig(project.rootDir, intermediateConfig);
+        project.config = intermediateConfig;
+      }
+    }
+  }
 
   if (options.dryRun) {
     if (!silent) {
       console.log(
-        `\n${fmt.cyan('ℹ')} Dry run complete — no changes were saved to CodePen head` +
-          (finalVersionId ? ` ${fmt.dim(`(ephemeral version ${shortId(finalVersionId)})`)}.` : '.'),
+        `\n${fmt.cyan('ℹ')} Dry run complete — no changes were saved to CodePen` +
+          (hasFileChanges && finalVersionId
+            ? ` ${fmt.dim(`(ephemeral version ${shortId(finalVersionId)})`)}.`
+            : '.'),
       );
     }
     return {
       pushed: false,
       dryRun: true,
-      pen: writeResult.pen ?? pen,
-      versionId: finalVersionId,
-      build: finalBuild,
+      pen: updatedPen,
+      versionId: hasFileChanges ? finalVersionId : remoteHead,
+      build: hasFileChanges ? finalBuild : null,
       changes,
+      infoChanges: infoChangesToPush,
       appliedPatches,
     };
   }
 
-  // Re-read the converged version's source files so we write back any compiler patches
-  let convergedFiles = writeResult.version?.files;
-  if (finalVersionId && (appliedPatches.length > 0 || !convergedFiles)) {
-    const version = await client.getVersion(finalVersionId);
-    convergedFiles = version.files;
-  }
-
-  if (finalBuild && appliedPatches.length > 0) {
-    await applyCompilerPatchesToDisk({
-      client,
-      rootDir: project.rootDir,
-      patches: appliedPatches,
-      convergedFiles,
-    });
+  if (shouldPushInfo && infoPatch) {
     if (!silent) {
-      console.log(fmt.cyan('✓ Synced compiler patches back to local folder.'));
+      console.log('\nUpdating Pen info on CodePen…');
     }
+    updatedPen = await client.updatePen(pen.id, infoPatch);
   }
 
-  // Re-scan local hashes so .cdpn.json reflects exact post-patch local state
-  const postPushLocalFiles = await scanLocalFiles(project.rootDir);
-  const localShaByPath = new Map<string, string>();
-  for (const [p, lf] of postPushLocalFiles) {
-    localShaByPath.set(p, lf.sha256);
-  }
-
-  const finalRemoteFiles = convergedFiles ?? (await client.getPenFiles(pen.id));
-  const updatedPen = writeResult.pen ?? pen;
-
-  await writeProjectConfig(project.rootDir, {
+  const nextConfig = {
     url: project.config.url || updatedPen.urls.editor,
     pen_id: updatedPen.id,
     ...(project.config.profile ? { profile: project.config.profile } : {}),
-    last_synced_version_id: finalVersionId,
+    last_synced_version_id: hasFileChanges ? finalVersionId : project.config.last_synced_version_id,
     editor: updatedPen.editor,
-    files: buildSyncedFileMap(finalRemoteFiles, localShaByPath),
-  });
+    ...buildPenInfoConfigFields(updatedPen),
+    ...(hasFileChanges && finalRemoteFiles && localShaByPath
+      ? { files: buildSyncedFileMap(finalRemoteFiles, localShaByPath) }
+      : project.config.files
+        ? { files: project.config.files }
+        : {}),
+  };
+  await writeProjectConfig(project.rootDir, nextConfig);
+  project.config = nextConfig;
 
-  if (finalBuild?.status === 'Failed') {
+  if (!silent) {
+    if (hasFileChanges && !shouldPushInfo && infoAnalysis.remoteChanged) {
+      console.log(fmt.cyan(`ℹ Synced remote Pen info into ${PROJECT_CONFIG_FILENAME}.`));
+    } else if (hasFileChanges && !infoAnalysis.tracked) {
+      console.log(fmt.dim(`Added Pen info to ${PROJECT_CONFIG_FILENAME}.`));
+    }
+  }
+
+  if (hasFileChanges && finalBuild?.status === 'Failed') {
     if (!silent) {
       console.log(
         `\n${fmt.yellow('!')} Files were saved as version ${fmt.dim(shortId(finalVersionId))}, but the build failed.`,
@@ -246,10 +372,16 @@ export async function executePush(
     }
     process.exitCode = 1;
   } else if (!silent) {
-    console.log(
-      `\n${fmt.green('✓')} Pushed successfully ${fmt.dim(`(version ${shortId(finalVersionId)})`)}`,
-    );
-    console.log(`  Preview: ${fmt.cyan(updatedPen.urls.preview)}`);
+    if (hasFileChanges) {
+      console.log(
+        `\n${fmt.green('✓')} Pushed successfully ${fmt.dim(`(version ${shortId(finalVersionId)})`)}`,
+      );
+      console.log(`  Preview: ${fmt.cyan(updatedPen.urls.preview)}`);
+    } else {
+      console.log(`\n${fmt.green('✓')} Updated Pen info successfully.`);
+      console.log(`  Editor:  ${fmt.cyan(updatedPen.urls.editor)}`);
+      console.log(`  Preview: ${fmt.cyan(updatedPen.urls.preview)}`);
+    }
   }
 
   return {
@@ -259,6 +391,7 @@ export async function executePush(
     versionId: finalVersionId,
     build: finalBuild,
     changes,
+    infoChanges: infoChangesToPush,
     appliedPatches,
   };
 }
@@ -266,7 +399,9 @@ export async function executePush(
 export function registerPushCommand(program: Command): void {
   program
     .command('push')
-    .description('Push local file changes to CodePen (or push an unlinked demo folder as a new Pen)')
+    .description(
+      'Push local file and Pen info changes to CodePen (or push an unlinked demo folder as a new Pen)',
+    )
     .option('-m, --label <label>', 'Label for the saved version (max 80 chars)')
     .option('-f, --force', 'Overwrite remote head if moved (or skip missing index.html prompt on first push)')
     .option('--dry-run', 'Build proposed changes without saving them to the Pen head')
@@ -351,7 +486,11 @@ export function registerPushCommand(program: Command): void {
       });
 
       if (options.json) {
-        const buildFailed = result.build?.status === 'Failed';
+        const hasFileChanges =
+          result.changes.added.length > 0 ||
+          result.changes.modified.length > 0 ||
+          result.changes.deleted.length > 0;
+        const buildFailed = hasFileChanges && result.build?.status === 'Failed';
         const payload = {
           pushed: result.pushed,
           created: false,
@@ -361,6 +500,7 @@ export function registerPushCommand(program: Command): void {
           version_id: result.versionId,
           build: result.build,
           changes: result.changes,
+          info_changes: result.infoChanges,
           applied_patches: result.appliedPatches,
         };
 
@@ -372,16 +512,28 @@ export function registerPushCommand(program: Command): void {
             buildFailed ? 422 : 200,
             buildFailed
               ? 'Dry run completed, but the build failed.'
-              : 'Dry run complete — no changes were saved to CodePen head.',
+              : 'Dry run complete — no changes were saved to CodePen.',
             payload,
           );
         } else if (!result.pushed) {
-          printJsonResponse(200, 'Everything is up to date — nothing to push.', payload);
+          printJsonResponse(
+            200,
+            result.remoteInfoChanged
+              ? `No local changes to push. Remote Pen info has changed on CodePen — run \`cdpn pull\` to update ${PROJECT_CONFIG_FILENAME}, or \`cdpn push --force\` to overwrite.`
+              : 'Everything is up to date — nothing to push.',
+            payload,
+          );
         } else if (buildFailed) {
           process.exitCode = 1;
           printJsonResponse(
             422,
             `Files were saved as version ${shortId(result.versionId)}, but the build failed.`,
+            payload,
+          );
+        } else if (!hasFileChanges && result.infoChanges.length > 0) {
+          printJsonResponse(
+            200,
+            `Updated Pen info (${result.infoChanges.map((c) => c.field).join(', ')}).`,
             payload,
           );
         } else {

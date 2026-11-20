@@ -80,9 +80,22 @@ Every synced Pen folder contains a `.cdpn.json` file at its root:
   "url": "https://codepen.io/username/pen/abcde",
   "pen_id": "01a08738-73f0-7847-b6a8-5789d289c158",
   "profile": "username",
-  "last_synced_version_id": "01a08738-73f0-7848-b8bf-e8e7e91b1ae2"
+  "last_synced_version_id": "01a08738-73f0-7848-b8bf-e8e7e91b1ae2",
+  "last_synced_info_hash": "a1b2c3d4...",
+  "editor": "V2",
+  "info": {
+    "title": "My Awesome Pen",
+    "description": "A short description of the Pen",
+    "tags": ["css", "demo"],
+    "access": "Public",
+    "template": false
+  }
 }
 ```
+
+The `info` section tracks the Pen’s editable metadata (`title`, `description`, `tags`, `access`, and `template`) and syncs automatically with `cdpn status`, `cdpn push`, `cdpn pull`, `cdpn info`, and `cdpn privacy`. Edit `info.title`, `info.tags`, etc. directly in `.cdpn.json` and run `cdpn push` to update them on CodePen (passwords for `Protected` Pens are never stored in `.cdpn.json`; use `cdpn privacy protected` or `cdpn info --access Protected --password ...` instead).
+
+Older `.cdpn.json` files created without an `info` section remain fully supported: `cdpn` will never overwrite remote metadata when `info` is absent, and will seamlessly populate `info` on your next `cdpn pull` or `cdpn push`.
 
 > **Why `.cdpn.json` instead of `.codepen`?**  
 > CodePen 2.0 Pens already contain a `.codepen/` directory (housing `.codepen/pen.config.json`). Using `.cdpn.json` avoids filesystem collisions while allowing `.codepen/pen.config.json` to sync cleanly with CodePen.
@@ -124,9 +137,9 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn new [folder] [--template <id\|url\|title>] [--as-template] [--json]` | Scaffold a brand-new 2.0 Pen from a CodePen Template (or CodePen default starter) into a new or empty folder |
 | `cdpn fork <url> [folder] [--title ...] [--access ...] [--json]` | Fork one of your own 2.0 Pens into a local folder (for other users' Pens, offers to open in browser to fork and clone back) |
 | `cdpn clone <url> [folder] [--force] [--json]` | Clone a CodePen Pen into a local folder (auto-matches stored profile by URL owner; offers to convert Classic Pens or clone them unlinked; offers browser fork-and-clone fallback for unowned Pens) |
-| `cdpn pull [--force] [--json]` | Pull latest remote changes into an existing cloned folder (requires `.cdpn.json`) |
-| `cdpn status [--json]` | Show active profile, file diffs (added/modified/deleted), remote head, build & deployment status |
-| `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait] [--json]` | Push local changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (checks `index.html`, asks account, title, and visibility) |
+| `cdpn pull [--force] [--json]` | Pull latest remote file and Pen info changes into an existing cloned folder (requires `.cdpn.json`) |
+| `cdpn status [--json]` | Show active profile, file and Pen info diffs, remote head, build & deployment status |
+| `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait] [--json]` | Push local file and `.cdpn.json` Pen info changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (checks `index.html`, asks account, title, and visibility) |
 | `cdpn deploy [--no-push] [--version <id>] [--force] [--json]` | Push local changes (creating a Pen first if unlinked) and deploy to CodePen Hosting |
 | `cdpn undeploy [--yes] [--json]` | Take down the live deployment (Pen & versions remain intact) |
 | `cdpn domains [list] [--json]` | Show the default deployed URL, custom domains, verification status, and required DNS records |

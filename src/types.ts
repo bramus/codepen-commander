@@ -283,12 +283,26 @@ export interface SyncedFileEntry {
   is_binary: boolean;
 }
 
+/** Editable Pen metadata stored under `info` in `.cdpn.json`. */
+export interface PenInfo {
+  title?: string;
+  description?: string;
+  tags?: string[];
+  access?: PenAccess;
+  template?: boolean;
+}
+
+/** Fully populated Pen metadata extracted from CodePen API v2. */
+export type CompletePenInfo = Required<PenInfo>;
+
 /** Local Pen sync metadata stored in `.cdpn.json` at the Pen folder root. */
 export interface CdpnConfig {
   url: string;
   pen_id: string;
   profile?: string;
   last_synced_version_id: string | null;
+  last_synced_info_hash?: string;
   editor?: PenEditor;
+  info?: PenInfo;
   files?: Record<string, SyncedFileEntry>;
 }

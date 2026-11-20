@@ -15,6 +15,7 @@ import {
   type ProjectLocation,
 } from '../config/project.js';
 import { isDirectoryNonEmpty } from '../sync/fs.js';
+import { buildPenInfoConfigFields } from '../sync/info.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { Pen } from '../types.js';
 import { openBrowser, validateBrowserUrl } from '../utils/browser.js';
@@ -780,6 +781,7 @@ export async function clonePenCommand(
     ...(auth.profile ? { profile: auth.profile } : {}),
     last_synced_version_id: pen.saved_version?.id ?? null,
     editor: pen.editor,
+    ...buildPenInfoConfigFields(pen),
     files: syncedFiles,
   };
   const configPath = await writeProjectConfig(targetDir, config);

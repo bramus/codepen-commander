@@ -10,6 +10,7 @@ import {
   type ProjectLocation,
 } from '../config/project.js';
 import { scanLocalFiles } from '../sync/fs.js';
+import { buildPenInfoConfigFields } from '../sync/info.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { BinaryUploadPart, Build, Pen, PenAccess, PenFileRequest } from '../types.js';
 import { fmt, printBuildSummary, shortId } from '../utils/format.js';
@@ -346,6 +347,7 @@ export async function createPenFromDirectory(
     ...(auth.profile ? { profile: auth.profile } : {}),
     last_synced_version_id: finalVersionId,
     editor: created.editor,
+    ...buildPenInfoConfigFields(created),
     files: buildSyncedFileMap(remoteFiles, materialized.localSha256ByPath),
   };
   const configPath = await writeProjectConfig(targetDir, config);

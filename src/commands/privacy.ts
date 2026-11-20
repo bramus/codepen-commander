@@ -1,7 +1,8 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
 import type { ResolvedAuth } from '../config/auth.js';
-import { requireProjectInDir } from '../config/project.js';
+import { requireProjectInDir, writeProjectConfig } from '../config/project.js';
+import { mergeUpdatedPenInfoIntoConfig } from '../sync/info.js';
 import type { Pen, PenAccess, PenUpdateRequest } from '../types.js';
 import { fmt } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
@@ -271,6 +272,9 @@ export async function managePenPrivacy(
   }
 
   const updatedPen = await client.updatePen(project.config.pen_id, patch);
+  const nextConfig = mergeUpdatedPenInfoIntoConfig(project.config, updatedPen, patch);
+  await writeProjectConfig(project.rootDir, nextConfig);
+  project.config = nextConfig;
 
   if (options.json) {
     const message =

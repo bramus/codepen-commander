@@ -54,6 +54,111 @@ describe('project config (.cdpn.json)', () => {
       assert.equal(discovered.rootDir, path.resolve(tmpDir));
       assert.equal(discovered.config.pen_id, '01a08738-73f0-7847-b6a8-5789d289c158');
       assert.equal(discovered.config.profile, 'username');
+      assert.equal(discovered.config.info, undefined);
+      assert.equal(discovered.config.last_synced_info_hash, undefined);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('writes and reads Pen info & last_synced_info_hash and validates malformed or insecure info', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-project-info-test-'));
+    try {
+      await writeProjectConfig(tmpDir, {
+        url: 'https://codepen.io/username/pen/abcde',
+        pen_id: '01a08738-73f0-7847-b6a8-5789d289c158',
+        profile: 'username',
+        last_synced_version_id: 'ver-1',
+        last_synced_info_hash: 'deadbeef',
+        editor: 'V2',
+        info: {
+          template: true,
+          tags: ['css', 'scroll'],
+          title: 'My Demo',
+          access: 'Private',
+          description: 'Scroll animations',
+        },
+      });
+
+      const raw = await fs.readFile(path.join(tmpDir, '.cdpn.json'), 'utf8');
+      const parsedRaw = JSON.parse(raw) as Record<string, unknown>;
+      assert.deepEqual(Object.keys(parsedRaw.info as Record<string, unknown>), [
+        'title',
+        'description',
+        'tags',
+        'access',
+        'template',
+      ]);
+
+      const readBack = await readProjectConfig(tmpDir);
+      assert.equal(readBack.last_synced_info_hash, 'deadbeef');
+      assert.deepEqual(readBack.info, {
+        title: 'My Demo',
+        description: 'Scroll animations',
+        tags: ['css', 'scroll'],
+        access: 'Private',
+        template: true,
+      });
+
+      // Partial hand-edited info with lowercase access and trimmed tags
+      await fs.writeFile(
+        path.join(tmpDir, '.cdpn.json'),
+        JSON.stringify({
+          url: 'https://codepen.io/username/pen/abcde',
+          pen_id: '01a08738-73f0-7847-b6a8-5789d289c158',
+          last_synced_version_id: 'ver-1',
+          info: {
+            title: 'Custom Title',
+            tags: [' css ', '', 'demo'],
+            access: 'private',
+          },
+        }),
+        'utf8',
+      );
+      const partialRead = await readProjectConfig(tmpDir);
+      assert.deepEqual(partialRead.info, {
+        title: 'Custom Title',
+        tags: ['css', 'demo'],
+        access: 'Private',
+      });
+
+      // Rejects plaintext password inside .cdpn.json info
+      await fs.writeFile(
+        path.join(tmpDir, '.cdpn.json'),
+        JSON.stringify({
+          url: 'https://codepen.io/username/pen/abcde',
+          pen_id: '01a08738-73f0-7847-b6a8-5789d289c158',
+          last_synced_version_id: 'ver-1',
+          info: { access: 'Protected', password: 'secretpassword' },
+        }),
+        'utf8',
+      );
+      await assert.rejects(() => readProjectConfig(tmpDir), /info\.password.*not supported/i);
+
+      // Rejects invalid field types
+      await fs.writeFile(
+        path.join(tmpDir, '.cdpn.json'),
+        JSON.stringify({
+          url: 'https://codepen.io/username/pen/abcde',
+          pen_id: '01a08738-73f0-7847-b6a8-5789d289c158',
+          last_synced_version_id: 'ver-1',
+          info: { tags: 'not-an-array' },
+        }),
+        'utf8',
+      );
+      await assert.rejects(() => readProjectConfig(tmpDir), /info\.tags.*array of strings/i);
+
+      await fs.writeFile(
+        path.join(tmpDir, '.cdpn.json'),
+        JSON.stringify({
+          url: 'https://codepen.io/username/pen/abcde',
+          pen_id: '01a08738-73f0-7847-b6a8-5789d289c158',
+          last_synced_version_id: 'ver-1',
+          info: { access: 'Unlisted' },
+        }),
+        'utf8',
+      );
+      await assert.rejects(() => readProjectConfig(tmpDir), /info\.access.*invalid/i);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

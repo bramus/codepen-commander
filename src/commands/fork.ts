@@ -14,6 +14,7 @@ import {
   type ProjectLocation,
 } from '../config/project.js';
 import { isDirectoryNonEmpty } from '../sync/fs.js';
+import { buildPenInfoConfigFields } from '../sync/info.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { Build, Pen } from '../types.js';
 import { fmt, printBuildSummary, shortId } from '../utils/format.js';
@@ -373,6 +374,7 @@ export async function forkPenCommand(options: ForkPenCommandOptions): Promise<Fo
     ...(auth.profile ? { profile: auth.profile } : {}),
     last_synced_version_id: finalVersionId,
     editor: forked.editor,
+    ...buildPenInfoConfigFields(forked),
     files: buildSyncedFileMap(remoteFiles, materialized.localSha256ByPath),
   };
   const configPath = await writeProjectConfig(targetDir, config);

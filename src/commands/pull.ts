@@ -3,12 +3,19 @@ import { CodePenClient } from '../api/client.js';
 import type { ResolvedAuth } from '../config/auth.js';
 import {
   buildSyncedFileMap,
+  PROJECT_CONFIG_FILENAME,
   requireProject,
   writeProjectConfig,
   type ProjectLocation,
 } from '../config/project.js';
 import { detectLocalChangesFromBaseline } from '../sync/diff.js';
 import { scanLocalFiles } from '../sync/fs.js';
+import {
+  analyzeInfoSync,
+  buildPenInfoConfigFields,
+  hasAnyPenInfoFields,
+  isLocalInfoDirty,
+} from '../sync/info.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { Pen } from '../types.js';
 import { fmt, shortId } from '../utils/format.js';
@@ -63,7 +70,8 @@ export interface PullPenResult {
 }
 
 /**
- * Pulls the latest remote files from CodePen into an existing cloned folder containing `.cdpn.json`.
+ * Pulls the latest remote files and Pen metadata from CodePen into an existing cloned folder
+ * containing `.cdpn.json`.
  * Returns `null` if the user cancels interactively when uncommitted local changes are present.
  */
 export async function pullPenCommand(
@@ -97,20 +105,29 @@ export async function pullPenCommand(
   const localDirty = detectLocalChangesFromBaseline(localFiles, config.files);
   const dirtyCount =
     localDirty.added.length + localDirty.modified.length + localDirty.deleted.length;
+  const localInfoDirty = isLocalInfoDirty(config.info, config.last_synced_info_hash);
 
-  if (dirtyCount > 0 && !force) {
+  if ((dirtyCount > 0 || localInfoDirty) && !force) {
     if (!jsonMode) {
       console.log(fmt.yellow('\nWarning: You have uncommitted local changes that will be overwritten:'));
       for (const p of localDirty.added) console.log(`  ${fmt.green('+')} ${p} ${fmt.dim('(will be removed)')}`);
       for (const p of localDirty.modified) console.log(`  ${fmt.yellow('~')} ${p} ${fmt.dim('(will be overwritten)')}`);
       for (const p of localDirty.deleted) console.log(`  ${fmt.red('-')} ${p} ${fmt.dim('(will be restored)')}`);
+      if (localInfoDirty) {
+        console.log(
+          `  ${fmt.yellow('~')} ${PROJECT_CONFIG_FILENAME} (info) ${fmt.dim('(will be overwritten)')}`,
+        );
+      }
     }
 
     if (!interactive) {
       throw new CliError(
         409,
         'Local changes detected. Commit/push them first, or re-run with --force.',
-        { dirty_files: localDirty },
+        {
+          dirty_files: localDirty,
+          ...(localInfoDirty ? { dirty_info: true } : {}),
+        },
       );
     }
 
@@ -125,6 +142,9 @@ export async function pullPenCommand(
     client.getPen(config.pen_id),
     client.getPenFiles(config.pen_id),
   ]);
+
+  const hadInfoBefore = hasAnyPenInfoFields(config.info);
+  const infoAnalysis = analyzeInfoSync(config.info, config.last_synced_info_hash, pen);
 
   const result = await syncRemoteFilesToDisk({
     client,
@@ -142,6 +162,7 @@ export async function pullPenCommand(
     ...(profileToPersist ? { profile: profileToPersist } : {}),
     last_synced_version_id: pen.saved_version?.id ?? null,
     editor: pen.editor,
+    ...buildPenInfoConfigFields(pen),
     files: syncedFiles,
   };
   const configPath = await writeProjectConfig(rootDir, nextConfig);
@@ -165,6 +186,13 @@ export async function pullPenCommand(
       `  Updated: ${result.writtenPaths.length} file(s)` +
         (result.deletedPaths.length > 0 ? `, removed ${result.deletedPaths.length} deleted file(s)` : ''),
     );
+    if (!hadInfoBefore) {
+      console.log(`  Info:    ${fmt.dim(`added to ${PROJECT_CONFIG_FILENAME}`)}`);
+    } else if (infoAnalysis.changes.length > 0) {
+      console.log(
+        `  Info:    ${fmt.dim(`updated ${infoAnalysis.changes.map((c) => c.field).join(', ')} in ${PROJECT_CONFIG_FILENAME}`)}`,
+      );
+    }
     if (pen.saved_version) {
       console.log(`  Version: ${fmt.dim(shortId(pen.saved_version.id))}`);
     }

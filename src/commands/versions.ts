@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
 import { buildSyncedFileMap, requireProject, writeProjectConfig } from '../config/project.js';
 import { scanLocalFiles } from '../sync/fs.js';
+import { buildPenInfoConfigFields } from '../sync/info.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import { fmt, formatDate, formatTable, shortId } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
@@ -191,6 +192,7 @@ export function registerVersionCommands(program: Command): void {
           ...(project.config.profile ? { profile: project.config.profile } : {}),
           last_synced_version_id: newHeadId,
           editor: updatedPen.editor,
+          ...buildPenInfoConfigFields(updatedPen),
           files: buildSyncedFileMap(remoteFiles, materialized.localSha256ByPath),
         });
 
