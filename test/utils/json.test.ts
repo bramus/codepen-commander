@@ -455,7 +455,7 @@ describe('command --json output against mock CodePen API', () => {
         'Password must never appear in JSON output',
       );
 
-      // 5. delete --json without --yes -> CliError 400; with --yes -> 200
+      // 5. delete --json without --yes -> CliError 400; default --yes keeps .cdpn.json linked; --cleanup removes it
       await assert.rejects(
         () =>
           runDeleteCommand({
@@ -469,7 +469,7 @@ describe('command --json output against mock CodePen API', () => {
         (err: unknown) => err instanceof CliError && err.statusCode === 400,
       );
 
-      const delOut = createBufferedOutput();
+      const delDefaultOut = createBufferedOutput();
       await runDeleteCommand({
         cwd: cloneDir,
         baseUrl,
@@ -477,17 +477,42 @@ describe('command --json output against mock CodePen API', () => {
         env: {},
         yes: true,
         json: true,
-        output: delOut,
+        output: delDefaultOut,
       });
-      const delJson = parseJsonOutput<{
+      const delDefaultJson = parseJsonOutput<{
         pen_id: string;
         deleted: boolean;
         config_removed: boolean;
-      }>(delOut);
-      assert.equal(delJson.status.code, 200);
-      assert.equal(delJson.contents.pen_id, 'pen-json-1');
-      assert.equal(delJson.contents.deleted, true);
-      assert.equal(delJson.contents.config_removed, true);
+        config_kept_linked: boolean;
+      }>(delDefaultOut);
+      assert.equal(delDefaultJson.status.code, 200);
+      assert.equal(delDefaultJson.contents.pen_id, 'pen-json-1');
+      assert.equal(delDefaultJson.contents.deleted, true);
+      assert.equal(delDefaultJson.contents.config_removed, false);
+      assert.equal(delDefaultJson.contents.config_kept_linked, true);
+
+      const delCleanupOut = createBufferedOutput();
+      await runDeleteCommand({
+        cwd: cloneDir,
+        baseUrl,
+        homeDir: tmpHome,
+        env: {},
+        fullCleanup: true,
+        yes: true,
+        json: true,
+        output: delCleanupOut,
+      });
+      const delCleanupJson = parseJsonOutput<{
+        pen_id: string;
+        deleted: boolean;
+        config_removed: boolean;
+        config_kept_linked: boolean;
+      }>(delCleanupOut);
+      assert.equal(delCleanupJson.status.code, 200);
+      assert.equal(delCleanupJson.contents.pen_id, 'pen-json-1');
+      assert.equal(delCleanupJson.contents.deleted, true);
+      assert.equal(delCleanupJson.contents.config_removed, true);
+      assert.equal(delCleanupJson.contents.config_kept_linked, false);
 
       // 6. fork --json (400 on Protected without --password; 201 on success; 422 on build failure)
       await assert.rejects(

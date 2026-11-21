@@ -40,18 +40,18 @@ export { CODEPEN_DELETED_ITEMS_URL };
 
 export interface DeleteCliOptions {
   yes?: boolean;
-  keepConfig?: boolean;
-  keepInfo?: boolean;
+  cleanup?: boolean;
+  fullCleanup?: boolean;
   json?: boolean;
 }
 
 export interface RunDeleteCommandOptions {
   /** Skip confirmation prompt (required in non-interactive mode). */
   yes?: boolean;
-  /** Retain `.codepen/` and only the `info` section in `.cdpn.json` (unlinked) instead of removing them. */
-  keepConfig?: boolean;
-  /** Backwards-compatible alias for `keepConfig`. */
-  keepInfo?: boolean;
+  /** Remove `.codepen/` and strip `.cdpn.json` down to unlinked `info`-only after deleting the online Pen. */
+  cleanup?: boolean;
+  /** Remove both `.codepen/` and `.cdpn.json` after deleting the online Pen (local source files stay untouched). */
+  fullCleanup?: boolean;
   /** Output structured JSON response instead of human-readable logs. */
   json?: boolean;
   /** Working directory (must contain `.cdpn.json` directly; defaults to `process.cwd()`). */
@@ -85,6 +85,7 @@ export interface DeleteCommandResult {
   auth: ResolvedAuth;
   configRemoved: boolean;
   codepenDirRemoved: boolean;
+  configKeptLinked: boolean;
   infoRetained: boolean;
   retainedInfo?: PenInfo | CompletePenInfo;
   alreadyDeletedRemotely?: boolean;
@@ -123,15 +124,19 @@ async function removeCodepenDirSafe(rootDir: string): Promise<boolean> {
   return true;
 }
 
+type LocalAction = 'keep-linked' | 'unlink-info' | 'cleanup' | 'full-cleanup';
+
 /**
  * Deletes the online Pen linked to `.cdpn.json` directly inside `options.cwd`
- * (moves it to CodePen Deleted Items, restorable for 3 days) and removes `.cdpn.json`
- * and `.codepen/` (or retains `.codepen/` and only the `info` section in `.cdpn.json`
- * when `keepConfig` / `keepInfo` is true) only after the remote deletion succeeds.
- * If the Pen was already deleted on CodePen, checks Trash and cleanly offers permanent
- * purge, local cleanup, or recovery instead of failing with 404. Local project source
- * files are kept untouched.
+ * (moves it to CodePen Deleted Items, restorable for 3 days).
  *
+ * Local file behavior:
+ * - Default: keeps `.cdpn.json` (still linked) and `.codepen/` untouched so that
+ *   a successive `cdpn status` detects the Pen in Trash and `cdpn restore` can restore it.
+ * - `--cleanup`: removes `.codepen/` and strips `.cdpn.json` down to unlinked `info`-only.
+ * - `--full-cleanup`: removes both `.codepen/` and `.cdpn.json`.
+ *
+ * Local project source files are always kept untouched.
  * Returns `null` if the user cancels at a confirmation prompt.
  */
 export async function runDeleteCommand(
@@ -139,10 +144,15 @@ export async function runDeleteCommand(
 ): Promise<DeleteCommandResult | null> {
   const output = options.output ?? defaultOutput;
   const cwd = options.cwd ?? process.cwd();
-  const keepConfig = Boolean(options.keepConfig || options.keepInfo);
+  const cleanup = Boolean(options.cleanup);
+  const fullCleanup = Boolean(options.fullCleanup);
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
   const selectImpl = options.prompts?.select ?? promptSelect;
+
+  if (cleanup && fullCleanup) {
+    throw new CliError(400, 'Cannot combine --cleanup and --full-cleanup.');
+  }
 
   // Strictly require `.cdpn.json` directly inside the current folder
   const project = await requireProjectInDir(cwd);
@@ -173,6 +183,13 @@ export async function runDeleteCommand(
     const trashItem = await findProjectPenInTrash(client, project);
     const displayTitle = trashItem?.title || project.config.info?.title || 'Untitled';
     let purgedFromTrash = false;
+    let localAction: LocalAction = fullCleanup
+      ? 'full-cleanup'
+      : cleanup
+        ? 'cleanup'
+        : trashItem
+          ? 'keep-linked'
+          : 'unlink-info';
 
     if (!options.yes) {
       if (!interactive) {
@@ -190,36 +207,65 @@ export async function runDeleteCommand(
         output.log(`  ${fmt.dim('URL:')}     ${fmt.cyan(project.config.url)}`);
         output.log('');
 
-        const choice = await selectImpl<'purge' | 'cleanup' | 'recover' | 'cancel'>(
-          'What would you like to do?',
-          [
+        type TrashChoice = 'purge' | 'unlink' | 'cleanup' | 'full-cleanup' | 'recover' | 'cancel';
+        const menuOptions: SelectOption<TrashChoice>[] = [
+          {
+            value: 'purge',
+            label: 'Delete the Pen permanently from Trash',
+            description: fullCleanup
+              ? `purge from CodePen Trash and remove ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/`
+              : cleanup
+                ? `purge from CodePen Trash, remove ${CODEPEN_DIR}/, and keep only "info" in ${PROJECT_CONFIG_FILENAME}`
+                : `purge from CodePen Trash and unlink ${PROJECT_CONFIG_FILENAME} (keeps ${CODEPEN_DIR}/ and "info")`,
+          },
+        ];
+
+        if (!cleanup && !fullCleanup) {
+          menuOptions.push(
             {
-              value: 'purge',
-              label: 'Delete the Pen permanently from Trash',
-              description: keepConfig
-                ? `purge from CodePen Trash and keep ${CODEPEN_DIR}/ + only "info" in ${PROJECT_CONFIG_FILENAME}`
-                : `purge from CodePen Trash and remove ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/`,
+              value: 'unlink',
+              label: `Unlink local ${PROJECT_CONFIG_FILENAME} (keep ${CODEPEN_DIR}/ & "info")`,
+              description: `leave Pen in Trash until expiry and clear remote link in ${PROJECT_CONFIG_FILENAME}`,
             },
             {
               value: 'cleanup',
-              label: `Only clean up local ${PROJECT_CONFIG_FILENAME}${keepConfig ? '' : ` & ${CODEPEN_DIR}/`}`,
-              description: keepConfig
-                ? `leave Pen in Trash until expiry and keep ${CODEPEN_DIR}/ + only "info" in ${PROJECT_CONFIG_FILENAME}`
-                : `leave Pen in Trash until expiry and remove ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/`,
+              label: `Remove ${CODEPEN_DIR}/ and keep only "info" in ${PROJECT_CONFIG_FILENAME}`,
+              description: `leave Pen in Trash until expiry, remove ${CODEPEN_DIR}/, and unlink ${PROJECT_CONFIG_FILENAME}`,
             },
             {
-              value: 'recover',
-              label: 'Recover the Pen from Trash instead',
-              description: `restore it on CodePen and keep ${PROJECT_CONFIG_FILENAME} linked`,
+              value: 'full-cleanup',
+              label: `Remove local ${PROJECT_CONFIG_FILENAME} & ${CODEPEN_DIR}/`,
+              description: `leave Pen in Trash until expiry and remove ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/`,
             },
-            {
-              value: 'cancel',
-              label: 'Cancel (do nothing)',
-              description: `leave Trash and ${PROJECT_CONFIG_FILENAME} untouched`,
-            },
-          ],
-          0,
+          );
+        } else if (cleanup) {
+          menuOptions.push({
+            value: 'cleanup',
+            label: `Only remove ${CODEPEN_DIR}/ and keep "info" in ${PROJECT_CONFIG_FILENAME}`,
+            description: `leave Pen in Trash until expiry, remove ${CODEPEN_DIR}/, and unlink ${PROJECT_CONFIG_FILENAME}`,
+          });
+        } else {
+          menuOptions.push({
+            value: 'full-cleanup',
+            label: `Only remove local ${PROJECT_CONFIG_FILENAME} & ${CODEPEN_DIR}/`,
+            description: `leave Pen in Trash until expiry and remove ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/`,
+          });
+        }
+
+        menuOptions.push(
+          {
+            value: 'recover',
+            label: 'Restore the Pen from Trash instead',
+            description: `restore it on CodePen and keep ${PROJECT_CONFIG_FILENAME} linked`,
+          },
+          {
+            value: 'cancel',
+            label: 'Cancel (do nothing)',
+            description: `leave Trash and ${PROJECT_CONFIG_FILENAME} untouched`,
+          },
         );
+
+        const choice = await selectImpl<TrashChoice>('What would you like to do?', menuOptions, 0);
 
         if (choice === 'cancel') {
           output.log('Aborted.');
@@ -237,6 +283,7 @@ export async function runDeleteCommand(
             auth,
             configRemoved: false,
             codepenDirRemoved: false,
+            configKeptLinked: true,
             infoRetained: false,
             alreadyDeletedRemotely: false,
             purgedFromTrash: false,
@@ -256,6 +303,13 @@ export async function runDeleteCommand(
           }
           await client.purgeTrashedPen(trashItem.item_id);
           purgedFromTrash = true;
+          localAction = fullCleanup ? 'full-cleanup' : cleanup ? 'cleanup' : 'unlink-info';
+        } else if (choice === 'full-cleanup') {
+          localAction = 'full-cleanup';
+        } else if (choice === 'cleanup') {
+          localAction = 'cleanup';
+        } else if (choice === 'unlink') {
+          localAction = 'unlink-info';
         }
       } else {
         output.log('');
@@ -266,40 +320,65 @@ export async function runDeleteCommand(
         output.log('');
 
         const ok = await confirmImpl(
-          keepConfig
-            ? `Clear the remote link in ${PROJECT_CONFIG_FILENAME} (keeping ${CODEPEN_DIR}/, "info", and local files)?`
-            : `Remove local ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ (local source files stay untouched)?`,
+          fullCleanup
+            ? `Remove local ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ (local source files stay untouched)?`
+            : cleanup
+              ? `Remove ${CODEPEN_DIR}/ and keep only "info" in ${PROJECT_CONFIG_FILENAME} (local source files stay untouched)?`
+              : `Clear the remote link in ${PROJECT_CONFIG_FILENAME} (keeping ${CODEPEN_DIR}/, "info", and local files)?`,
           true,
         );
         if (!ok) {
           output.log('Aborted.');
           return null;
         }
+        localAction = fullCleanup ? 'full-cleanup' : cleanup ? 'cleanup' : 'unlink-info';
       }
     }
 
     let retainedInfo: PenInfo | undefined;
     let codepenDirRemoved = false;
-    if (keepConfig) {
-      const unlinked = await unlinkLinkedProject(project, trashItem?.title);
-      retainedInfo = unlinked.info;
-    } else {
+    if (localAction === 'full-cleanup') {
       await fs.unlink(project.configPath);
       codepenDirRemoved = await removeCodepenDirSafe(project.rootDir);
+    } else if (localAction === 'cleanup') {
+      const unlinked = await unlinkLinkedProject(project, trashItem?.title);
+      retainedInfo = unlinked.info;
+      codepenDirRemoved = await removeCodepenDirSafe(project.rootDir);
+    } else if (localAction === 'unlink-info') {
+      const unlinked = await unlinkLinkedProject(project, trashItem?.title);
+      retainedInfo = unlinked.info;
     }
 
+    const configRemoved = localAction === 'full-cleanup';
+    const infoRetained = localAction === 'cleanup' || localAction === 'unlink-info';
+    const configKeptLinked = localAction === 'keep-linked';
     const removedSummary = codepenDirRemoved
       ? `${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/`
       : PROJECT_CONFIG_FILENAME;
 
     if (options.json) {
-      const msg = trashItem
-        ? keepConfig
-          ? `Pen ${displayTitle} (${project.config.pen_id}) was already in CodePen Deleted Items; retained info in ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/.`
-          : `Pen ${displayTitle} (${project.config.pen_id}) was already in CodePen Deleted Items; removed ${removedSummary}.`
-        : keepConfig
-          ? `Pen ${displayTitle} (${project.config.pen_id}) no longer exists on CodePen; retained info in ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/.`
-          : `Pen ${displayTitle} (${project.config.pen_id}) no longer exists on CodePen; removed ${removedSummary}.`;
+      let msg: string;
+      if (trashItem) {
+        if (configRemoved) {
+          msg = `Pen ${displayTitle} (${project.config.pen_id}) was already in CodePen Deleted Items; removed ${removedSummary}.`;
+        } else if (localAction === 'cleanup') {
+          msg = codepenDirRemoved
+            ? `Pen ${displayTitle} (${project.config.pen_id}) was already in CodePen Deleted Items; removed ${CODEPEN_DIR}/ and retained info in ${PROJECT_CONFIG_FILENAME}.`
+            : `Pen ${displayTitle} (${project.config.pen_id}) was already in CodePen Deleted Items; retained info in ${PROJECT_CONFIG_FILENAME}.`;
+        } else if (localAction === 'unlink-info') {
+          msg = `Pen ${displayTitle} (${project.config.pen_id}) was already in CodePen Deleted Items; retained info in ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/.`;
+        } else {
+          msg = `Pen ${displayTitle} (${project.config.pen_id}) is already in CodePen Deleted Items (kept ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/).`;
+        }
+      } else if (configRemoved) {
+        msg = `Pen ${displayTitle} (${project.config.pen_id}) no longer exists on CodePen; removed ${removedSummary}.`;
+      } else if (localAction === 'cleanup') {
+        msg = codepenDirRemoved
+          ? `Pen ${displayTitle} (${project.config.pen_id}) no longer exists on CodePen; removed ${CODEPEN_DIR}/ and retained info in ${PROJECT_CONFIG_FILENAME}.`
+          : `Pen ${displayTitle} (${project.config.pen_id}) no longer exists on CodePen; retained info in ${PROJECT_CONFIG_FILENAME}.`;
+      } else {
+        msg = `Pen ${displayTitle} (${project.config.pen_id}) no longer exists on CodePen; retained info in ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/.`;
+      }
 
       printJsonResponse(
         200,
@@ -314,10 +393,11 @@ export async function runDeleteCommand(
           in_trash: Boolean(trashItem),
           purged_from_trash: purgedFromTrash,
           ...(trashItem ? { trash_item: trashItem, restore_url: CODEPEN_DELETED_ITEMS_URL } : {}),
-          config_removed: !keepConfig,
+          config_removed: configRemoved,
           codepen_dir_removed: codepenDirRemoved,
-          info_retained: keepConfig,
-          ...(keepConfig ? { info: retainedInfo } : {}),
+          config_kept_linked: configKeptLinked,
+          info_retained: infoRetained,
+          ...(infoRetained ? { info: retainedInfo } : {}),
         },
         output,
       );
@@ -328,7 +408,7 @@ export async function runDeleteCommand(
         );
       } else if (trashItem) {
         output.log(
-          `\n${fmt.boldGreen('✓')} Pen ${fmt.bold(displayTitle)} ${fmt.dim(`(${project.config.pen_id})`)} was already in CodePen Deleted Items.`,
+          `\n${fmt.boldGreen('✓')} Pen ${fmt.bold(displayTitle)} ${fmt.dim(`(${project.config.pen_id})`)} is already in CodePen Deleted Items.`,
         );
       } else {
         output.log(
@@ -338,17 +418,30 @@ export async function runDeleteCommand(
       if (auth.profile) {
         output.log(`  Profile:  ${fmt.cyan(auth.profile)}`);
       }
-      if (keepConfig) {
+      if (configRemoved) {
+        output.log(
+          `  Removed:  ${fmt.cyan(removedSummary)} ${fmt.dim('(local files were kept untouched)')}`,
+        );
+      } else if (localAction === 'cleanup') {
+        if (codepenDirRemoved) {
+          output.log(`  Removed:  ${fmt.cyan(`${CODEPEN_DIR}/`)}`);
+        }
+        output.log(
+          `  Retained: ${fmt.cyan(`info in ${PROJECT_CONFIG_FILENAME}`)} ${fmt.dim('(unlinked; local files were kept untouched)')}`,
+        );
+      } else if (localAction === 'unlink-info') {
         output.log(
           `  Retained: ${fmt.cyan(`${CODEPEN_DIR}/ and info in ${PROJECT_CONFIG_FILENAME}`)} ${fmt.dim('(unlinked; local files were kept untouched)')}`,
         );
       } else {
         output.log(
-          `  Removed:  ${fmt.cyan(removedSummary)} ${fmt.dim('(local files were kept untouched)')}`,
+          `  Local:    ${fmt.cyan(`${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ kept untouched`)}`,
         );
       }
       if (trashItem && !purgedFromTrash) {
-        output.log(`  Restore:  ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
+        output.log(
+          `  Restore:  Run \`cdpn restore\` ${fmt.dim(`(or ${CODEPEN_DELETED_ITEMS_URL})`)}`,
+        );
       }
     }
 
@@ -356,9 +449,10 @@ export async function runDeleteCommand(
       pen: null,
       project,
       auth,
-      configRemoved: !keepConfig,
+      configRemoved,
       codepenDirRemoved,
-      infoRetained: keepConfig,
+      configKeptLinked,
+      infoRetained,
       ...(retainedInfo ? { retainedInfo } : {}),
       alreadyDeletedRemotely: true,
       purgedFromTrash,
@@ -366,6 +460,12 @@ export async function runDeleteCommand(
       trashItem,
     };
   }
+
+  const localAction: LocalAction = fullCleanup
+    ? 'full-cleanup'
+    : cleanup
+      ? 'cleanup'
+      : 'keep-linked';
 
   if (!options.yes) {
     if (!interactive) {
@@ -385,16 +485,20 @@ export async function runDeleteCommand(
     }
     output.log(
       fmt.dim(
-        keepConfig
-          ? `\nLocal files and ${CODEPEN_DIR}/ will stay untouched; only the "info" section will be kept in ${PROJECT_CONFIG_FILENAME} after deletion succeeds.`
-          : `\nLocal source files will stay untouched; ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ will be removed after deletion succeeds.`,
+        localAction === 'full-cleanup'
+          ? `\nLocal source files will stay untouched; ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ will be removed after deletion succeeds.`
+          : localAction === 'cleanup'
+            ? `\nLocal source files will stay untouched; ${CODEPEN_DIR}/ will be removed and only the "info" section will be kept in ${PROJECT_CONFIG_FILENAME} (unlinked) after deletion succeeds.`
+            : `\nLocal source files, ${PROJECT_CONFIG_FILENAME}, and ${CODEPEN_DIR}/ will stay untouched so you can restore the Pen with \`cdpn restore\` or inspect it with \`cdpn status\`.`,
       ),
     );
 
     const ok = await confirmImpl(
-      keepConfig
-        ? `Delete this Pen on CodePen (moves to Deleted Items for 3 days) and keep only "info" in ${PROJECT_CONFIG_FILENAME} (and ${CODEPEN_DIR}/)?`
-        : `Delete this Pen on CodePen (moves to Deleted Items for 3 days) and remove ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/?`,
+      localAction === 'full-cleanup'
+        ? `Delete this Pen on CodePen (moves to Deleted Items for 3 days) and remove ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/?`
+        : localAction === 'cleanup'
+          ? `Delete this Pen on CodePen (moves to Deleted Items for 3 days), remove ${CODEPEN_DIR}/, and keep only "info" in ${PROJECT_CONFIG_FILENAME}?`
+          : 'Delete this Pen on CodePen (moves to Deleted Items for 3 days)?',
       false,
     );
     if (!ok) {
@@ -414,10 +518,13 @@ export async function runDeleteCommand(
     }
   }
 
-  // Modify or remove `.cdpn.json` (and `.codepen/`) only after remote deletion succeeded (or Pen was already gone)
+  // Only mutate/remove local config files after remote deletion succeeds (or Pen was already gone)
   let retainedInfo: CompletePenInfo | undefined;
   let codepenDirRemoved = false;
-  if (keepConfig) {
+  if (localAction === 'full-cleanup') {
+    await fs.unlink(project.configPath);
+    codepenDirRemoved = await removeCodepenDirSafe(project.rootDir);
+  } else if (localAction === 'cleanup') {
     const remoteInfo = extractPenInfo(pen);
     const infoAnalysis = analyzeInfoSync(
       project.config.info,
@@ -429,74 +536,74 @@ export async function runDeleteCommand(
         ? { ...remoteInfo, ...normalizePartialPenInfo(project.config.info) }
         : remoteInfo;
     await writeUnlinkedProjectInfo(project.rootDir, retainedInfo);
-  } else {
-    await fs.unlink(project.configPath);
     codepenDirRemoved = await removeCodepenDirSafe(project.rootDir);
   }
 
+  const configRemoved = localAction === 'full-cleanup';
+  const infoRetained = localAction === 'cleanup';
+  const configKeptLinked = localAction === 'keep-linked';
   const removedSummary = codepenDirRemoved
     ? `${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/`
     : PROJECT_CONFIG_FILENAME;
 
   if (options.json) {
-    if (keepConfig) {
-      printJsonResponse(
-        200,
-        `Deleted ${pen.title || 'Untitled'} (${pen.id}) on CodePen and retained info in ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/.`,
-        {
-          pen_id: pen.id,
-          title: pen.title,
-          profile: auth.profile,
-          editor_url: pen.urls.editor,
-          deleted: true,
-          ...(alreadyDeletedRemotely ? { already_deleted_remotely: true } : {}),
-          config_removed: false,
-          codepen_dir_removed: false,
-          info_retained: true,
-          info: retainedInfo,
-          restore_url: CODEPEN_DELETED_ITEMS_URL,
-        },
-        output,
-      );
-    } else {
-      printJsonResponse(
-        200,
-        `Deleted ${pen.title || 'Untitled'} (${pen.id}) on CodePen and removed ${removedSummary}.`,
-        {
-          pen_id: pen.id,
-          title: pen.title,
-          profile: auth.profile,
-          editor_url: pen.urls.editor,
-          deleted: true,
-          ...(alreadyDeletedRemotely ? { already_deleted_remotely: true } : {}),
-          config_removed: true,
-          codepen_dir_removed: codepenDirRemoved,
-          info_retained: false,
-          restore_url: CODEPEN_DELETED_ITEMS_URL,
-        },
-        output,
-      );
-    }
+    const message = configRemoved
+      ? `Deleted ${pen.title || 'Untitled'} (${pen.id}) on CodePen and removed ${removedSummary}.`
+      : infoRetained
+        ? codepenDirRemoved
+          ? `Deleted ${pen.title || 'Untitled'} (${pen.id}) on CodePen, removed ${CODEPEN_DIR}/, and retained info in ${PROJECT_CONFIG_FILENAME}.`
+          : `Deleted ${pen.title || 'Untitled'} (${pen.id}) on CodePen and retained info in ${PROJECT_CONFIG_FILENAME}.`
+        : `Deleted ${pen.title || 'Untitled'} (${pen.id}) on CodePen (kept ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/).`;
+
+    printJsonResponse(
+      200,
+      message,
+      {
+        pen_id: pen.id,
+        title: pen.title,
+        profile: auth.profile,
+        editor_url: pen.urls.editor,
+        deleted: true,
+        ...(alreadyDeletedRemotely ? { already_deleted_remotely: true } : {}),
+        config_removed: configRemoved,
+        codepen_dir_removed: codepenDirRemoved,
+        config_kept_linked: configKeptLinked,
+        info_retained: infoRetained,
+        ...(infoRetained ? { info: retainedInfo } : {}),
+        restore_url: CODEPEN_DELETED_ITEMS_URL,
+      },
+      output,
+    );
   } else {
     output.log(
       `\n${fmt.green('✓')} Deleted ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} on CodePen ${fmt.dim('(moved to Deleted Items; restorable for 3 days)')}`,
     );
-    if (keepConfig) {
-      if (auth.profile) {
-        output.log(`  Profile:  ${fmt.cyan(auth.profile)}`);
+    if (auth.profile) {
+      output.log(`  Profile:  ${fmt.cyan(auth.profile)}`);
+    }
+    if (configRemoved) {
+      output.log(
+        `  Removed:  ${fmt.cyan(removedSummary)} ${fmt.dim('(local files were kept untouched)')}`,
+      );
+      output.log(`  Restore:  ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
+    } else if (infoRetained) {
+      if (codepenDirRemoved) {
+        output.log(`  Removed:  ${fmt.cyan(`${CODEPEN_DIR}/`)}`);
       }
       output.log(
-        `  Retained: ${fmt.cyan(`${CODEPEN_DIR}/ and info in ${PROJECT_CONFIG_FILENAME}`)} ${fmt.dim('(unlinked; local files were kept untouched)')}`,
+        `  Retained: ${fmt.cyan(`info in ${PROJECT_CONFIG_FILENAME}`)} ${fmt.dim('(unlinked; local files were kept untouched)')}`,
       );
       output.log(`  Restore:  ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
     } else {
-      if (auth.profile) {
-        output.log(`  Profile: ${fmt.cyan(auth.profile)}`);
-      }
       output.log(
-        `  Removed: ${fmt.cyan(removedSummary)} ${fmt.dim('(local files were kept untouched)')}`,
+        `  Local:    ${fmt.cyan(`${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ kept untouched`)}`,
       );
-      output.log(`  Restore: ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
+      output.log(
+        `  Restore:  Run \`cdpn restore\` ${fmt.dim(`(or ${CODEPEN_DELETED_ITEMS_URL})`)}`,
+      );
+      output.log(
+        `  ${fmt.dim(`Tip: Run \`cdpn unlink\` to unlink, \`cdpn delete --cleanup\` to remove ${CODEPEN_DIR}/ while keeping info, or \`cdpn delete --full-cleanup\` to remove both ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/.`)}`,
+      );
     }
   }
 
@@ -504,9 +611,10 @@ export async function runDeleteCommand(
     pen,
     project,
     auth,
-    configRemoved: !keepConfig,
+    configRemoved,
     codepenDirRemoved,
-    infoRetained: keepConfig,
+    configKeptLinked,
+    infoRetained,
     ...(retainedInfo ? { retainedInfo } : {}),
     ...(alreadyDeletedRemotely ? { alreadyDeletedRemotely: true } : {}),
   };
@@ -518,23 +626,23 @@ export function registerDeleteCommand(program: Command): void {
     .aliases(['del', 'rm'])
     .allowExcessArguments(false)
     .description(
-      `Delete the online Pen on CodePen (moves to Deleted Items) and remove ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/`,
+      `Delete the online Pen on CodePen (moves to Deleted Items; keeps ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ unless --cleanup or --full-cleanup is passed)`,
     )
     .option(
-      '--keep-config',
-      `Keep ${CODEPEN_DIR}/ and Pen info in ${PROJECT_CONFIG_FILENAME} (unlinked) so the demo stays ready for the next push`,
+      '--cleanup',
+      `Remove ${CODEPEN_DIR}/ and keep only the unlinked "info" section in ${PROJECT_CONFIG_FILENAME} (local source files stay untouched)`,
     )
     .option(
-      '--keep-info',
-      `Alias for --keep-config (keep ${CODEPEN_DIR}/ and Pen info in ${PROJECT_CONFIG_FILENAME})`,
+      '--full-cleanup',
+      `Remove both ${CODEPEN_DIR}/ and ${PROJECT_CONFIG_FILENAME} (local source files stay untouched)`,
     )
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Output deletion result as JSON')
     .action(async (options: DeleteCliOptions, command: Command) => {
       await runDeleteCommand({
         yes: options.yes,
-        keepConfig: options.keepConfig,
-        keepInfo: options.keepInfo,
+        cleanup: options.cleanup,
+        fullCleanup: options.fullCleanup,
         json: options.json,
         explicitProfile: getGlobalProfileOption(command),
       });

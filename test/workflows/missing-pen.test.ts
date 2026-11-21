@@ -407,11 +407,12 @@ describe('missing / trashed remote Pen handling across commands', () => {
         });
       };
 
-      // 1. Already in Trash + interactive purge -> purges Trash and removes .cdpn.json and .codepen/
+      // 1. Already in Trash + interactive purge with --full-cleanup -> purges Trash and removes .cdpn.json and .codepen/
       await relink();
       penState = 'trashed';
       const purged = await runDeleteCommand({
         cwd: tmpDemo,
+        fullCleanup: true,
         baseUrl,
         env: {},
         homeDir: tmpHome,
@@ -430,13 +431,36 @@ describe('missing / trashed remote Pen handling across commands', () => {
       await assert.rejects(() => fs.stat(path.join(tmpDemo, PROJECT_CONFIG_FILENAME)), /ENOENT/);
       await assert.rejects(() => fs.stat(path.join(tmpDemo, '.codepen')), /ENOENT/);
 
-      // 2. Already in Trash + --yes --keep-config --json -> does NOT fail or purge Trash, retains .codepen/ & unlinked info
+      // 1b. Already in Trash + interactive purge (default, no cleanup flags) -> purges Trash and unlinks .cdpn.json (keeping .codepen/ & info)
+      await relink();
+      penState = 'trashed';
+      const purgedKeepLocal = await runDeleteCommand({
+        cwd: tmpDemo,
+        baseUrl,
+        env: {},
+        homeDir: tmpHome,
+        interactive: true,
+        prompts: {
+          select: async () => 'purge' as never,
+          confirm: async () => true,
+        },
+      });
+      assert.ok(purgedKeepLocal);
+      assert.equal(purgedKeepLocal.purgedFromTrash, true);
+      assert.equal(purgedKeepLocal.configRemoved, false);
+      assert.equal(purgedKeepLocal.codepenDirRemoved, false);
+      assert.equal(purgedKeepLocal.infoRetained, true);
+      assert.equal(penState, 'purged');
+      assert.equal((await readProjectConfigFile(tmpDemo)).linked, false);
+      assert.ok((await fs.stat(path.join(tmpDemo, '.codepen', 'pen.config.json'))).isFile());
+
+      // 2. Already in Trash + --yes --cleanup --json -> does NOT fail or purge Trash, removes .codepen/ & retains unlinked info
       await relink();
       penState = 'trashed';
       const cleaned = await runDeleteCommand({
         cwd: tmpDemo,
         yes: true,
-        keepConfig: true,
+        cleanup: true,
         json: true,
         baseUrl,
         env: {},
@@ -446,14 +470,35 @@ describe('missing / trashed remote Pen handling across commands', () => {
       assert.ok(cleaned);
       assert.equal(cleaned.alreadyDeletedRemotely, true);
       assert.equal(cleaned.purgedFromTrash, false);
-      assert.equal(cleaned.codepenDirRemoved, false);
+      assert.equal(cleaned.configRemoved, false);
+      assert.equal(cleaned.codepenDirRemoved, true);
       assert.equal(cleaned.infoRetained, true);
-      assert.equal(penState, 'trashed', '--yes cleanup must not silently permanently purge Trash');
-      assert.ok((await fs.stat(path.join(tmpDemo, '.codepen', 'pen.config.json'))).isFile());
+      assert.equal(penState, 'trashed', '--yes must not silently permanently purge Trash');
+      await assert.rejects(() => fs.stat(path.join(tmpDemo, '.codepen')), /ENOENT/);
       const keptCfg = await readProjectConfigFile(tmpDemo);
       assert.equal(keptCfg.linked, false);
       assert.equal(keptCfg.config.info.title, 'Deleted Demo');
       assert.equal(keptCfg.config.info.access, 'Private');
+
+      // 2b. Already in Trash + default --yes -> does NOT purge Trash and keeps .cdpn.json linked & .codepen/ intact
+      await relink();
+      penState = 'trashed';
+      const keptLinkedTrashed = await runDeleteCommand({
+        cwd: tmpDemo,
+        yes: true,
+        baseUrl,
+        env: {},
+        homeDir: tmpHome,
+        interactive: false,
+      });
+      assert.ok(keptLinkedTrashed);
+      assert.equal(keptLinkedTrashed.alreadyDeletedRemotely, true);
+      assert.equal(keptLinkedTrashed.purgedFromTrash, false);
+      assert.equal(keptLinkedTrashed.configRemoved, false);
+      assert.equal(keptLinkedTrashed.configKeptLinked, true);
+      assert.equal(penState, 'trashed');
+      assert.equal((await readProjectConfigFile(tmpDemo)).linked, true);
+      assert.ok((await fs.stat(path.join(tmpDemo, '.codepen', 'pen.config.json'))).isFile());
 
       // 3. Already in Trash + interactive recover -> restores Pen and keeps .cdpn.json linked
       await relink();
@@ -476,11 +521,12 @@ describe('missing / trashed remote Pen handling across commands', () => {
       assert.equal((await readProjectConfigFile(tmpDemo)).linked, true);
       assert.ok((await fs.stat(path.join(tmpDemo, '.codepen', 'pen.config.json'))).isFile());
 
-      // 4. Permanently deleted (not in Trash) + --yes -> removes .cdpn.json and .codepen/ cleanly instead of 404
+      // 4. Permanently deleted (not in Trash) + --full-cleanup --yes -> removes .cdpn.json and .codepen/ cleanly instead of 404
       await relink();
       penState = 'purged';
       const cleanedPurged = await runDeleteCommand({
         cwd: tmpDemo,
+        fullCleanup: true,
         yes: true,
         baseUrl,
         env: {},
@@ -493,6 +539,24 @@ describe('missing / trashed remote Pen handling across commands', () => {
       assert.equal(cleanedPurged.codepenDirRemoved, true);
       await assert.rejects(() => fs.stat(path.join(tmpDemo, PROJECT_CONFIG_FILENAME)), /ENOENT/);
       await assert.rejects(() => fs.stat(path.join(tmpDemo, '.codepen')), /ENOENT/);
+
+      // 4b. Permanently deleted (not in Trash) + default --yes -> unlinks .cdpn.json while keeping .codepen/ & info
+      await relink();
+      penState = 'purged';
+      const unlinkedPurged = await runDeleteCommand({
+        cwd: tmpDemo,
+        yes: true,
+        baseUrl,
+        env: {},
+        homeDir: tmpHome,
+        interactive: false,
+      });
+      assert.ok(unlinkedPurged);
+      assert.equal(unlinkedPurged.alreadyDeletedRemotely, true);
+      assert.equal(unlinkedPurged.configRemoved, false);
+      assert.equal(unlinkedPurged.infoRetained, true);
+      assert.equal((await readProjectConfigFile(tmpDemo)).linked, false);
+      assert.ok((await fs.stat(path.join(tmpDemo, '.codepen', 'pen.config.json'))).isFile());
 
       // 5. Permanently deleted without --yes non-interactively still refuses safely with 400
       await relink();

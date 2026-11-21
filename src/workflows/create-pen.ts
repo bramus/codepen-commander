@@ -184,7 +184,7 @@ export function printMissingIndexHtmlWarning(
 /**
  * First-time Pen creation flow used by `cdpn push` and `cdpn deploy` when invoked inside
  * an unlinked local demo folder (including one with retained `info` in `.cdpn.json` from
- * `cdpn delete --keep-info`):
+ * `cdpn delete --cleanup`):
  *
  * 1. Checks for `/index.html`; if absent, displays a prominent warning and asks for confirmation.
  * 2. Resolves or asks which CodePen account/profile to push to (when multiple keys are in `~/.cdpn`).

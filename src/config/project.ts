@@ -275,7 +275,7 @@ export async function hasProjectConfigInDir(dir: string): Promise<boolean> {
 
 /**
  * Reads and validates `.cdpn.json` from `rootDir`, supporting both linked Pen configs
- * and unlinked info-only configs (e.g. retained via `cdpn delete --keep-info` or `cdpn init`).
+ * and unlinked info-only configs (e.g. retained via `cdpn delete --cleanup` or `cdpn init`).
  */
 export async function readProjectConfigFile(rootDir: string): Promise<ParsedProjectConfig> {
   const resolvedDir = path.resolve(rootDir);

@@ -69,11 +69,11 @@ src/
 │   ├── push-pen.ts                 # Shared `executePush` used by both `push` and `deploy`
 │   ├── scaffold.ts                 # Shared target-directory & template scaffolding helpers
 │   └── unowned-pen.ts              # Browser-assisted fork fallback for unowned CodePen URLs
-├── commands/                       # L5: strictly 1 file per top-level CLI command (23 commands)
+├── commands/                       # L5: strictly 1 file per top-level CLI command (24 commands)
 │   ├── auth/                       # Nested subcommands (`index.ts`, `status.ts`, `list.ts`, `default.ts`, `login.ts`, `logout.ts`)
 │   └── <command>.ts                # build, clone, delete, deploy, domains, fork, info, init, list,
-│                                   # new, open, privacy, pull, push, rollback, serve, settings,
-│                                   # shell, status, undeploy, unlink, versions
+│                                   # new, open, privacy, pull, push, restore, rollback, serve,
+│                                   # settings, shell, status, undeploy, unlink, versions
 └── cli.ts                          # L6: Commander program assembly, error handling, process.exitCode
 ```
 

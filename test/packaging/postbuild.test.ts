@@ -220,9 +220,30 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
         '--help',
       ]);
       assert.ok(aliasHelp.includes('Usage: cdpn delete'), `Expected "${alias}" to alias "delete"`);
-      assert.ok(aliasHelp.includes('--keep-config'), `Expected "${alias} --help" to include --keep-config`);
-      assert.ok(aliasHelp.includes('--keep-info'), `Expected "${alias} --help" to include --keep-info`);
+      assert.ok(aliasHelp.includes('--cleanup'), `Expected "${alias} --help" to include --cleanup`);
+      assert.ok(
+        aliasHelp.includes('--full-cleanup'),
+        `Expected "${alias} --help" to include --full-cleanup`,
+      );
+      assert.equal(
+        aliasHelp.includes('--keep-info'),
+        false,
+        `Expected "${alias} --help" NOT to include --keep-info`,
+      );
+      assert.equal(
+        aliasHelp.includes('--keep-config'),
+        false,
+        `Expected "${alias} --help" NOT to include --keep-config`,
+      );
     }
+
+    const { stdout: restoreHelp } = await execFileAsync(process.execPath, [
+      path.join(distDir, 'cli.js'),
+      'restore',
+      '--help',
+    ]);
+    assert.ok(restoreHelp.includes('Usage: cdpn restore'));
+    assert.ok(restoreHelp.includes('--json'));
 
     // `cdpn unlink` takes no positional arguments and exposes --yes and --json
     await assert.rejects(
@@ -310,6 +331,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       ['domains', 'delete'],
       ['privacy'],
       ['delete'],
+      ['restore'],
       ['unlink'],
       ['list'],
       ['versions'],

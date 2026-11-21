@@ -19,6 +19,7 @@ import { registerOpenCommand } from './commands/open.js';
 import { registerPrivacyCommand } from './commands/privacy.js';
 import { registerPullCommand } from './commands/pull.js';
 import { registerPushCommand } from './commands/push.js';
+import { registerRestoreCommand } from './commands/restore.js';
 import { registerRollbackCommand } from './commands/rollback.js';
 import { registerServeCommand } from './commands/serve.js';
 import { registerSettingsCommand } from './commands/settings.js';
@@ -54,6 +55,7 @@ export function createProgram(): Command {
   registerNewCommand(program);
   registerPrivacyCommand(program);
   registerDeleteCommand(program);
+  registerRestoreCommand(program);
   registerUnlinkCommand(program);
   registerOpenCommand(program);
   registerListCommand(program);

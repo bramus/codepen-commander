@@ -123,7 +123,7 @@ export async function handleMissingRemotePen(
       throw new CliError(
         404,
         `Pen "${displayTitle}" (${project.config.pen_id}) is currently in CodePen’s Deleted Items (Trash; expires ${formatDate(trashItem.expires_at)}).\n` +
-          `Run \`cdpn ${commandName}\` interactively to recover, permanently delete, or unlink it — or restore it at ${CODEPEN_DELETED_ITEMS_URL}.`,
+          `Run \`cdpn restore\` to restore it on CodePen, run \`cdpn ${commandName}\` interactively to manage it, or restore it at ${CODEPEN_DELETED_ITEMS_URL}.`,
         {
           pen_id: project.config.pen_id,
           url: project.config.url,
@@ -150,7 +150,7 @@ export async function handleMissingRemotePen(
       [
         {
           value: 'recover',
-          label: 'Recover the Pen from Trash',
+          label: 'Restore the Pen from Trash',
           description: `restore it on CodePen and continue \`cdpn ${commandName}\``,
         },
         {

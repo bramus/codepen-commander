@@ -435,7 +435,7 @@ describe('first-time local demo push & HTML title extraction', () => {
     }
   });
 
-  it('reuses retained info after `cdpn delete --keep-info` without re-prompting for title or visibility, while still asking for account', async () => {
+  it('reuses retained info after `cdpn delete --cleanup` without re-prompting for title or visibility, while still asking for account', async () => {
     const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-fp-retained-home-'));
     const tmpDemo = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-fp-retained-demo-'));
     capturedRequests = [];
@@ -457,10 +457,10 @@ describe('first-time local demo push & HTML title extraction', () => {
         editor: 'V2',
       });
 
-      // Step 1: Delete online Pen while retaining `info` in `.cdpn.json`
+      // Step 1: Delete online Pen with --cleanup (removes .codepen/, retains `info` in `.cdpn.json`)
       const deleted = await runDeleteCommand({
         cwd: tmpDemo,
-        keepInfo: true,
+        cleanup: true,
         yes: true,
         baseUrl,
         interactive: false,
