@@ -1,16 +1,19 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
+import type { Pen, PenDomain } from '../api/types.js';
 import type { ResolvedAuth } from '../config/auth.js';
 import { type ProjectLocation, requireProject } from '../config/project.js';
-import type { Pen, PenDomain } from '../types.js';
+import { CliError } from '../errors.js';
+import { resolveInheritedJsonOption } from '../utils/cli-options.js';
 import { fmt, formatTable } from '../utils/format.js';
-import { CliError, printJsonResponse } from '../utils/json.js';
-import { isInteractive, promptConfirm } from '../utils/prompts.js';
-import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
+import { printJsonResponse } from '../utils/json.js';
+import { defaultOutput, type CommandOutput } from '../utils/output.js';
+import { isInteractive, promptConfirm } from '../utils/prompts/index.js';
+import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
 import {
   fetchLinkedPenOrHandleMissing,
   type MissingPenPrompts,
-} from './missing-pen.js';
+} from '../workflows/missing-pen.js';
 
 export interface DomainsBaseOptions {
   json?: boolean;
@@ -20,10 +23,11 @@ export interface DomainsBaseOptions {
   interactive?: boolean;
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
+  output?: CommandOutput;
   prompts?: MissingPenPrompts;
 }
 
-export interface DeleteDomainOptions extends DomainsBaseOptions {
+export interface RunDomainsDeleteOptions extends DomainsBaseOptions {
   yes?: boolean;
   confirm?: (question: string, defaultYes?: boolean) => Promise<boolean>;
 }
@@ -36,18 +40,22 @@ export interface DomainsCommandResult {
   auth: ResolvedAuth;
 }
 
-export function renderDomains(domains: PenDomain[], defaultUrl: string | null): void {
+export function renderDomains(
+  domains: PenDomain[],
+  defaultUrl: string | null,
+  output: CommandOutput = defaultOutput,
+): void {
   if (defaultUrl) {
-    console.log(`Default URL: ${fmt.cyan(defaultUrl)}`);
+    output.log(`Default URL: ${fmt.cyan(defaultUrl)}`);
   } else {
-    console.log(`Default URL: ${fmt.dim('not deployed (run `cdpn deploy` to deploy)')}`);
+    output.log(`Default URL: ${fmt.dim('not deployed (run `cdpn deploy` to deploy)')}`);
   }
 
-  console.log('');
+  output.log('');
 
   if (domains.length === 0) {
-    console.log(fmt.dim('No custom domains configured for this Pen.'));
-    console.log(fmt.dim('Add one with: cdpn domains add <host>'));
+    output.log(fmt.dim('No custom domains configured for this Pen.'));
+    output.log(fmt.dim('Add one with: cdpn domains add <host>'));
     return;
   }
 
@@ -62,23 +70,24 @@ export function renderDomains(domains: PenDomain[], defaultUrl: string | null): 
     return [fmt.cyan(d.host), status, d.cname_record, d.a_record];
   });
 
-  console.log(formatTable(['Host', 'Status', 'CNAME', 'A Record'], rows));
+  output.log(formatTable(['Host', 'Status', 'CNAME', 'A Record'], rows));
 
   const needingDns = domains.filter((d) => d.status !== 'Verified' && d.dns.length > 0);
   if (needingDns.length > 0) {
-    console.log('\nRequired DNS records:');
+    output.log('\nRequired DNS records:');
     for (const domain of needingDns) {
-      console.log(`  ${fmt.bold(domain.host)}:`);
+      output.log(`  ${fmt.bold(domain.host)}:`);
       for (const rec of domain.dns) {
-        console.log(`    ${fmt.cyan(rec.type.padEnd(6))} ${rec.name}  →  ${fmt.bold(rec.value)}`);
+        output.log(`    ${fmt.cyan(rec.type.padEnd(6))} ${rec.name}  →  ${fmt.bold(rec.value)}`);
       }
     }
   }
 }
 
-export async function listPenDomains(
+export async function runDomainsListCommand(
   options: DomainsBaseOptions = {},
 ): Promise<DomainsCommandResult | null> {
+  const output = options.output ?? defaultOutput;
   const cwd = options.cwd ?? process.cwd();
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
 
@@ -88,6 +97,7 @@ export async function listPenDomains(
     project,
     interactive,
     persistProfileToProject: !options.json,
+    output,
     env: options.env,
     homeDir: options.homeDir,
   });
@@ -100,6 +110,7 @@ export async function listPenDomains(
     commandName: 'domains',
     interactive,
     json: options.json,
+    output,
     prompts: options.prompts,
   });
   if (!penLookup.found) {
@@ -115,21 +126,27 @@ export async function listPenDomains(
       domains.length === 0
         ? 'No custom domains configured for this Pen.'
         : `Found ${domains.length} custom domain(s).`;
-    printJsonResponse(200, message, {
-      default_url: defaultUrl,
-      domains,
-    });
+    printJsonResponse(
+      200,
+      message,
+      {
+        default_url: defaultUrl,
+        domains,
+      },
+      output,
+    );
   } else {
-    renderDomains(domains, defaultUrl);
+    renderDomains(domains, defaultUrl, output);
   }
 
   return { defaultUrl, domains, pen, project, auth };
 }
 
-export async function addPenDomain(
+export async function runDomainsAddCommand(
   host: string,
   options: DomainsBaseOptions = {},
 ): Promise<DomainsCommandResult | null> {
+  const output = options.output ?? defaultOutput;
   const cleanHost = host.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
   if (!cleanHost || !/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(cleanHost)) {
     throw new CliError(
@@ -147,6 +164,7 @@ export async function addPenDomain(
     project,
     interactive,
     persistProfileToProject: !options.json,
+    output,
     env: options.env,
     homeDir: options.homeDir,
   });
@@ -159,6 +177,7 @@ export async function addPenDomain(
     commandName: 'domains add',
     interactive,
     json: options.json,
+    output,
     prompts: options.prompts,
   });
   if (!penLookup.found) {
@@ -170,23 +189,29 @@ export async function addPenDomain(
   const defaultUrl = pen.deployment?.url ?? null;
 
   if (options.json) {
-    printJsonResponse(201, `Added custom domain ${cleanHost}.`, {
-      host: cleanHost,
-      default_url: defaultUrl,
-      domains,
-    });
+    printJsonResponse(
+      201,
+      `Added custom domain ${cleanHost}.`,
+      {
+        host: cleanHost,
+        default_url: defaultUrl,
+        domains,
+      },
+      output,
+    );
   } else {
-    console.log(`${fmt.green('✓')} Added custom domain ${fmt.cyan(cleanHost)}.\n`);
-    renderDomains(domains, defaultUrl);
+    output.log(`${fmt.green('✓')} Added custom domain ${fmt.cyan(cleanHost)}.\n`);
+    renderDomains(domains, defaultUrl, output);
   }
 
   return { defaultUrl, domains, pen, project, auth };
 }
 
-export async function deletePenDomain(
+export async function runDomainsDeleteCommand(
   host: string,
-  options: DeleteDomainOptions = {},
+  options: RunDomainsDeleteOptions = {},
 ): Promise<DomainsCommandResult | null> {
+  const output = options.output ?? defaultOutput;
   const cleanHost = host.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
   if (!cleanHost) {
     throw new CliError(
@@ -204,7 +229,7 @@ export async function deletePenDomain(
     }
     const ok = await confirmImpl(`Delete custom domain ${fmt.cyan(cleanHost)}?`, false);
     if (!ok) {
-      console.log('Aborted.');
+      output.log('Aborted.');
       return null;
     }
   }
@@ -216,6 +241,7 @@ export async function deletePenDomain(
     project,
     interactive,
     persistProfileToProject: !options.json,
+    output,
     env: options.env,
     homeDir: options.homeDir,
   });
@@ -228,6 +254,7 @@ export async function deletePenDomain(
     commandName: 'domains delete',
     interactive,
     json: options.json,
+    output,
     prompts: options.prompts,
   });
   if (!penLookup.found) {
@@ -239,21 +266,22 @@ export async function deletePenDomain(
   const defaultUrl = pen.deployment?.url ?? null;
 
   if (options.json) {
-    printJsonResponse(200, `Deleted custom domain ${cleanHost}.`, {
-      host: cleanHost,
-      default_url: defaultUrl,
-      domains: remaining,
-    });
+    printJsonResponse(
+      200,
+      `Deleted custom domain ${cleanHost}.`,
+      {
+        host: cleanHost,
+        default_url: defaultUrl,
+        domains: remaining,
+      },
+      output,
+    );
   } else {
-    console.log(`${fmt.green('✓')} Deleted custom domain ${fmt.cyan(cleanHost)}.\n`);
-    renderDomains(remaining, defaultUrl);
+    output.log(`${fmt.green('✓')} Deleted custom domain ${fmt.cyan(cleanHost)}.\n`);
+    renderDomains(remaining, defaultUrl, output);
   }
 
   return { defaultUrl, domains: remaining, pen, project, auth };
-}
-
-function resolveDomainsJsonOption(options: { json?: boolean }, command: Command): boolean {
-  return Boolean(options.json || command.parent?.opts<{ json?: boolean }>().json);
 }
 
 export function registerDomainsCommand(program: Command): void {
@@ -262,7 +290,7 @@ export function registerDomainsCommand(program: Command): void {
     .description('Show the default deployed URL and manage custom domains for the Pen’s deployment')
     .option('--json', 'Output default deployed URL and domains as JSON')
     .action(async (options: { json?: boolean }, command: Command) => {
-      await listPenDomains({
+      await runDomainsListCommand({
         json: options.json,
         explicitProfile: getGlobalProfileOption(command),
       });
@@ -274,8 +302,8 @@ export function registerDomainsCommand(program: Command): void {
     .description('Show the default deployed URL, custom domains, and required DNS records')
     .option('--json', 'Output default deployed URL and domains as JSON')
     .action(async (options: { json?: boolean }, command: Command) => {
-      await listPenDomains({
-        json: resolveDomainsJsonOption(options, command),
+      await runDomainsListCommand({
+        json: resolveInheritedJsonOption(options, command),
         explicitProfile: getGlobalProfileOption(command),
       });
     });
@@ -285,8 +313,8 @@ export function registerDomainsCommand(program: Command): void {
     .description('Attach a custom domain (e.g. www.example.com) to this Pen’s deployment')
     .option('--json', 'Output default deployed URL and updated domains as JSON')
     .action(async (host: string, options: { json?: boolean }, command: Command) => {
-      await addPenDomain(host, {
-        json: resolveDomainsJsonOption(options, command),
+      await runDomainsAddCommand(host, {
+        json: resolveInheritedJsonOption(options, command),
         explicitProfile: getGlobalProfileOption(command),
       });
     });
@@ -298,9 +326,9 @@ export function registerDomainsCommand(program: Command): void {
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Output default deployed URL and remaining domains as JSON')
     .action(async (host: string, options: { yes?: boolean; json?: boolean }, command: Command) => {
-      await deletePenDomain(host, {
+      await runDomainsDeleteCommand(host, {
         yes: options.yes,
-        json: resolveDomainsJsonOption(options, command),
+        json: resolveInheritedJsonOption(options, command),
         explicitProfile: getGlobalProfileOption(command),
       });
     });

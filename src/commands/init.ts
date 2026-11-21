@@ -1,29 +1,40 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
+import type { PenAccess } from '../api/types.js';
 import {
-  hasProjectConfigInDir,
-  PROJECT_CONFIG_FILENAME,
-  readProjectConfigFile,
-  writeUnlinkedProjectInfo,
-} from '../config/project.js';
-import {
+  INIT_BLOCK_CHOICES,
   buildPenConfigObject,
   buildStarterClassicConfig,
-  CLASSIC_CONFIG_FILENAME,
-  CODEPEN_DIR,
-  INIT_BLOCK_CHOICES,
-  isWithinRoot,
   normalizePenBlocksList,
   parseBlocksOption,
+} from '../config/pen-blocks.js';
+import {
+  hasProjectConfigInDir,
+  readProjectConfigFile,
+  writeUnlinkedProjectInfo,
+  type PenInfo,
+} from '../config/project.js';
+import {
+  CLASSIC_CONFIG_FILENAME,
+  CODEPEN_DIR,
+  PEN_ACCESS_CHOICES,
   PEN_CONFIG_FILENAME,
-  readPenBlocks,
-} from '../site/blocks.js';
-import { formatFolderTitle } from '../site/manifest.js';
-import type { PenAccess, PenInfo } from '../types.js';
+  PROJECT_CONFIG_FILENAME,
+} from '../constants.js';
+import { CliError } from '../errors.js';
+import { readPenBlocks } from '../site/blocks/index.js';
+import {
+  assertValidTagCount,
+  parseTagsOption,
+  parseTemplateCliFlag,
+  resolveAccessOrVisibility,
+} from '../utils/cli-options.js';
 import { fmt } from '../utils/format.js';
+import { fileExistsRegular, isWithinRoot } from '../utils/fs-safe.js';
 import { extractHtmlTitle } from '../utils/html.js';
-import { CliError, printJsonResponse } from '../utils/json.js';
+import { printJsonResponse } from '../utils/json.js';
+import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import {
   isInteractive,
   promptConfirm,
@@ -32,15 +43,10 @@ import {
   promptValidatedTextWithIO,
   type MultiSelectOption,
   type SelectOption,
-} from '../utils/prompts.js';
-import { getGlobalProfileOption } from './auth-context.js';
-import {
-  createPenFromDirectory,
-  normalizeAccess,
-  type CreatePenFlowResult,
-} from './create-pen.js';
-
-const CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
+} from '../utils/prompts/index.js';
+import { formatFolderTitle, hasControlChars, isPlainObject } from '../utils/strings.js';
+import { getGlobalProfileOption } from '../workflows/auth-context.js';
+import { createPenFromDirectory, type CreatePenFlowResult } from '../workflows/create-pen.js';
 
 export interface InitCliOptions {
   title?: string;
@@ -71,7 +77,7 @@ export interface InitCommandPrompts {
   secret?: (question: string) => Promise<string>;
 }
 
-export interface InitCommandOptions {
+export interface RunInitCommandOptions {
   dirArg?: string;
   cwd?: string;
   explicitProfile?: string;
@@ -89,6 +95,7 @@ export interface InitCommandOptions {
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
   interactive?: boolean;
+  output?: CommandOutput;
   prompts?: InitCommandPrompts;
 }
 
@@ -104,71 +111,24 @@ export interface InitCommandResult {
   info: Required<PenInfo>;
   blocks: string[];
   writtenFiles: string[];
-}
-
-function parseTemplateCliFlag(
-  rawTemplate: string | boolean | undefined,
-  asTemplate: boolean | undefined,
-): boolean | undefined {
-  let parsedTemplate: boolean | undefined;
-  if (typeof rawTemplate === 'boolean') {
-    parsedTemplate = rawTemplate;
-  } else if (typeof rawTemplate === 'string') {
-    const lower = rawTemplate.trim().toLowerCase();
-    if (lower === 'true' || lower === '1' || lower === 'yes' || lower === 'on') {
-      parsedTemplate = true;
-    } else if (lower === 'false' || lower === '0' || lower === 'no' || lower === 'off') {
-      parsedTemplate = false;
-    } else {
-      throw new CliError(
-        400,
-        `Invalid boolean value "${rawTemplate}" for --template. Use true or false.`,
-      );
-    }
-  }
-
-  if (parsedTemplate !== undefined && asTemplate !== undefined && parsedTemplate !== asTemplate) {
-    throw new CliError(400, 'Cannot combine conflicting --template and --as-template flags.');
-  }
-
-  return parsedTemplate ?? asTemplate;
-}
-
-function resolveAccessInput(rawAccess?: string, rawVisibility?: string): PenAccess | undefined {
-  const access = normalizeAccess(rawAccess);
-  const visibility = normalizeAccess(rawVisibility);
-  if (access && visibility && access !== visibility) {
-    throw new CliError(
-      400,
-      `Conflicting --access ("${access}") and --visibility ("${visibility}") values.`,
-    );
-  }
-  return access ?? visibility;
-}
-
-async function fileExistsRegular(filePath: string): Promise<boolean> {
-  try {
-    const stat = await fs.lstat(filePath);
-    return !stat.isSymbolicLink() && stat.isFile();
-  } catch {
-    return false;
-  }
+  exitCode?: number;
 }
 
 export async function runInitCommand(
-  options: InitCommandOptions = {},
+  options: RunInitCommandOptions = {},
 ): Promise<InitCommandResult> {
+  const output = options.output ?? defaultOutput;
   const jsonMode = Boolean(options.json);
   const interactive = !jsonMode && (options.interactive ?? isInteractive());
   const cwd = path.resolve(options.cwd ?? process.cwd());
   const dirDisplay = options.dirArg?.trim() || '.';
 
-  if (CONTROL_CHAR_PATTERN.test(dirDisplay)) {
+  if (hasControlChars(dirDisplay)) {
     throw new CliError(400, 'Directory path cannot contain control characters.');
   }
 
   // Pre-validate CLI flags before touching disk or prompting
-  const explicitAccess = resolveAccessInput(options.access, options.visibility);
+  const explicitAccess = resolveAccessOrVisibility(options.access, options.visibility);
 
   let explicitBlocks: string[] | undefined;
   if (options.blocks !== undefined) {
@@ -178,11 +138,9 @@ export async function runInitCommand(
         : normalizePenBlocksList(options.blocks);
   }
 
-  if (options.tags && options.tags.length > 5) {
-    throw new CliError(400, `CodePen allows at most 5 tags per Pen (got ${options.tags.length}).`);
-  }
+  assertValidTagCount(options.tags);
 
-  if (options.title !== undefined && CONTROL_CHAR_PATTERN.test(options.title)) {
+  if (options.title !== undefined && hasControlChars(options.title)) {
     throw new CliError(400, 'Pen title cannot contain control characters.');
   }
 
@@ -190,7 +148,10 @@ export async function runInitCommand(
   try {
     const stat = await fs.lstat(targetDir);
     if (stat.isSymbolicLink()) {
-      throw new CliError(400, `"${dirDisplay}" is a symbolic link. Please choose a regular directory.`);
+      throw new CliError(
+        400,
+        `"${dirDisplay}" is a symbolic link. Please choose a regular directory.`,
+      );
     }
     if (!stat.isDirectory()) {
       throw new CliError(400, `"${dirDisplay}" already exists and is not a directory.`);
@@ -220,7 +181,7 @@ export async function runInitCommand(
         defaultValue,
         validate(raw) {
           const trimmed = raw.trim();
-          if (CONTROL_CHAR_PATTERN.test(trimmed)) {
+          if (hasControlChars(trimmed)) {
             return { ok: false, error: 'Pen title cannot contain control characters.' };
           }
           const value = trimmed || defaultValue || 'Untitled';
@@ -260,7 +221,7 @@ export async function runInitCommand(
         false,
       );
       if (!overwrite) {
-        console.log(fmt.dim('Init aborted.'));
+        output.log(fmt.dim('Init aborted.'));
         return {
           initialized: false,
           aborted: true,
@@ -305,7 +266,7 @@ export async function runInitCommand(
   let title = options.title?.trim();
   if (!title) {
     if (interactive) {
-      console.log('');
+      output.log('');
       title = (await textImpl('Pen title', defaultTitle)).trim() || defaultTitle;
     } else {
       title = defaultTitle;
@@ -317,24 +278,18 @@ export async function runInitCommand(
   if (explicitAccess) {
     access = explicitAccess;
   } else if (interactive) {
-    const visibilityOptions: SelectOption<PenAccess>[] = [
-      { value: 'Public', label: 'Public', description: 'visible to everyone' },
-      { value: 'Private', label: 'Private', description: 'visible only to you / your team' },
-      {
-        value: 'Protected',
-        label: 'Protected',
-        description: 'password-protected (set password on push)',
-      },
-      {
-        value: 'Collaborators',
-        label: 'Collaborators',
-        description: 'visible only to you and collaborators',
-      },
-    ];
+    const visibilityOptions: SelectOption<PenAccess>[] = PEN_ACCESS_CHOICES.map((c) => ({
+      value: c.value,
+      label: c.label,
+      description:
+        c.value === 'Protected'
+          ? 'private and password-protected (set password on push)'
+          : c.description,
+    }));
     const defaultVisIndex = existingInfo?.access
       ? Math.max(0, visibilityOptions.findIndex((o) => o.value === existingInfo?.access))
       : 0;
-    console.log('');
+    output.log('');
     access = await selectImpl<PenAccess>('Pen visibility', visibilityOptions, defaultVisIndex);
   } else {
     access = existingInfo?.access ?? 'Public';
@@ -362,7 +317,7 @@ export async function runInitCommand(
         (choice.id === 'classic' && (Boolean(existingPenBlocks?.hasClassic) || hasPenHtml)),
     }));
 
-    console.log('');
+    output.log('');
     const picked = await multiSelectImpl('Blocks to add', blockOptions);
     selectedBlocks = normalizePenBlocksList(picked);
   } else {
@@ -372,8 +327,7 @@ export async function runInitCommand(
   // Extra CLI-only metadata fields (not asked in UI)
   const description =
     options.description !== undefined ? options.description : (existingInfo?.description ?? '');
-  const tags =
-    options.tags !== undefined ? options.tags : (existingInfo?.tags ?? []);
+  const tags = options.tags !== undefined ? options.tags : (existingInfo?.tags ?? []);
   const template =
     options.template !== undefined ? options.template : (existingInfo?.template ?? false);
 
@@ -389,7 +343,10 @@ export async function runInitCommand(
   try {
     const codepenStat = await fs.lstat(codepenDir);
     if (codepenStat.isSymbolicLink() || !codepenStat.isDirectory()) {
-      throw new CliError(400, `${CODEPEN_DIR} must be a regular directory (symlinks are not allowed).`);
+      throw new CliError(
+        400,
+        `${CODEPEN_DIR} must be a regular directory (symlinks are not allowed).`,
+      );
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -411,8 +368,8 @@ export async function runInitCommand(
     }
     const rawExisting = await fs.readFile(penConfigPath, 'utf8');
     const parsed: unknown = JSON.parse(rawExisting);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      existingPenConfig = parsed as Record<string, unknown>;
+    if (isPlainObject(parsed)) {
+      existingPenConfig = parsed;
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && error instanceof CliError) {
@@ -464,31 +421,36 @@ export async function runInitCommand(
   };
 
   if (jsonMode) {
-    printJsonResponse(201, `Initialized CodePen demo "${info.title}" in ${dirDisplay}.`, {
-      root_dir: result.rootDir,
-      config_path: result.configPath,
-      pen_config_path: result.penConfigPath,
-      classic_config_path: result.classicConfigPath,
-      info: result.info,
-      blocks: result.blocks,
-      written_files: result.writtenFiles,
-    });
+    printJsonResponse(
+      201,
+      `Initialized CodePen demo "${info.title}" in ${dirDisplay}.`,
+      {
+        root_dir: result.rootDir,
+        config_path: result.configPath,
+        pen_config_path: result.penConfigPath,
+        classic_config_path: result.classicConfigPath,
+        info: result.info,
+        blocks: result.blocks,
+        written_files: result.writtenFiles,
+      },
+      output,
+    );
     return result;
   }
 
-  console.log('');
-  console.log(
+  output.log('');
+  output.log(
     `${fmt.boldGreen('✓')} ${fmt.bold('Initialized CodePen demo')} ${fmt.boldCyan(info.title)} ${fmt.dim(`(${info.access})`)}`,
   );
-  console.log(`  ${fmt.dim('Folder:')} ${fmt.magenta(realTargetDir)}`);
-  console.log(`  ${fmt.dim('Blocks:')} ${fmt.cyan(selectedBlocks.join(', '))}`);
-  console.log('');
+  output.log(`  ${fmt.dim('Folder:')} ${fmt.magenta(realTargetDir)}`);
+  output.log(`  ${fmt.dim('Blocks:')} ${fmt.cyan(selectedBlocks.join(', '))}`);
+  output.log('');
   for (const rel of writtenFiles) {
-    console.log(`  ${fmt.boldGreen('+')} ${rel}`);
+    output.log(`  ${fmt.boldGreen('+')} ${rel}`);
   }
 
   if (interactive) {
-    console.log('');
+    output.log('');
     const shouldPush = await confirmImpl('Do you want to push this to CodePen right now?', false);
     if (shouldPush) {
       const pushResult = await createPenFromDirectory({
@@ -496,6 +458,7 @@ export async function runInitCommand(
         folderDisplay: dirDisplay,
         explicitProfile: options.explicitProfile,
         interactive: true,
+        output,
         baseUrl: options.baseUrl,
         env: options.env,
         homeDir: options.homeDir,
@@ -508,13 +471,16 @@ export async function runInitCommand(
       });
       result.pushed = Boolean(pushResult);
       result.pushResult = pushResult;
+      if (pushResult?.exitCode !== undefined) {
+        result.exitCode = pushResult.exitCode;
+      }
     } else {
-      console.log(
+      output.log(
         fmt.dim('\nNext steps: run `cdpn serve` to preview locally or `cdpn push` to upload to CodePen.'),
       );
     }
   } else {
-    console.log(
+    output.log(
       fmt.dim('\nNext steps: run `cdpn serve` to preview locally or `cdpn push` to upload to CodePen.'),
     );
   }
@@ -541,16 +507,7 @@ export function registerInitCommand(program: Command): void {
     .option('-y, --yes', 'Alias for --force')
     .option('--json', 'Output initialization result as JSON')
     .action(async (dirArg: string | undefined, options: InitCliOptions, command: Command) => {
-      const tags =
-        options.tags !== undefined
-          ? options.tags
-              .split(',')
-              .map((t) => t.trim())
-              .filter(Boolean)
-          : undefined;
-      const template = parseTemplateCliFlag(options.template, options.asTemplate);
-
-      await runInitCommand({
+      const result = await runInitCommand({
         dirArg,
         explicitProfile: getGlobalProfileOption(command),
         title: options.title,
@@ -558,11 +515,14 @@ export function registerInitCommand(program: Command): void {
         visibility: options.visibility,
         blocks: options.blocks,
         description: options.description,
-        tags,
-        template,
+        tags: parseTagsOption(options.tags),
+        template: parseTemplateCliFlag(options.template, options.asTemplate),
         force: options.force,
         yes: options.yes,
         json: options.json,
       });
+      if (result.exitCode !== undefined) {
+        process.exitCode = result.exitCode;
+      }
     });
 }

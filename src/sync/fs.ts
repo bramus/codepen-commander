@@ -1,10 +1,16 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { MAX_FILE_BYTES } from '../api/client.js';
-import { PROJECT_CONFIG_FILENAME } from '../config/project.js';
+import {
+  IGNORE_FILENAME,
+  MAX_FILE_BYTES,
+  PROJECT_CONFIG_FILENAME,
+} from '../constants.js';
+import { CliError } from '../errors.js';
+import { isWithinRoot } from '../utils/fs-safe.js';
+import { hasControlChars } from '../utils/strings.js';
 
-export const IGNORE_FILENAME = '.cdpnignore';
+export { IGNORE_FILENAME };
 
 const BUILTIN_IGNORED_SEGMENTS = new Set([
   PROJECT_CONFIG_FILENAME,
@@ -58,33 +64,33 @@ export function isBinaryBuffer(buffer: Buffer): boolean {
  */
 export function normalizePenPath(rawPath: string): string {
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
-    throw new Error('File path cannot be empty.');
+    throw new CliError(400, 'File path cannot be empty.');
   }
-  if (rawPath.includes('\0') || /[\x00-\x1f\x7f]/.test(rawPath)) {
-    throw new Error(`Invalid control character in file path: ${JSON.stringify(rawPath)}`);
+  if (hasControlChars(rawPath)) {
+    throw new CliError(400, `Invalid control character in file path: ${JSON.stringify(rawPath)}`);
   }
   if (rawPath.includes('\\')) {
-    throw new Error(`Backslashes are not allowed in Pen file paths: ${rawPath}`);
+    throw new CliError(400, `Backslashes are not allowed in Pen file paths: ${rawPath}`);
   }
   if (/^[A-Za-z]:/.test(rawPath)) {
-    throw new Error(`Drive-letter paths are not allowed: ${rawPath}`);
+    throw new CliError(400, `Drive-letter paths are not allowed: ${rawPath}`);
   }
 
   const trimmed = rawPath.replace(/^\/+/, '');
   if (!trimmed) {
-    throw new Error(`Invalid empty Pen file path: ${rawPath}`);
+    throw new CliError(400, `Invalid empty Pen file path: ${rawPath}`);
   }
 
   const segments = trimmed.split('/');
   for (const seg of segments) {
     if (!seg || seg === '.' || seg === '..') {
-      throw new Error(`Unsafe path segment in Pen file path: ${rawPath}`);
+      throw new CliError(400, `Unsafe path segment in Pen file path: ${rawPath}`);
     }
   }
 
   const normalized = `/${segments.join('/')}`;
   if (segments[0] === PROJECT_CONFIG_FILENAME || segments[0] === '.git') {
-    throw new Error(`Refusing to touch reserved path: ${normalized}`);
+    throw new CliError(400, `Refusing to touch reserved path: ${normalized}`);
   }
 
   return normalized;
@@ -99,8 +105,8 @@ export function resolveSafeLocalPath(rootDir: string, penPath: string): string {
   const relative = normalizedPenPath.slice(1).split('/').join(path.sep);
   const resolvedTarget = path.resolve(resolvedRoot, relative);
 
-  if (!resolvedTarget.startsWith(resolvedRoot + path.sep)) {
-    throw new Error(`Path escapes project root boundary: ${penPath}`);
+  if (!isWithinRoot(resolvedTarget, resolvedRoot)) {
+    throw new CliError(400, `Path escapes project root boundary: ${penPath}`);
   }
 
   return resolvedTarget;
@@ -179,7 +185,7 @@ export async function scanLocalFiles(rootDir: string): Promise<Map<string, Local
       }
 
       const fullPath = path.join(currentDir, entry.name);
-      if (!fullPath.startsWith(resolvedRoot + path.sep)) {
+      if (!isWithinRoot(fullPath, resolvedRoot)) {
         continue;
       }
 
@@ -193,7 +199,8 @@ export async function scanLocalFiles(rootDir: string): Promise<Map<string, Local
         await walk(fullPath, penPath);
       } else if (stat.isFile()) {
         if (stat.size > MAX_FILE_BYTES) {
-          throw new Error(
+          throw new CliError(
+            400,
             `Local file ${penPath} is ${Math.round(stat.size / (1024 * 1024))} MB, exceeding CodePen's 30 MB per-file limit.`,
           );
         }
@@ -224,7 +231,7 @@ async function assertNoSymlinksInRelativePath(rootDir: string, penPath: string):
     try {
       const stat = await fs.lstat(current);
       if (stat.isSymbolicLink()) {
-        throw new Error(`Refusing to write through symlink at ${penPath}`);
+        throw new CliError(400, `Refusing to write through symlink at ${penPath}`);
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -264,7 +271,7 @@ export async function pruneEmptyDirs(rootDir: string, startDir: string): Promise
   const resolvedRoot = path.resolve(rootDir);
   let current = path.resolve(startDir);
 
-  while (current !== resolvedRoot && current.startsWith(resolvedRoot + path.sep)) {
+  while (current !== resolvedRoot && isWithinRoot(current, resolvedRoot)) {
     try {
       const entries = await fs.readdir(current);
       if (entries.length > 0) {

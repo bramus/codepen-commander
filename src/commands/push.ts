@@ -1,422 +1,281 @@
 import path from 'node:path';
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
-import {
-  buildSyncedFileMap,
-  findNearestConfig,
-  PROJECT_CONFIG_FILENAME,
-  writeProjectConfig,
-  type ProjectLocation,
-} from '../config/project.js';
-import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
-import { createPenFromDirectory } from './create-pen.js';
-import { computeSyncDiff, hasDiffChanges } from '../sync/diff.js';
-import { scanLocalFiles } from '../sync/fs.js';
-import {
-  analyzeInfoSync,
-  buildInfoUpdatePatch,
-  buildPenInfoConfigFields,
-  formatInfoValue,
-  hashPenInfo,
-  isCompletePenInfo,
-  type InfoDiffItem,
-} from '../sync/info.js';
-import { applyCompilerPatchesToDisk } from '../sync/materialize.js';
-import type { BinaryUploadPart, Build, BuildPatch, FileChange, Pen, PenFile } from '../types.js';
-import { fmt, printBuildSummary, shortId } from '../utils/format.js';
-import { CliError, printJsonResponse } from '../utils/json.js';
-import { isInteractive } from '../utils/prompts.js';
-import {
-  fetchLinkedPenOrHandleMissing,
-  handleMissingRemotePen,
-  isRemotePenNotFoundError,
-} from './missing-pen.js';
+import type { Build, BuildPatch, Pen } from '../api/types.js';
+import { findNearestConfig, type ProjectLocation } from '../config/project.js';
+import { PROJECT_CONFIG_FILENAME } from '../constants.js';
+import { CliError } from '../errors.js';
+import type { InfoDiffItem } from '../sync/info.js';
+import { assertValidVersionLabel, resolveAccessOrVisibility } from '../utils/cli-options.js';
+import { fmt, shortId } from '../utils/format.js';
+import { printJsonResponse } from '../utils/json.js';
+import { defaultOutput, type CommandOutput } from '../utils/output.js';
+import { isInteractive, type SelectOption } from '../utils/prompts/index.js';
+import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
+import { createPenFromDirectory } from '../workflows/create-pen.js';
+import { fetchLinkedPenOrHandleMissing } from '../workflows/missing-pen.js';
+import { executePush, type PushExecutionResult, type PushOptions } from '../workflows/push-pen.js';
 
-export interface PushOptions {
+export type { PushExecutionResult, PushOptions };
+
+export interface PushCliOptions {
   label?: string;
   force?: boolean;
   dryRun?: boolean;
   wait?: boolean;
   title?: string;
   access?: string;
+  visibility?: string;
   password?: string;
   json?: boolean;
-  silent?: boolean;
-  prefetchedPen?: Pen;
 }
 
-export interface PushExecutionResult {
-  pushed: boolean;
-  dryRun: boolean;
-  pen: Pen;
-  versionId: string | null;
-  build: Build | null;
-  changes: {
-    added: string[];
-    modified: string[];
-    deleted: string[];
+export interface RunPushCommandOptions extends PushCliOptions {
+  cwd?: string;
+  explicitProfile?: string;
+  baseUrl?: string;
+  interactive?: boolean;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  output?: CommandOutput;
+  prompts?: {
+    confirm?: (question: string, defaultYes?: boolean) => Promise<boolean>;
+    text?: (question: string, defaultValue?: string) => Promise<string>;
+    select?: <T extends string>(
+      question: string,
+      options: SelectOption<T>[],
+      defaultIndex?: number,
+    ) => Promise<T>;
+    secret?: (question: string) => Promise<string>;
   };
-  infoChanges: InfoDiffItem[];
-  appliedPatches: BuildPatch[];
-  remoteInfoChanged?: boolean;
 }
 
-export async function executePush(
-  client: CodePenClient,
-  project: ProjectLocation,
-  options: PushOptions = {},
-): Promise<PushExecutionResult> {
-  const silent = Boolean(options.silent);
-  let pen = options.prefetchedPen;
-  if (!pen) {
-    try {
-      pen = await client.getPen(project.config.pen_id);
-    } catch (error) {
-      if (isRemotePenNotFoundError(error)) {
-        await handleMissingRemotePen({
-          client,
-          project,
-          auth: { profile: project.config.profile ?? null },
-          commandName: 'push',
-          interactive: false,
-          json: options.json,
-        });
-      }
-      throw error;
+export interface RunPushCommandResult {
+  pushed: boolean;
+  created: boolean;
+  dryRun: boolean;
+  pen?: Pen;
+  versionId?: string | null;
+  build?: Build | null;
+  changes?: { added: string[]; modified: string[]; deleted: string[] };
+  infoChanges?: InfoDiffItem[];
+  appliedPatches?: BuildPatch[];
+  aborted?: boolean;
+  exitCode?: number;
+}
+
+export async function runPushCommand(
+  options: RunPushCommandOptions = {},
+): Promise<RunPushCommandResult> {
+  const output = options.output ?? defaultOutput;
+  const cwd = path.resolve(options.cwd ?? process.cwd());
+  const jsonMode = Boolean(options.json);
+  const interactive = !jsonMode && (options.interactive ?? isInteractive());
+
+  assertValidVersionLabel(options.label);
+  const resolvedAccess = resolveAccessOrVisibility(options.access, options.visibility);
+
+  const nearest = await findNearestConfig(cwd);
+
+  // First-time push: no linked .cdpn.json found -> push local folder as a brand-new CodePen 2.0 Pen
+  if (!nearest || !nearest.linked) {
+    if (options.dryRun) {
+      throw new CliError(
+        400,
+        nearest
+          ? `${PROJECT_CONFIG_FILENAME} in ${nearest.rootDir} is not linked to an online Pen yet. --dry-run is only supported for an existing synced Pen.`
+          : `No ${PROJECT_CONFIG_FILENAME} found. --dry-run is only supported for an existing synced Pen.`,
+      );
     }
+
+    const targetDir = nearest ? nearest.rootDir : cwd;
+    const folderDisplay = path.relative(cwd, targetDir) || '.';
+
+    if (!jsonMode) {
+      output.log(
+        fmt.dim(
+          nearest
+            ? `Found unlinked ${PROJECT_CONFIG_FILENAME} with saved Pen info — pushing this local folder as a new CodePen 2.0 Pen.`
+            : `No ${PROJECT_CONFIG_FILENAME} found — pushing this local folder as a new CodePen 2.0 Pen.`,
+        ),
+      );
+    }
+
+    const created = await createPenFromDirectory({
+      targetDir,
+      folderDisplay,
+      explicitProfile: options.explicitProfile,
+      title: options.title,
+      access: resolvedAccess,
+      password: options.password,
+      force: options.force,
+      wait: options.wait,
+      silent: jsonMode,
+      output,
+      baseUrl: options.baseUrl,
+      interactive,
+      env: options.env,
+      homeDir: options.homeDir,
+      prompts: options.prompts,
+    });
+
+    if (!created) {
+      return { pushed: false, created: false, dryRun: false, aborted: true };
+    }
+
+    const buildFailed = created.build?.status === 'Failed';
+    if (jsonMode) {
+      printJsonResponse(
+        buildFailed ? 422 : 201,
+        buildFailed
+          ? `Created Pen ${created.pen.title || 'Untitled'} (${created.pen.id}), but the initial build failed.`
+          : `Created Pen ${created.pen.title || 'Untitled'} (${created.pen.id}).`,
+        {
+          pushed: true,
+          created: true,
+          dry_run: false,
+          pen: created.pen,
+          profile: created.auth.profile,
+          folder: folderDisplay,
+          root_dir: created.project.rootDir,
+          config_path: created.project.configPath,
+          version_id: created.versionId,
+          build: created.build,
+        },
+        output,
+      );
+    }
+
+    return {
+      pushed: true,
+      created: true,
+      dryRun: false,
+      pen: created.pen,
+      versionId: created.versionId,
+      build: created.build,
+      ...(created.exitCode !== undefined ? { exitCode: created.exitCode } : {}),
+    };
   }
-  const [remoteFiles, localFiles] = await Promise.all([
-    client.getPenFiles(project.config.pen_id),
-    scanLocalFiles(project.rootDir),
-  ]);
 
-  if (pen.editor === 'Classic') {
-    throw new CliError(
-      403,
-      'This is a Classic Pen, which is read-only in CodePen API v2. Only CodePen 2.0 Pens can be pushed.',
-    );
+  const project: ProjectLocation = {
+    rootDir: nearest.rootDir,
+    configPath: nearest.configPath,
+    config: nearest.config,
+  };
+
+  const auth = await resolveCommandAuth({
+    explicitProfile: options.explicitProfile,
+    project,
+    interactive,
+    persistProfileToProject: !jsonMode,
+    output,
+    env: options.env,
+    homeDir: options.homeDir,
+    selectProfile: options.prompts?.select,
+  });
+  const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
+
+  const penLookup = await fetchLinkedPenOrHandleMissing({
+    client,
+    project,
+    auth,
+    commandName: 'push',
+    interactive,
+    json: jsonMode,
+    output,
+    prompts: options.prompts,
+  });
+  if (!penLookup.found) {
+    return { pushed: false, created: false, dryRun: Boolean(options.dryRun), aborted: true };
   }
 
-  const localHead = project.config.last_synced_version_id;
-  const remoteHead = pen.saved_version?.id ?? null;
-
-  if (remoteHead && localHead && remoteHead !== localHead && !options.force) {
-    throw new CliError(
-      409,
-      `Remote Pen head (${shortId(remoteHead)}) has moved ahead of your last synced version (${shortId(localHead)}).\n` +
-        'Run `cdpn status` to inspect differences, `cdpn pull` to sync remote changes, or `cdpn push --force` to overwrite.',
-      {
-        local_head: localHead,
-        remote_head: remoteHead,
-      },
-    );
-  }
-
-  const diff = await computeSyncDiff({
-    localFiles,
-    remoteFiles,
-    baseline: project.config.files,
-    downloadFile: (url) => client.downloadFile(url),
+  const result = await executePush(client, project, {
+    label: options.label,
+    force: options.force,
+    dryRun: options.dryRun,
+    wait: options.wait,
+    title: options.title,
+    access: resolvedAccess,
+    password: options.password,
+    json: jsonMode,
+    prefetchedPen: penLookup.pen,
+    silent: jsonMode,
+    output,
   });
 
-  const infoAnalysis = analyzeInfoSync(
-    project.config.info,
-    project.config.last_synced_info_hash,
-    pen,
-  );
+  const hasFileChanges =
+    result.changes.added.length > 0 ||
+    result.changes.modified.length > 0 ||
+    result.changes.deleted.length > 0;
+  const buildFailed = hasFileChanges && result.build?.status === 'Failed';
 
-  if (infoAnalysis.localChanged && infoAnalysis.remoteChanged && !options.force) {
-    const fields = infoAnalysis.changes.map((c) => c.field).join(', ');
-    throw new CliError(
-      409,
-      `Remote Pen info has changed since your last sync, and you also have local info edits in ${PROJECT_CONFIG_FILENAME} (${fields}).\n` +
-        'Run `cdpn status` to inspect differences, `cdpn pull` to sync remote changes, or `cdpn push --force` to overwrite.',
-      {
-        info_changes: infoAnalysis.changes,
-      },
-    );
-  }
-
-  const hasFileChanges = hasDiffChanges(diff);
-  const shouldPushInfo =
-    infoAnalysis.changes.length > 0 && (infoAnalysis.localChanged || Boolean(options.force));
-  const infoChangesToPush = shouldPushInfo ? infoAnalysis.changes : [];
-  // Validate info patch constraints up-front before making any write API calls
-  const infoPatch = shouldPushInfo ? buildInfoUpdatePatch(infoChangesToPush) : null;
-
-  if (!hasFileChanges && !shouldPushInfo) {
-    let backfilledLegacyInfo = false;
-    if (!options.dryRun && infoAnalysis.changes.length === 0) {
-      const remoteHash = hashPenInfo(infoAnalysis.remoteInfo);
-      const needsInfoUpgrade =
-        !infoAnalysis.tracked ||
-        !isCompletePenInfo(project.config.info) ||
-        project.config.last_synced_info_hash !== remoteHash;
-      if (needsInfoUpgrade) {
-        backfilledLegacyInfo = !infoAnalysis.tracked;
-        const nextConfig = {
-          ...project.config,
-          ...buildPenInfoConfigFields(pen),
-        };
-        await writeProjectConfig(project.rootDir, nextConfig);
-        project.config = nextConfig;
-      }
-    }
-
-    if (!silent) {
-      if (infoAnalysis.remoteChanged) {
-        console.log(
-          `${fmt.cyan('ℹ')} No local changes to push. Remote Pen info has changed on CodePen — run \`cdpn pull\` to update ${PROJECT_CONFIG_FILENAME}, or \`cdpn push --force\` to overwrite.`,
-        );
-      } else {
-        console.log(`${fmt.green('✓')} Everything is up to date — nothing to push.`);
-        if (backfilledLegacyInfo) {
-          console.log(fmt.dim(`  Added Pen info to ${PROJECT_CONFIG_FILENAME}.`));
-        }
-      }
-    }
-
-    return {
-      pushed: false,
-      dryRun: Boolean(options.dryRun),
-      pen,
-      versionId: remoteHead,
-      build: pen.saved_version?.build ?? null,
-      changes: { added: [], modified: [], deleted: [] },
-      infoChanges: [],
-      appliedPatches: [],
-      remoteInfoChanged: infoAnalysis.remoteChanged,
+  if (jsonMode) {
+    const payload = {
+      pushed: result.pushed,
+      created: false,
+      dry_run: result.dryRun,
+      pen: result.pen,
+      profile: auth.profile,
+      version_id: result.versionId,
+      build: result.build,
+      changes: result.changes,
+      info_changes: result.infoChanges,
+      applied_patches: result.appliedPatches,
     };
-  }
 
-  const changes = {
-    added: diff.added.map((item) => item.path),
-    modified: diff.modified.map((item) => item.path),
-    deleted: diff.deleted.map((item) => item.path),
-  };
-
-  if (!silent) {
-    console.log(
-      `${options.dryRun ? 'Dry-run pushing' : 'Pushing'} changes to ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}:`,
-    );
-    for (const item of diff.added) console.log(`  ${fmt.green('+')} ${item.path}`);
-    for (const item of diff.modified) console.log(`  ${fmt.yellow('~')} ${item.path}`);
-    for (const item of diff.deleted) console.log(`  ${fmt.red('-')} ${item.path}`);
-    for (const change of infoChangesToPush) {
-      console.log(
-        `  ${fmt.yellow('~')} info.${change.field}: ${formatInfoValue(change.field, change.remote)} → ${formatInfoValue(change.field, change.local)}`,
+    if (result.dryRun) {
+      printJsonResponse(
+        buildFailed ? 422 : 200,
+        buildFailed
+          ? 'Dry run completed, but the build failed.'
+          : 'Dry run complete — no changes were saved to CodePen.',
+        payload,
+        output,
       );
-    }
-  }
-
-  let finalBuild: Build | null = pen.saved_version?.build ?? null;
-  let finalVersionId: string | null = remoteHead;
-  let appliedPatches: BuildPatch[] = [];
-  let updatedPen: Pen = pen;
-  let finalRemoteFiles: PenFile[] | undefined;
-  let localShaByPath: Map<string, string> | undefined;
-
-  if (hasFileChanges) {
-    const fileChanges: FileChange[] = [];
-    const binaryUploads: BinaryUploadPart[] = [];
-
-    for (const item of [...diff.added, ...diff.modified]) {
-      const local = item.local!;
-      // Note: CodePen API returns 400 on empty multipart parts, so 0-byte files always go as text JSON
-      if (local.isBinary && local.buffer.length > 0) {
-        binaryUploads.push({ path: item.path, content: local.buffer });
-      } else {
-        fileChanges.push({
-          path: item.path,
-          content: local.textContent ?? '',
-        });
-      }
-    }
-
-    for (const item of diff.deleted) {
-      fileChanges.push({
-        path: item.path,
-        delete: true,
-      });
-    }
-
-    const expectedVersionId = options.force ? undefined : (localHead ?? remoteHead ?? undefined);
-    const shouldWait = options.wait !== false;
-
-    if (!silent) {
-      console.log(shouldWait ? '\nUploading and building on CodePen…' : '\nUploading to CodePen…');
-    }
-
-    const writeResult = await client.writePenFiles(
-      pen.id,
-      {
-        files: fileChanges,
-        ...(options.label ? { label: options.label } : {}),
-        ...(expectedVersionId ? { expected_version_id: expectedVersionId } : {}),
-        ...(options.dryRun ? { dry_run: true } : {}),
-        wait: shouldWait ? 45 : 0,
-      },
-      binaryUploads,
-    );
-
-    finalBuild = writeResult.build;
-    if (finalBuild && shouldWait) {
-      let lastStatus = `${finalBuild.status}:${finalBuild.id}`;
-      finalBuild = await client.settleBuild(finalBuild, {
-        onUpdate: (b) => {
-          if (silent) return;
-          const key = `${b.status}:${b.id}`;
-          if (key !== lastStatus) {
-            lastStatus = key;
-            if (b.status === 'Running' || b.status === 'Queued') {
-              console.log(fmt.dim(`  Build ${shortId(b.id)}: ${b.status}…`));
-            } else if (b.status === 'Canceled' && b.next_id) {
-              console.log(fmt.dim('  Compiler requested patches — waiting for converged rebuild…'));
-            }
-          }
-        },
-      });
-    }
-
-    if (finalBuild && !silent) {
-      printBuildSummary(finalBuild);
-    }
-
-    finalVersionId = finalBuild?.version_id ?? writeResult.version?.id ?? null;
-    appliedPatches = finalBuild?.applied_patches ?? [];
-    updatedPen = writeResult.pen ?? pen;
-
-    if (!options.dryRun) {
-      // Re-read the converged version's source files so we write back any compiler patches
-      let convergedFiles = writeResult.version?.files;
-      if (finalVersionId && (appliedPatches.length > 0 || !convergedFiles)) {
-        const version = await client.getVersion(finalVersionId);
-        convergedFiles = version.files;
-      }
-
-      if (finalBuild && appliedPatches.length > 0) {
-        await applyCompilerPatchesToDisk({
-          client,
-          rootDir: project.rootDir,
-          patches: appliedPatches,
-          convergedFiles,
-        });
-        if (!silent) {
-          console.log(fmt.cyan('✓ Synced compiler patches back to local folder.'));
-        }
-      }
-
-      // Re-scan local hashes so .cdpn.json reflects exact post-patch local state
-      const postPushLocalFiles = await scanLocalFiles(project.rootDir);
-      localShaByPath = new Map<string, string>();
-      for (const [p, lf] of postPushLocalFiles) {
-        localShaByPath.set(p, lf.sha256);
-      }
-
-      finalRemoteFiles = convergedFiles ?? (await client.getPenFiles(pen.id));
-
-      // If an info PATCH is still pending, persist the synced file manifest now while preserving
-      // unpushed local `info` so a subsequent info validation error never leaves version metadata stale.
-      if (shouldPushInfo) {
-        const intermediateConfig = {
-          url: project.config.url || updatedPen.urls.editor,
-          pen_id: updatedPen.id,
-          ...(project.config.profile ? { profile: project.config.profile } : {}),
-          last_synced_version_id: finalVersionId,
-          ...(project.config.last_synced_info_hash
-            ? { last_synced_info_hash: project.config.last_synced_info_hash }
-            : {}),
-          editor: updatedPen.editor,
-          ...(project.config.info !== undefined ? { info: project.config.info } : {}),
-          files: buildSyncedFileMap(finalRemoteFiles, localShaByPath),
-        };
-        await writeProjectConfig(project.rootDir, intermediateConfig);
-        project.config = intermediateConfig;
-      }
-    }
-  }
-
-  if (options.dryRun) {
-    if (!silent) {
-      console.log(
-        `\n${fmt.cyan('ℹ')} Dry run complete — no changes were saved to CodePen` +
-          (hasFileChanges && finalVersionId
-            ? ` ${fmt.dim(`(ephemeral version ${shortId(finalVersionId)})`)}.`
-            : '.'),
+    } else if (!result.pushed) {
+      printJsonResponse(
+        200,
+        result.remoteInfoChanged
+          ? `No local changes to push. Remote Pen info has changed on CodePen — run \`cdpn pull\` to update ${PROJECT_CONFIG_FILENAME}, or \`cdpn push --force\` to overwrite.`
+          : 'Everything is up to date — nothing to push.',
+        payload,
+        output,
       );
-    }
-    return {
-      pushed: false,
-      dryRun: true,
-      pen: updatedPen,
-      versionId: hasFileChanges ? finalVersionId : remoteHead,
-      build: hasFileChanges ? finalBuild : null,
-      changes,
-      infoChanges: infoChangesToPush,
-      appliedPatches,
-    };
-  }
-
-  if (shouldPushInfo && infoPatch) {
-    if (!silent) {
-      console.log('\nUpdating Pen info on CodePen…');
-    }
-    updatedPen = await client.updatePen(pen.id, infoPatch);
-  }
-
-  const nextConfig = {
-    url: project.config.url || updatedPen.urls.editor,
-    pen_id: updatedPen.id,
-    ...(project.config.profile ? { profile: project.config.profile } : {}),
-    last_synced_version_id: hasFileChanges ? finalVersionId : project.config.last_synced_version_id,
-    editor: updatedPen.editor,
-    ...buildPenInfoConfigFields(updatedPen),
-    ...(hasFileChanges && finalRemoteFiles && localShaByPath
-      ? { files: buildSyncedFileMap(finalRemoteFiles, localShaByPath) }
-      : project.config.files
-        ? { files: project.config.files }
-        : {}),
-  };
-  await writeProjectConfig(project.rootDir, nextConfig);
-  project.config = nextConfig;
-
-  if (!silent) {
-    if (hasFileChanges && !shouldPushInfo && infoAnalysis.remoteChanged) {
-      console.log(fmt.cyan(`ℹ Synced remote Pen info into ${PROJECT_CONFIG_FILENAME}.`));
-    } else if (hasFileChanges && !infoAnalysis.tracked) {
-      console.log(fmt.dim(`Added Pen info to ${PROJECT_CONFIG_FILENAME}.`));
-    }
-  }
-
-  if (hasFileChanges && finalBuild?.status === 'Failed') {
-    if (!silent) {
-      console.log(
-        `\n${fmt.yellow('!')} Files were saved as version ${fmt.dim(shortId(finalVersionId))}, but the build failed.`,
+    } else if (buildFailed) {
+      printJsonResponse(
+        422,
+        `Files were saved as version ${shortId(result.versionId)}, but the build failed.`,
+        payload,
+        output,
       );
-    }
-    process.exitCode = 1;
-  } else if (!silent) {
-    if (hasFileChanges) {
-      console.log(
-        `\n${fmt.green('✓')} Pushed successfully ${fmt.dim(`(version ${shortId(finalVersionId)})`)}`,
+    } else if (!hasFileChanges && result.infoChanges.length > 0) {
+      printJsonResponse(
+        200,
+        `Updated Pen info (${result.infoChanges.map((c) => c.field).join(', ')}).`,
+        payload,
+        output,
       );
-      console.log(`  Preview: ${fmt.cyan(updatedPen.urls.preview)}`);
     } else {
-      console.log(`\n${fmt.green('✓')} Updated Pen info successfully.`);
-      console.log(`  Editor:  ${fmt.cyan(updatedPen.urls.editor)}`);
-      console.log(`  Preview: ${fmt.cyan(updatedPen.urls.preview)}`);
+      printJsonResponse(
+        200,
+        `Pushed successfully (version ${shortId(result.versionId)}).`,
+        payload,
+        output,
+      );
     }
   }
 
   return {
-    pushed: true,
-    dryRun: false,
-    pen: updatedPen,
-    versionId: finalVersionId,
-    build: finalBuild,
-    changes,
-    infoChanges: infoChangesToPush,
-    appliedPatches,
+    pushed: result.pushed,
+    created: false,
+    dryRun: result.dryRun,
+    pen: result.pen,
+    versionId: result.versionId,
+    build: result.build,
+    changes: result.changes,
+    infoChanges: result.infoChanges,
+    appliedPatches: result.appliedPatches,
+    ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
   };
 }
 
@@ -427,175 +286,27 @@ export function registerPushCommand(program: Command): void {
       'Push local file and Pen info changes to CodePen (or push an unlinked demo folder as a new Pen)',
     )
     .option('-m, --label <label>', 'Label for the saved version (max 80 chars)')
-    .option('-f, --force', 'Overwrite remote head if moved (or skip missing index.html prompt on first push)')
+    .option(
+      '-f, --force',
+      'Overwrite remote head if moved (or skip missing index.html prompt on first push)',
+    )
     .option('--dry-run', 'Build proposed changes without saving them to the Pen head')
     .option('--no-wait', 'Return as soon as files are saved without waiting for the build')
-    .option('-t, --title <title>', 'Title for the new Pen when pushing an unlinked folder for the first time')
+    .option(
+      '-t, --title <title>',
+      'Title for the new Pen when pushing an unlinked folder for the first time',
+    )
     .option('--access <level>', 'Privacy for a new Pen: Public, Private, Protected, or Collaborators')
+    .option('--visibility <level>', 'Alias for --access')
     .option('--password <password>', 'Password for a new Protected Pen (min 8 chars)')
     .option('--json', 'Output push result as JSON')
-    .action(async (options: PushOptions, command: Command) => {
-      if (options.label && options.label.length > 80) {
-        throw new CliError(400, 'Version label must be at most 80 characters.');
-      }
-
-      const explicitProfile = getGlobalProfileOption(command);
-      const nearest = await findNearestConfig(process.cwd());
-
-      // First-time push: no linked .cdpn.json found -> push local folder as a brand-new CodePen 2.0 Pen
-      if (!nearest || !nearest.linked) {
-        if (options.dryRun) {
-          throw new CliError(
-            400,
-            nearest
-              ? `${PROJECT_CONFIG_FILENAME} in ${nearest.rootDir} is not linked to an online Pen yet. --dry-run is only supported for an existing synced Pen.`
-              : `No ${PROJECT_CONFIG_FILENAME} found. --dry-run is only supported for an existing synced Pen.`,
-          );
-        }
-
-        const targetDir = nearest ? nearest.rootDir : process.cwd();
-        const folderDisplay = path.relative(process.cwd(), targetDir) || '.';
-
-        if (!options.json) {
-          console.log(
-            fmt.dim(
-              nearest
-                ? `Found unlinked ${PROJECT_CONFIG_FILENAME} with saved Pen info — pushing this local folder as a new CodePen 2.0 Pen.`
-                : `No ${PROJECT_CONFIG_FILENAME} found — pushing this local folder as a new CodePen 2.0 Pen.`,
-            ),
-          );
-        }
-        const created = await createPenFromDirectory({
-          targetDir,
-          folderDisplay,
-          explicitProfile,
-          title: options.title,
-          access: options.access,
-          password: options.password,
-          force: options.force,
-          wait: options.wait,
-          silent: Boolean(options.json),
-          interactive: !options.json && isInteractive(),
-        });
-
-        if (created && options.json) {
-          const buildFailed = created.build?.status === 'Failed';
-          if (buildFailed) {
-            process.exitCode = 1;
-          }
-          printJsonResponse(
-            buildFailed ? 422 : 201,
-            buildFailed
-              ? `Created Pen ${created.pen.title || 'Untitled'} (${created.pen.id}), but the initial build failed.`
-              : `Created Pen ${created.pen.title || 'Untitled'} (${created.pen.id}).`,
-            {
-              pushed: true,
-              created: true,
-              dry_run: false,
-              pen: created.pen,
-              profile: created.auth.profile,
-              folder: folderDisplay,
-              root_dir: created.project.rootDir,
-              config_path: created.project.configPath,
-              version_id: created.versionId,
-              build: created.build,
-            },
-          );
-        }
-        return;
-      }
-
-      const project: ProjectLocation = {
-        rootDir: nearest.rootDir,
-        configPath: nearest.configPath,
-        config: nearest.config,
-      };
-
-      const interactive = !options.json && isInteractive();
-      const auth = await resolveCommandAuth({
-        explicitProfile,
-        project,
-        interactive,
-        persistProfileToProject: !options.json,
-      });
-      const client = new CodePenClient({ apiKey: auth.apiKey });
-
-      const penLookup = await fetchLinkedPenOrHandleMissing({
-        client,
-        project,
-        auth,
-        commandName: 'push',
-        interactive,
-        json: options.json,
-      });
-      if (!penLookup.found) {
-        return;
-      }
-
-      const result = await executePush(client, project, {
+    .action(async (options: PushCliOptions, command: Command) => {
+      const result = await runPushCommand({
         ...options,
-        prefetchedPen: penLookup.pen,
-        silent: Boolean(options.json),
+        explicitProfile: getGlobalProfileOption(command),
       });
-
-      if (options.json) {
-        const hasFileChanges =
-          result.changes.added.length > 0 ||
-          result.changes.modified.length > 0 ||
-          result.changes.deleted.length > 0;
-        const buildFailed = hasFileChanges && result.build?.status === 'Failed';
-        const payload = {
-          pushed: result.pushed,
-          created: false,
-          dry_run: result.dryRun,
-          pen: result.pen,
-          profile: auth.profile,
-          version_id: result.versionId,
-          build: result.build,
-          changes: result.changes,
-          info_changes: result.infoChanges,
-          applied_patches: result.appliedPatches,
-        };
-
-        if (result.dryRun) {
-          if (buildFailed) {
-            process.exitCode = 1;
-          }
-          printJsonResponse(
-            buildFailed ? 422 : 200,
-            buildFailed
-              ? 'Dry run completed, but the build failed.'
-              : 'Dry run complete — no changes were saved to CodePen.',
-            payload,
-          );
-        } else if (!result.pushed) {
-          printJsonResponse(
-            200,
-            result.remoteInfoChanged
-              ? `No local changes to push. Remote Pen info has changed on CodePen — run \`cdpn pull\` to update ${PROJECT_CONFIG_FILENAME}, or \`cdpn push --force\` to overwrite.`
-              : 'Everything is up to date — nothing to push.',
-            payload,
-          );
-        } else if (buildFailed) {
-          process.exitCode = 1;
-          printJsonResponse(
-            422,
-            `Files were saved as version ${shortId(result.versionId)}, but the build failed.`,
-            payload,
-          );
-        } else if (!hasFileChanges && result.infoChanges.length > 0) {
-          printJsonResponse(
-            200,
-            `Updated Pen info (${result.infoChanges.map((c) => c.field).join(', ')}).`,
-            payload,
-          );
-        } else {
-          printJsonResponse(
-            200,
-            `Pushed successfully (version ${shortId(result.versionId)}).`,
-            payload,
-          );
-        }
+      if (result.exitCode !== undefined) {
+        process.exitCode = result.exitCode;
       }
     });
 }

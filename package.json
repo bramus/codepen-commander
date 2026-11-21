@@ -22,7 +22,7 @@
     "build": "npm run clean && tsc -p tsconfig.build.json",
     "postbuild": "node scripts/postbuild.js",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test \".test-dist/test/**/*.test.js\"",
     "prepublishOnly": "if [ -z \"$PUBLISH\" ]; then echo '\\n🛑 ERROR: This package must be published using `npm run pub`\\n' && exit 1; fi",
     "pub": "PUBLISH=true npm run build && cd dist && npm publish",
     "pub:dry-run": "PUBLISH=true npm run build && cd dist && npm publish --dry-run"

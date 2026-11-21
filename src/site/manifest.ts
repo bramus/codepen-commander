@@ -1,68 +1,25 @@
 import fs from 'node:fs/promises';
-import { watch } from 'node:fs';
 import path from 'node:path';
-import { PROJECT_CONFIG_FILENAME } from '../config/project.js';
+import { CODEPEN_DIR, PROJECT_CONFIG_FILENAME } from '../constants.js';
 import { isIgnoredPath, loadIgnoreMatchers } from '../sync/fs.js';
+import { sanitizeCodePenUrl } from '../utils/codepen-url.js';
+import { readPartialUtf8, resolveSafeDir, resolveSafeFile } from '../utils/fs-safe.js';
 import { extractHtmlTitle, extractMetaDescription } from '../utils/html.js';
 import {
-  CODEPEN_DIR,
-  isWithinRoot,
-  readClassicHeadMetadata,
-  readPenBlocks,
-  sanitizeCodePenUrl,
-} from './blocks.js';
+  compareNatural,
+  formatFolderTitle,
+  isPlainObject,
+  normalizePlainText,
+} from '../utils/strings.js';
+import { createDebouncedWatcher } from '../utils/watcher.js';
+import { readClassicHeadMetadata, readPenBlocks } from './blocks/index.js';
+
+export { formatFolderTitle };
 
 const MAX_SCAN_DEPTH = 4;
 const MAX_HTML_HEAD_BYTES = 16 * 1024;
 const MAX_CDPN_JSON_BYTES = 64 * 1024;
 const MAX_DEMO_TAGS = 10;
-
-const ACRONYMS = new Map<string, string>([
-  ['ai', 'AI'],
-  ['api', 'API'],
-  ['apis', 'APIs'],
-  ['aria', 'ARIA'],
-  ['cls', 'CLS'],
-  ['css', 'CSS'],
-  ['cwv', 'CWV'],
-  ['dom', 'DOM'],
-  ['html', 'HTML'],
-  ['http', 'HTTP'],
-  ['inp', 'INP'],
-  ['js', 'JS'],
-  ['json', 'JSON'],
-  ['lcp', 'LCP'],
-  ['mcp', 'MCP'],
-  ['pwa', 'PWA'],
-  ['svg', 'SVG'],
-  ['ui', 'UI'],
-  ['url', 'URL'],
-  ['ux', 'UX'],
-  ['wasm', 'WASM'],
-  ['webgl', 'WebGL'],
-  ['webgpu', 'WebGPU'],
-  ['webmcp', 'WebMCP'],
-]);
-
-const MINOR_WORDS = new Set([
-  'a',
-  'an',
-  'and',
-  'as',
-  'at',
-  'by',
-  'for',
-  'from',
-  'in',
-  'of',
-  'on',
-  'or',
-  'the',
-  'to',
-  'with',
-]);
-
-const utf8Decoder = new TextDecoder('utf-8');
 
 export interface DemoEntry {
   title: string;
@@ -90,33 +47,6 @@ export interface ScanDemosOptions {
   excludeDirs?: ReadonlySet<string>;
 }
 
-function compareNatural(a: string, b: string): number {
-  return a.localeCompare(b, 'en', { numeric: true, sensitivity: 'base' });
-}
-
-export function formatFolderTitle(folderName: string): string {
-  const words = folderName.split(/[-_]+/).filter(Boolean);
-  return words
-    .map((word, index) => {
-      const lower = word.toLowerCase();
-      const acronym = ACRONYMS.get(lower);
-      if (acronym) {
-        return acronym;
-      }
-      if (index > 0 && index < words.length - 1 && MINOR_WORDS.has(lower)) {
-        return lower;
-      }
-      return (word[0]?.toUpperCase() ?? '') + word.slice(1);
-    })
-    .join(' ');
-}
-
-function normalizePlainText(value: unknown, maxLength: number): string | null {
-  const cleaned = String(value).replace(/\s+/g, ' ').trim();
-  if (!cleaned) return null;
-  return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength - 1)}…` : cleaned;
-}
-
 function extractCdpnTags(rawTags: unknown): string[] {
   if (!Array.isArray(rawTags)) return [];
   const seen = new Set<string>();
@@ -134,63 +64,6 @@ function extractCdpnTags(rawTags: unknown): string[] {
   return tags;
 }
 
-async function readPartialUtf8(filePath: string, maxBytes: number): Promise<string> {
-  const handle = await fs.open(filePath, 'r');
-  try {
-    const buffer = Buffer.alloc(maxBytes);
-    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
-    return utf8Decoder.decode(buffer.subarray(0, bytesRead));
-  } finally {
-    await handle.close();
-  }
-}
-
-async function resolveSafeRealFile(
-  candidatePath: string,
-  rootDir: string,
-  rootRealpath: string,
-): Promise<{ realPath: string; size: number } | null> {
-  if (!isWithinRoot(candidatePath, rootDir)) return null;
-  let lstat;
-  try {
-    lstat = await fs.lstat(candidatePath);
-  } catch {
-    return null;
-  }
-  if (lstat.isSymbolicLink() || !lstat.isFile()) return null;
-
-  try {
-    const realPath = await fs.realpath(candidatePath);
-    if (!isWithinRoot(realPath, rootRealpath)) return null;
-    return { realPath, size: lstat.size };
-  } catch {
-    return null;
-  }
-}
-
-async function resolveSafeRealDir(
-  candidatePath: string,
-  rootDir: string,
-  rootRealpath: string,
-): Promise<string | null> {
-  if (!isWithinRoot(candidatePath, rootDir)) return null;
-  let lstat;
-  try {
-    lstat = await fs.lstat(candidatePath);
-  } catch {
-    return null;
-  }
-  if (lstat.isSymbolicLink() || !lstat.isDirectory()) return null;
-
-  try {
-    const realPath = await fs.realpath(candidatePath);
-    if (!isWithinRoot(realPath, rootRealpath)) return null;
-    return realPath;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Detects whether a directory looks like a previously built collection output
  * (contains `demos.json` + `index.html`, with neither `.cdpn.json` nor `.codepen/`).
@@ -200,10 +73,10 @@ export async function isBuiltCollectionOutputDir(
   rootRealpath: string,
 ): Promise<boolean> {
   const [hasDemosJson, hasIndexHtml, hasCdpnJson, hasCodepenDir] = await Promise.all([
-    resolveSafeRealFile(path.join(dirRealpath, 'demos.json'), dirRealpath, rootRealpath),
-    resolveSafeRealFile(path.join(dirRealpath, 'index.html'), dirRealpath, rootRealpath),
-    resolveSafeRealFile(path.join(dirRealpath, PROJECT_CONFIG_FILENAME), dirRealpath, rootRealpath),
-    resolveSafeRealDir(path.join(dirRealpath, CODEPEN_DIR), dirRealpath, rootRealpath),
+    resolveSafeFile(path.join(dirRealpath, 'demos.json'), rootRealpath, dirRealpath),
+    resolveSafeFile(path.join(dirRealpath, 'index.html'), rootRealpath, dirRealpath),
+    resolveSafeFile(path.join(dirRealpath, PROJECT_CONFIG_FILENAME), rootRealpath, dirRealpath),
+    resolveSafeDir(path.join(dirRealpath, CODEPEN_DIR), rootRealpath, dirRealpath),
   ]);
   return Boolean(hasDemosJson && hasIndexHtml && !hasCdpnJson && !hasCodepenDir);
 }
@@ -215,34 +88,26 @@ async function readDemoEntry(
   rootRealpath: string,
 ): Promise<DemoEntry | null> {
   const demoDir = path.resolve(rootDir, ...segments);
-  const cdpnFile = await resolveSafeRealFile(
+  const cdpnFile = await resolveSafeFile(
     path.join(demoDir, PROJECT_CONFIG_FILENAME),
-    rootDir,
     rootRealpath,
+    rootDir,
   );
   if (!cdpnFile) {
     return null;
   }
 
-  const codepenDir = await resolveSafeRealDir(
-    path.join(demoDir, CODEPEN_DIR),
-    rootDir,
-    rootRealpath,
-  );
-  const indexFile = await resolveSafeRealFile(
-    path.join(demoDir, 'index.html'),
-    rootDir,
-    rootRealpath,
-  );
+  const codepenDir = await resolveSafeDir(path.join(demoDir, CODEPEN_DIR), rootRealpath, rootDir);
+  const indexFile = await resolveSafeFile(path.join(demoDir, 'index.html'), rootRealpath, rootDir);
 
   let classicIndexFile: { realPath: string; size: number } | null = null;
   if (!indexFile && codepenDir) {
     const penBlocks = await readPenBlocks(demoRealpath, rootRealpath);
     if (penBlocks?.hasClassic) {
-      classicIndexFile = await resolveSafeRealFile(
+      classicIndexFile = await resolveSafeFile(
         path.join(demoDir, 'index.pen.html'),
-        rootDir,
         rootRealpath,
+        rootDir,
       );
     }
   }
@@ -278,19 +143,18 @@ async function readDemoEntry(
   if (cdpnFile && cdpnFile.size <= MAX_CDPN_JSON_BYTES) {
     try {
       const rawJson = await fs.readFile(cdpnFile.realPath, 'utf8');
-      const parsed = JSON.parse(rawJson) as Record<string, unknown>;
-      codepenUrl = sanitizeCodePenUrl(parsed?.url);
-      const info =
-        parsed?.info && typeof parsed.info === 'object' && !Array.isArray(parsed.info)
-          ? (parsed.info as Record<string, unknown>)
-          : null;
-      if (typeof info?.title === 'string') {
-        cdpnTitle = normalizePlainText(info.title, 160);
+      const parsed: unknown = JSON.parse(rawJson);
+      if (isPlainObject(parsed)) {
+        codepenUrl = sanitizeCodePenUrl(parsed.url);
+        const info = isPlainObject(parsed.info) ? parsed.info : null;
+        if (typeof info?.title === 'string') {
+          cdpnTitle = normalizePlainText(info.title, 160);
+        }
+        if (typeof info?.description === 'string') {
+          cdpnDescription = normalizePlainText(info.description, 320);
+        }
+        tags = extractCdpnTags(info?.tags);
       }
-      if (typeof info?.description === 'string') {
-        cdpnDescription = normalizePlainText(info.description, 320);
-      }
-      tags = extractCdpnTags(info?.tags);
     } catch {
       codepenUrl = null;
       tags = [];
@@ -339,7 +203,7 @@ async function scanGroupNode(
     if (ignoreMatchers.length > 0 && isIgnoredPath(relPosix, ignoreMatchers)) continue;
 
     const childCandidate = path.resolve(rootDir, ...childSegments);
-    const childRealDir = await resolveSafeRealDir(childCandidate, rootDir, rootRealpath);
+    const childRealDir = await resolveSafeDir(childCandidate, rootRealpath, rootDir);
     if (!childRealDir || visitedRealpaths.has(childRealDir)) continue;
     if (excludeDirs.has(childRealDir)) continue;
 
@@ -383,8 +247,7 @@ async function scanGroupNode(
 }
 
 /**
- * Recursively scans `rootDir` subdirectories for Pens/demos (folders containing `.cdpn.json`,
- * `.codepen/`, or `index.html`).
+ * Recursively scans `rootDir` subdirectories for Pens/demos (folders containing `.cdpn.json`).
  */
 export async function scanDemos(
   rootDir: string,
@@ -427,16 +290,6 @@ export function serializeManifest(manifest: DemoManifest): string {
   return `${JSON.stringify(manifest, null, 2)}\n`;
 }
 
-function shouldIgnoreWatchEvent(rawFilename: string | Buffer | null): boolean {
-  if (typeof rawFilename !== 'string' || !rawFilename) return false;
-  const normalized = rawFilename.split(path.sep).join('/');
-  const segments = normalized.split('/');
-  const base = segments.at(-1);
-  if (base === '.DS_Store') return true;
-  if (segments.includes('node_modules') || segments.includes('.git')) return true;
-  return false;
-}
-
 export interface InMemoryManifestWatcher {
   getManifest: () => DemoManifest;
   getSerialized: () => string;
@@ -458,19 +311,10 @@ export async function createInMemoryManifestWatcher(options: {
   let currentManifest = await scanDemos(rootDir, { excludeDirs });
   let currentSerialized = serializeManifest(currentManifest);
 
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let isScanning = false;
-  let pendingScan = false;
-  let closed = false;
-
-  async function runScan(): Promise<void> {
-    if (closed) return;
-    if (isScanning) {
-      pendingScan = true;
-      return;
-    }
-    isScanning = true;
-    try {
+  const handle = createDebouncedWatcher({
+    rootDir,
+    debounceMs,
+    onChange: async () => {
       const nextManifest = await scanDemos(rootDir, { excludeDirs });
       const nextSerialized = serializeManifest(nextManifest);
       if (nextSerialized !== currentSerialized) {
@@ -478,50 +322,13 @@ export async function createInMemoryManifestWatcher(options: {
         currentSerialized = nextSerialized;
         onUpdate?.({ demoCount: countDemos(nextManifest), manifest: nextManifest });
       }
-    } catch (error) {
-      onError?.(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      isScanning = false;
-      if (pendingScan && !closed) {
-        pendingScan = false;
-        scheduleScan();
-      }
-    }
-  }
-
-  function scheduleScan(): void {
-    if (closed) return;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = null;
-      void runScan();
-    }, debounceMs);
-  }
-
-  let watcher: ReturnType<typeof watch> | null = null;
-  try {
-    watcher = watch(rootDir, { recursive: true }, (_eventType, filename) => {
-      if (shouldIgnoreWatchEvent(filename)) return;
-      scheduleScan();
-    });
-    watcher.on('error', (error) => {
-      onError?.(error instanceof Error ? error : new Error(String(error)));
-    });
-  } catch (error) {
-    // Graceful fallback on platforms where recursive fs.watch is unavailable
-    onError?.(error instanceof Error ? error : new Error(String(error)));
-  }
+    },
+    onError,
+  });
 
   return {
     getManifest: () => currentManifest,
     getSerialized: () => currentSerialized,
-    close() {
-      closed = true;
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      watcher?.close();
-    },
+    close: () => handle.close(),
   };
 }

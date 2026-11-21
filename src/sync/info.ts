@@ -1,13 +1,16 @@
 import crypto from 'node:crypto';
-import type {
-  CdpnConfig,
-  CompletePenInfo,
-  Pen,
-  PenAccess,
-  PenInfo,
-  PenUpdateRequest,
-} from '../types.js';
-import { CliError } from '../utils/json.js';
+import type { Pen, PenAccess, PenUpdateRequest } from '../api/types.js';
+import {
+  type CdpnConfig,
+  type CompletePenInfo,
+  type PenInfo,
+  normalizePartialPenInfo,
+  parsePenInfoInput,
+} from '../config/project.js';
+import { MAX_PEN_TAGS } from '../constants.js';
+import { CliError } from '../errors.js';
+
+export { normalizePartialPenInfo, parsePenInfoInput };
 
 export const PEN_INFO_FIELDS = ['title', 'description', 'tags', 'access', 'template'] as const;
 export type PenInfoField = (typeof PEN_INFO_FIELDS)[number];
@@ -29,16 +32,6 @@ export interface InfoSyncAnalysis {
   changes: InfoDiffItem[];
   /** Canonical complete metadata from the remote Pen. */
   remoteInfo: CompletePenInfo;
-}
-
-const VALID_ACCESS = new Set(['public', 'private', 'protected', 'collaborators']);
-
-function parseAccessValue(raw: string): PenAccess | null {
-  const lower = raw.trim().toLowerCase();
-  if (!VALID_ACCESS.has(lower)) {
-    return null;
-  }
-  return (lower[0]!.toUpperCase() + lower.slice(1)) as PenAccess;
 }
 
 /**
@@ -73,19 +66,6 @@ export function canonicalizePenInfo(info: CompletePenInfo): CompletePenInfo {
     access: info.access,
     template: info.template,
   };
-}
-
-/**
- * Orders defined keys of a (potentially partial) `PenInfo` object consistently for writing `.cdpn.json`.
- */
-export function normalizePartialPenInfo(info: PenInfo): PenInfo {
-  const ordered: PenInfo = {};
-  if (info.title !== undefined) ordered.title = info.title;
-  if (info.description !== undefined) ordered.description = info.description;
-  if (info.tags !== undefined) ordered.tags = [...info.tags];
-  if (info.access !== undefined) ordered.access = info.access;
-  if (info.template !== undefined) ordered.template = info.template;
-  return ordered;
 }
 
 export function hasAnyPenInfoFields(info: PenInfo | undefined): boolean {
@@ -125,79 +105,6 @@ export function buildPenInfoConfigFields(
     info,
     last_synced_info_hash: hashPenInfo(info),
   };
-}
-
-/**
- * Validates and normalizes the optional `info` object parsed from `.cdpn.json`.
- * Returns `undefined` when absent (backwards-compatible with older `.cdpn.json` files).
- */
-export function parsePenInfoInput(raw: unknown, configLabel = '.cdpn.json'): PenInfo | undefined {
-  if (raw === undefined || raw === null) {
-    return undefined;
-  }
-
-  if (typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new CliError(400, `Invalid ${configLabel}: "info" must be a JSON object.`);
-  }
-
-  const record = raw as Record<string, unknown>;
-
-  if (Object.hasOwn(record, 'password') && record.password !== undefined) {
-    throw new CliError(
-      400,
-      `Invalid ${configLabel}: "info.password" is not supported (passwords must not be stored in ${configLabel}).\n` +
-        'Use `cdpn privacy protected` or `cdpn info --access Protected --password <password>` instead.',
-    );
-  }
-
-  const parsed: PenInfo = {};
-
-  if (record.title !== undefined) {
-    if (typeof record.title !== 'string') {
-      throw new CliError(400, `Invalid ${configLabel}: "info.title" must be a string.`);
-    }
-    parsed.title = record.title;
-  }
-
-  if (record.description !== undefined) {
-    if (typeof record.description !== 'string') {
-      throw new CliError(400, `Invalid ${configLabel}: "info.description" must be a string.`);
-    }
-    parsed.description = record.description;
-  }
-
-  if (record.tags !== undefined) {
-    if (!Array.isArray(record.tags) || !record.tags.every((t) => typeof t === 'string')) {
-      throw new CliError(400, `Invalid ${configLabel}: "info.tags" must be an array of strings.`);
-    }
-    parsed.tags = record.tags.map((t) => t.trim()).filter(Boolean);
-  }
-
-  if (record.access !== undefined) {
-    if (typeof record.access !== 'string') {
-      throw new CliError(
-        400,
-        `Invalid ${configLabel}: "info.access" must be one of Public, Private, Protected, or Collaborators.`,
-      );
-    }
-    const normalizedAccess = parseAccessValue(record.access);
-    if (!normalizedAccess) {
-      throw new CliError(
-        400,
-        `Invalid ${configLabel}: "info.access" value "${record.access}" is invalid. Use: Public, Private, Protected, or Collaborators.`,
-      );
-    }
-    parsed.access = normalizedAccess;
-  }
-
-  if (record.template !== undefined) {
-    if (typeof record.template !== 'boolean') {
-      throw new CliError(400, `Invalid ${configLabel}: "info.template" must be a boolean.`);
-    }
-    parsed.template = record.template;
-  }
-
-  return parsed;
 }
 
 function areTagArraysEqual(a: string[], b: string[]): boolean {
@@ -330,10 +237,10 @@ export function buildInfoUpdatePatch(changes: InfoDiffItem[]): PenUpdateRequest 
         break;
       case 'tags': {
         const tags = item.local as string[];
-        if (tags.length > 5) {
+        if (tags.length > MAX_PEN_TAGS) {
           throw new CliError(
             400,
-            `CodePen allows at most 5 tags per Pen (found ${tags.length} in .cdpn.json).`,
+            `CodePen allows at most ${MAX_PEN_TAGS} tags per Pen (found ${tags.length} in .cdpn.json).`,
           );
         }
         patch.tags = [...tags];

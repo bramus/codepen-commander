@@ -1,13 +1,15 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
+import type { Pen } from '../api/types.js';
 import type { ResolvedAuth } from '../config/auth.js';
 import {
   buildSyncedFileMap,
-  PROJECT_CONFIG_FILENAME,
   requireProject,
   writeProjectConfig,
   type ProjectLocation,
 } from '../config/project.js';
+import { PROJECT_CONFIG_FILENAME } from '../constants.js';
+import { CliError } from '../errors.js';
 import { detectLocalChangesFromBaseline } from '../sync/diff.js';
 import { scanLocalFiles } from '../sync/fs.js';
 import {
@@ -17,24 +19,24 @@ import {
   isLocalInfoDirty,
 } from '../sync/info.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
-import type { Pen } from '../types.js';
 import { fmt, shortId } from '../utils/format.js';
-import { CliError, printJsonResponse } from '../utils/json.js';
+import { printJsonResponse } from '../utils/json.js';
+import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import {
   isInteractive,
   promptConfirm,
   promptSelect,
   type SelectOption,
-} from '../utils/prompts.js';
-import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
-import { fetchLinkedPenOrHandleMissing } from './missing-pen.js';
+} from '../utils/prompts/index.js';
+import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
+import { fetchLinkedPenOrHandleMissing } from '../workflows/missing-pen.js';
 
 export interface PullCliOptions {
   force?: boolean;
   json?: boolean;
 }
 
-export interface PullPenCommandOptions {
+export interface RunPullCommandOptions {
   /** Overwrite local changes without prompting. */
   force?: boolean;
   /** Output pull result as JSON. */
@@ -43,6 +45,8 @@ export interface PullPenCommandOptions {
   cwd?: string;
   /** Explicit `--profile <name>` flag value. */
   explicitProfile?: string;
+  /** Injectable output sink (defaults to stdout/stderr). */
+  output?: CommandOutput;
   /** Injectable API base URL (for testing). */
   baseUrl?: string;
   /** Injectable interactivity flag (for testing). */
@@ -62,7 +66,7 @@ export interface PullPenCommandOptions {
   };
 }
 
-export interface PullPenResult {
+export interface PullCommandResult {
   pen: Pen;
   writtenPaths: string[];
   deletedPaths: string[];
@@ -75,9 +79,10 @@ export interface PullPenResult {
  * containing `.cdpn.json`.
  * Returns `null` if the user cancels interactively when uncommitted local changes are present.
  */
-export async function pullPenCommand(
-  options: PullPenCommandOptions = {},
-): Promise<PullPenResult | null> {
+export async function runPullCommand(
+  options: RunPullCommandOptions = {},
+): Promise<PullCommandResult | null> {
+  const output = options.output ?? defaultOutput;
   const cwd = options.cwd ?? process.cwd();
   const jsonMode = Boolean(options.json);
   const interactive = (options.interactive ?? isInteractive()) && !jsonMode;
@@ -91,6 +96,7 @@ export async function pullPenCommand(
     project,
     interactive,
     persistProfileToProject: !jsonMode,
+    output,
     env: options.env,
     homeDir: options.homeDir,
     selectProfile: selectImpl,
@@ -99,7 +105,7 @@ export async function pullPenCommand(
 
   const { rootDir, config } = project;
   if (!jsonMode) {
-    console.log(`Pulling latest changes for ${fmt.cyan(config.pen_id)}…`);
+    output.log(`Pulling latest changes for ${fmt.cyan(config.pen_id)}…`);
   }
 
   const localFiles = await scanLocalFiles(rootDir);
@@ -110,12 +116,20 @@ export async function pullPenCommand(
 
   if ((dirtyCount > 0 || localInfoDirty) && !force) {
     if (!jsonMode) {
-      console.log(fmt.yellow('\nWarning: You have uncommitted local changes that will be overwritten:'));
-      for (const p of localDirty.added) console.log(`  ${fmt.green('+')} ${p} ${fmt.dim('(will be removed)')}`);
-      for (const p of localDirty.modified) console.log(`  ${fmt.yellow('~')} ${p} ${fmt.dim('(will be overwritten)')}`);
-      for (const p of localDirty.deleted) console.log(`  ${fmt.red('-')} ${p} ${fmt.dim('(will be restored)')}`);
+      output.log(
+        fmt.yellow('\nWarning: You have uncommitted local changes that will be overwritten:'),
+      );
+      for (const p of localDirty.added) {
+        output.log(`  ${fmt.green('+')} ${p} ${fmt.dim('(will be removed)')}`);
+      }
+      for (const p of localDirty.modified) {
+        output.log(`  ${fmt.yellow('~')} ${p} ${fmt.dim('(will be overwritten)')}`);
+      }
+      for (const p of localDirty.deleted) {
+        output.log(`  ${fmt.red('-')} ${p} ${fmt.dim('(will be restored)')}`);
+      }
       if (localInfoDirty) {
-        console.log(
+        output.log(
           `  ${fmt.yellow('~')} ${PROJECT_CONFIG_FILENAME} (info) ${fmt.dim('(will be overwritten)')}`,
         );
       }
@@ -134,7 +148,7 @@ export async function pullPenCommand(
 
     const ok = await confirmImpl('\nOverwrite local changes with remote version?', false);
     if (!ok) {
-      console.log('Aborted.');
+      output.log('Aborted.');
       return null;
     }
   }
@@ -146,6 +160,7 @@ export async function pullPenCommand(
     commandName: 'pull',
     interactive,
     json: jsonMode,
+    output,
     prompts: options.prompts,
   });
   if (!penLookup.found) {
@@ -180,33 +195,42 @@ export async function pullPenCommand(
   const configPath = await writeProjectConfig(rootDir, nextConfig);
 
   if (jsonMode) {
-    printJsonResponse(200, `Synced ${pen.title || 'Untitled'}.`, {
-      pen,
-      profile: profileToPersist ?? null,
-      root_dir: rootDir,
-      config_path: configPath,
-      version_id: pen.saved_version?.id ?? null,
-      written_paths: result.writtenPaths,
-      deleted_paths: result.deletedPaths,
-    });
+    printJsonResponse(
+      200,
+      `Synced ${pen.title || 'Untitled'}.`,
+      {
+        pen,
+        profile: profileToPersist ?? null,
+        root_dir: rootDir,
+        config_path: configPath,
+        version_id: pen.saved_version?.id ?? null,
+        written_paths: result.writtenPaths,
+        deleted_paths: result.deletedPaths,
+      },
+      output,
+    );
   } else {
-    console.log(`\n${fmt.green('✓')} Synced ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}`);
+    output.log(
+      `\n${fmt.green('✓')} Synced ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}`,
+    );
     if (auth.profile) {
-      console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+      output.log(`  Profile: ${fmt.cyan(auth.profile)}`);
     }
-    console.log(
+    output.log(
       `  Updated: ${result.writtenPaths.length} file(s)` +
-        (result.deletedPaths.length > 0 ? `, removed ${result.deletedPaths.length} deleted file(s)` : ''),
+        (result.deletedPaths.length > 0
+          ? `, removed ${result.deletedPaths.length} deleted file(s)`
+          : ''),
     );
     if (!hadInfoBefore) {
-      console.log(`  Info:    ${fmt.dim(`added to ${PROJECT_CONFIG_FILENAME}`)}`);
+      output.log(`  Info:    ${fmt.dim(`added to ${PROJECT_CONFIG_FILENAME}`)}`);
     } else if (infoAnalysis.changes.length > 0) {
-      console.log(
+      output.log(
         `  Info:    ${fmt.dim(`updated ${infoAnalysis.changes.map((c) => c.field).join(', ')} in ${PROJECT_CONFIG_FILENAME}`)}`,
       );
     }
     if (pen.saved_version) {
-      console.log(`  Version: ${fmt.dim(shortId(pen.saved_version.id))}`);
+      output.log(`  Version: ${fmt.dim(shortId(pen.saved_version.id))}`);
     }
   }
 
@@ -227,11 +251,13 @@ export function registerPullCommand(program: Command): void {
   program
     .command('pull')
     .allowExcessArguments(false)
-    .description('Pull latest changes from CodePen into an existing cloned folder (requires .cdpn.json)')
+    .description(
+      'Pull latest changes from CodePen into an existing cloned folder (requires .cdpn.json)',
+    )
     .option('-f, --force', 'Overwrite local changes without prompting')
     .option('--json', 'Output pull result as JSON')
     .action(async (options: PullCliOptions, command: Command) => {
-      await pullPenCommand({
+      await runPullCommand({
         force: options.force,
         json: options.json,
         explicitProfile: getGlobalProfileOption(command),

@@ -1,17 +1,19 @@
 import fs from 'node:fs/promises';
-import { existsSync, watch } from 'node:fs';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { IGNORE_FILENAME, isIgnoredPath, loadIgnoreMatchers } from '../sync/fs.js';
-import { CliError } from '../utils/json.js';
+import { PEN_HTML_SUFFIX } from '../constants.js';
+import { CliError } from '../errors.js';
+import { isIgnoredPath, loadIgnoreMatchers } from '../sync/fs.js';
+import { isWithinRoot } from '../utils/fs-safe.js';
+import { hasControlChars } from '../utils/strings.js';
+import { createDebouncedWatcher } from '../utils/watcher.js';
 import {
-  PEN_HTML_SUFFIX,
   applyPackagesBlock,
   compileClassicPenHtml,
-  isWithinRoot,
   readPenBlocks,
   renderUnsupportedBlocksPage,
   type PenBlockContext,
-} from './blocks.js';
+} from './blocks/index.js';
 import {
   classifyDirectoryMode,
   inspectTargetDirectory,
@@ -37,8 +39,6 @@ import {
 } from './shell.js';
 
 export const DEFAULT_BUILD_DIR = 'build';
-const GITIGNORE_FILENAME = '.gitignore';
-const CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
 
 /**
  * Common repository/package files at a collection root that are never part of the
@@ -88,6 +88,11 @@ export interface BuildProjectOptions {
   site?: SiteMetadataOverrides;
   homeDir?: string;
   cwd?: string;
+  /** Optional pre-inspected source/target from interactive CLI validation to avoid duplicate stat work. */
+  preResolved?: {
+    inspection: DirectoryInspection;
+    target: ResolvedBuildTarget;
+  };
 }
 
 export interface BuildProjectResult {
@@ -141,7 +146,7 @@ export async function resolveBuildTargetDir(
   if (!trimmed) {
     return { ok: false, error: 'Output directory cannot be empty.' };
   }
-  if (CONTROL_CHAR_PATTERN.test(trimmed)) {
+  if (hasControlChars(trimmed)) {
     return { ok: false, error: 'Output directory cannot contain control characters.' };
   }
 
@@ -217,116 +222,6 @@ export async function resolveBuildTargetDir(
       relInsideSource,
     },
   };
-}
-
-/**
- * Ensures `relInsideSource` (e.g. `build`) is ignored by `<penDir>/.cdpnignore`,
- * appending cleanly without duplicating existing rules or clobbering existing entries.
- */
-export async function ensureIgnoredInCdpnIgnore(
-  penDir: string,
-  relInsideSource: string,
-): Promise<{ updated: boolean; created: boolean; alreadyIgnored: boolean; entry: string }> {
-  const normalizedRel = relInsideSource.replace(/^\/+/, '').replace(/\/+$/, '');
-  const entry = `${normalizedRel}/`;
-  const ignorePath = path.join(path.resolve(penDir), IGNORE_FILENAME);
-
-  const matchers = await loadIgnoreMatchers(penDir);
-  if (
-    isIgnoredPath(`/${normalizedRel}`, matchers) &&
-    isIgnoredPath(`/${normalizedRel}/index.html`, matchers)
-  ) {
-    return { updated: false, created: false, alreadyIgnored: true, entry };
-  }
-
-  let existing: string | null = null;
-  try {
-    existing = await fs.readFile(ignorePath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
-    }
-  }
-
-  if (existing === null) {
-    await fs.writeFile(ignorePath, `${entry}\n`, 'utf8');
-    return { updated: true, created: true, alreadyIgnored: false, entry };
-  }
-
-  const separator = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
-  await fs.writeFile(ignorePath, `${existing}${separator}${entry}\n`, 'utf8');
-  return { updated: true, created: false, alreadyIgnored: false, entry };
-}
-
-export async function inspectGitIgnoreStatus(
-  dir: string,
-  relInsideSource: string,
-): Promise<{ exists: boolean; alreadyIgnored: boolean; entry: string; filePath: string }> {
-  const normalizedRel = relInsideSource.replace(/^\/+/, '').replace(/\/+$/, '');
-  const entry = `${normalizedRel}/`;
-  const filePath = path.join(path.resolve(dir), GITIGNORE_FILENAME);
-
-  let raw: string | null = null;
-  try {
-    raw = await fs.readFile(filePath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
-    }
-  }
-
-  if (raw === null) {
-    return { exists: false, alreadyIgnored: false, entry, filePath };
-  }
-
-  const targetCandidates = new Set([
-    normalizedRel,
-    `/${normalizedRel}`,
-    `${normalizedRel}/`,
-    `/${normalizedRel}/`,
-    `${normalizedRel}/*`,
-    `/${normalizedRel}/*`,
-  ]);
-  const topSegment = normalizedRel.split('/')[0];
-  if (topSegment && topSegment !== normalizedRel) {
-    targetCandidates.add(topSegment);
-    targetCandidates.add(`/${topSegment}`);
-    targetCandidates.add(`${topSegment}/`);
-    targetCandidates.add(`/${topSegment}/`);
-  }
-
-  const alreadyIgnored = raw
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .some((line) => line && !line.startsWith('#') && targetCandidates.has(line));
-
-  return { exists: true, alreadyIgnored, entry, filePath };
-}
-
-/**
- * Creates a `.gitignore` or appends `relInsideSource/` to an existing `.gitignore`.
- */
-export async function updateGitIgnore(
-  dir: string,
-  relInsideSource: string,
-): Promise<{ updated: boolean; created: boolean; entry: string; filePath: string }> {
-  const status = await inspectGitIgnoreStatus(dir, relInsideSource);
-  if (status.alreadyIgnored) {
-    return { updated: false, created: false, entry: status.entry, filePath: status.filePath };
-  }
-
-  if (!status.exists) {
-    const content = ['# OS', '.DS_Store', 'Thumbs.db', '', '# Build output', status.entry, ''].join(
-      '\n',
-    );
-    await fs.writeFile(status.filePath, content, 'utf8');
-    return { updated: true, created: true, entry: status.entry, filePath: status.filePath };
-  }
-
-  const existing = await fs.readFile(status.filePath, 'utf8');
-  const separator = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
-  await fs.writeFile(status.filePath, `${existing}${separator}${status.entry}\n`, 'utf8');
-  return { updated: true, created: false, entry: status.entry, filePath: status.filePath };
 }
 
 function collectManifestDirSets(
@@ -549,30 +444,39 @@ async function copyDirectoryTree(options: {
  */
 export async function buildProject(options: BuildProjectOptions): Promise<BuildProjectResult> {
   const baseCwd = path.resolve(options.cwd ?? process.cwd());
-  const resolvedSource = path.resolve(baseCwd, options.sourceDir);
 
-  let sourceStat;
-  try {
-    sourceStat = await fs.stat(resolvedSource);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new CliError(404, `Source directory not found: ${resolvedSource}`);
+  let inspection: DirectoryInspection;
+  let target: ResolvedBuildTarget;
+
+  if (options.preResolved) {
+    inspection = options.preResolved.inspection;
+    target = options.preResolved.target;
+  } else {
+    const resolvedSource = path.resolve(baseCwd, options.sourceDir);
+    let sourceStat;
+    try {
+      sourceStat = await fs.stat(resolvedSource);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new CliError(404, `Source directory not found: ${resolvedSource}`);
+      }
+      throw error;
     }
-    throw error;
-  }
-  if (!sourceStat.isDirectory()) {
-    throw new CliError(400, `Source path is not a directory: ${resolvedSource}`);
+    if (!sourceStat.isDirectory()) {
+      throw new CliError(400, `Source path is not a directory: ${resolvedSource}`);
+    }
+
+    inspection = await inspectTargetDirectory(resolvedSource);
+    const targetValidation = await resolveBuildTargetDir(options.outDir, inspection.rootRealpath, {
+      homeDir: options.homeDir,
+    });
+    if (!targetValidation.ok) {
+      throw new CliError(400, targetValidation.error);
+    }
+    target = targetValidation.target;
   }
 
-  const inspection = await inspectTargetDirectory(resolvedSource);
-  const targetValidation = await resolveBuildTargetDir(options.outDir, inspection.rootRealpath, {
-    homeDir: options.homeDir,
-  });
-  if (!targetValidation.ok) {
-    throw new CliError(400, targetValidation.error);
-  }
-
-  const { outDir, canonicalOutDir } = targetValidation.target;
+  const { outDir, canonicalOutDir } = target;
   const excludedRealpaths = new Set<string>([canonicalOutDir]);
   const mode = classifyDirectoryMode(inspection);
 
@@ -686,7 +590,9 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
     }
 
     // Generate fresh demos.json in outDir
-    finalManifest = preScannedManifest ?? (await scanDemos(inspection.rootRealpath, { excludeDirs: excludedRealpaths }));
+    finalManifest =
+      preScannedManifest ??
+      (await scanDemos(inspection.rootRealpath, { excludeDirs: excludedRealpaths }));
     demoCount = countDemos(finalManifest);
     await fs.writeFile(path.join(realOutDir, 'demos.json'), serializeManifest(finalManifest), 'utf8');
   }
@@ -712,66 +618,20 @@ export function watchBuild(options: {
 }): { close: () => void } {
   const { buildOptions, canonicalOutDir, debounceMs = 200, onRebuild, onError } = options;
   const resolvedSource = path.resolve(buildOptions.cwd ?? process.cwd(), buildOptions.sourceDir);
+  const { preResolved: _ignored, ...freshBuildOptions } = buildOptions;
 
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let isBuilding = false;
-  let pendingRebuild = false;
-  let closed = false;
-
-  async function runBuild(): Promise<void> {
-    if (closed) return;
-    if (isBuilding) {
-      pendingRebuild = true;
-      return;
-    }
-    isBuilding = true;
-    try {
-      const result = await buildProject(buildOptions);
-      onRebuild?.(result);
-    } catch (error) {
-      onError?.(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      isBuilding = false;
-      if (pendingRebuild && !closed) {
-        pendingRebuild = false;
-        scheduleBuild();
-      }
-    }
-  }
-
-  function scheduleBuild(): void {
-    if (closed) return;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = null;
-      void runBuild();
-    }, debounceMs);
-  }
-
-  const watcher = watch(resolvedSource, { recursive: true }, (_eventType, filename) => {
-    if (typeof filename === 'string' && filename) {
+  return createDebouncedWatcher({
+    rootDir: resolvedSource,
+    debounceMs,
+    shouldIgnore: (filename) => {
+      if (typeof filename !== 'string' || !filename) return false;
       const candidate = path.resolve(resolvedSource, filename);
-      if (isWithinRoot(candidate, canonicalOutDir)) return;
-      const normalized = filename.split(path.sep).join('/');
-      const segments = normalized.split('/');
-      if (segments.at(-1) === '.DS_Store') return;
-      if (segments.includes('node_modules') || segments.includes('.git')) return;
-    }
-    scheduleBuild();
-  });
-
-  watcher.on('error', (error) => {
-    onError?.(error instanceof Error ? error : new Error(String(error)));
-  });
-
-  return {
-    close() {
-      closed = true;
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      watcher.close();
+      return isWithinRoot(candidate, canonicalOutDir);
     },
-  };
+    onChange: async () => {
+      const result = await buildProject(freshBuildOptions);
+      onRebuild?.(result);
+    },
+    onError,
+  });
 }

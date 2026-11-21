@@ -1,12 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
+import { API_KEY_FILENAME } from '../config/auth.js';
 import {
-  API_KEY_FILENAME,
   clearConfiguredShellDir,
   getConfiguredShellDir,
   setConfiguredShellDir,
-} from '../config/auth.js';
+} from '../config/user-store.js';
+import { CliError } from '../errors.js';
 import {
   expandHomePath,
   exportBuiltinShell,
@@ -15,23 +16,26 @@ import {
   validateShellDir,
 } from '../site/shell.js';
 import { isDirectoryNonEmpty } from '../sync/fs.js';
+import { resolveInheritedJsonOption } from '../utils/cli-options.js';
 import { fmt } from '../utils/format.js';
-import { CliError, printJsonResponse } from '../utils/json.js';
+import { printJsonResponse } from '../utils/json.js';
+import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import {
   isInteractive,
   promptConfirm,
   promptValidatedTextWithIO,
   type TextValidationResult,
-} from '../utils/prompts.js';
+} from '../utils/prompts/index.js';
+import { hasControlChars } from '../utils/strings.js';
 
 export const DEFAULT_SHELL_EXPORT_DIR = 'cdpn-shell';
-const CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
 
 export interface ShellCommandBaseOptions {
   cwd?: string;
   homeDir?: string;
   json?: boolean;
   interactive?: boolean;
+  output?: CommandOutput;
 }
 
 export interface ShellShowResult {
@@ -41,11 +45,13 @@ export interface ShellShowResult {
   exists: boolean;
   files: string[];
   warning: string | null;
+  exitCode?: number;
 }
 
 export async function runShellShowCommand(
   options: ShellCommandBaseOptions = {},
 ): Promise<ShellShowResult> {
+  const output = options.output ?? defaultOutput;
   const jsonMode = Boolean(options.json);
   const builtin = await resolveBuiltinShellDir();
   const configuredDir = await getConfiguredShellDir({ homeDir: options.homeDir });
@@ -83,6 +89,7 @@ export async function runShellShowCommand(
     exists,
     files,
     warning,
+    ...(!exists ? { exitCode: 1 } : {}),
   };
 
   if (jsonMode) {
@@ -93,41 +100,42 @@ export async function runShellShowCommand(
         : exists
           ? `Using custom shell from ~/${API_KEY_FILENAME}: ${activeDir}`
           : warning ?? `Configured shell directory not found: ${activeDir}`;
-    if (!exists) {
-      process.exitCode = 1;
-    }
-    printJsonResponse(code, message, {
-      source: result.source,
-      configured_dir: result.configuredDir,
-      active_dir: result.activeDir,
-      exists: result.exists,
-      files: result.files,
-      warning: result.warning,
-    });
+    printJsonResponse(
+      code,
+      message,
+      {
+        source: result.source,
+        configured_dir: result.configuredDir,
+        active_dir: result.activeDir,
+        exists: result.exists,
+        files: result.files,
+        warning: result.warning,
+      },
+      output,
+    );
     return result;
   }
 
   if (source === 'builtin') {
-    console.log(
+    output.log(
       `${fmt.boldGreen('✓')} Active shell: ${fmt.boldCyan('built-in')} ${fmt.dim(`(${builtin.dir})`)}`,
     );
-    console.log(`  ${fmt.dim('Files:')} ${files.join(', ')}`);
-    console.log(
+    output.log(`  ${fmt.dim('Files:')} ${files.join(', ')}`);
+    output.log(
       fmt.dim('\n  Tip: Run `cdpn shell export <dir>` to copy and customize the built-in shell.'),
     );
   } else if (exists) {
-    console.log(
+    output.log(
       `${fmt.boldGreen('✓')} Active shell: ${fmt.magenta(activeDir)} ${fmt.dim(`(configured in ~/${API_KEY_FILENAME})`)}`,
     );
-    console.log(`  ${fmt.dim('Files:')} ${files.join(', ')}`);
+    output.log(`  ${fmt.dim('Files:')} ${files.join(', ')}`);
   } else {
-    console.log(
+    output.log(
       `${fmt.boldRed('✗')} Configured shell in ~/${API_KEY_FILENAME} is invalid or missing: ${fmt.magenta(activeDir)}`,
     );
     if (warning) {
-      console.log(`  ${fmt.yellow(warning)}`);
+      output.log(`  ${fmt.yellow(warning)}`);
     }
-    process.exitCode = 1;
   }
 
   return result;
@@ -159,6 +167,7 @@ export interface ShellExportResult {
 export async function runShellExportCommand(
   options: ShellExportOptions = {},
 ): Promise<ShellExportResult> {
+  const output = options.output ?? defaultOutput;
   const jsonMode = Boolean(options.json);
   const interactive = !jsonMode && (options.interactive ?? isInteractive());
   const cwd = path.resolve(options.cwd ?? process.cwd());
@@ -174,13 +183,13 @@ export async function runShellExportCommand(
   let rawDir = options.dirArg?.trim();
   if (!rawDir) {
     if (interactive) {
-      console.log('');
+      output.log('');
       rawDir = await askDirImpl(
         'Where would you like to export the built-in shell?',
         DEFAULT_SHELL_EXPORT_DIR,
         (raw) => {
           const candidate = raw.trim() || DEFAULT_SHELL_EXPORT_DIR;
-          if (CONTROL_CHAR_PATTERN.test(candidate)) {
+          if (hasControlChars(candidate)) {
             return { ok: false, error: 'Directory cannot contain control characters.' };
           }
           return { ok: true, value: candidate, displayValue: candidate };
@@ -191,8 +200,11 @@ export async function runShellExportCommand(
     }
   }
 
-  if (!rawDir || CONTROL_CHAR_PATTERN.test(rawDir)) {
-    throw new CliError(400, 'Export directory path cannot be empty or contain control characters.');
+  if (!rawDir || hasControlChars(rawDir)) {
+    throw new CliError(
+      400,
+      'Export directory path cannot be empty or contain control characters.',
+    );
   }
 
   const expanded = expandHomePath(rawDir, options.homeDir);
@@ -203,7 +215,10 @@ export async function runShellExportCommand(
   try {
     const lstat = await fs.lstat(resolvedTarget);
     if (lstat.isSymbolicLink()) {
-      throw new CliError(400, `"${rawDir}" is a symbolic link. Please choose a regular directory.`);
+      throw new CliError(
+        400,
+        `"${rawDir}" is a symbolic link. Please choose a regular directory.`,
+      );
     }
     if (!lstat.isDirectory()) {
       throw new CliError(400, `"${rawDir}" already exists and is not a directory.`);
@@ -224,13 +239,13 @@ export async function runShellExportCommand(
         { target_dir: resolvedTarget },
       );
     }
-    console.log('');
+    output.log('');
     const overwrite = await confirmImpl(
       `Directory "${rawDir}" is not empty. Overwrite existing shell files?`,
       false,
     );
     if (!overwrite) {
-      console.log(fmt.dim('Export aborted.'));
+      output.log(fmt.dim('Export aborted.'));
       return {
         exported: false,
         aborted: true,
@@ -248,7 +263,7 @@ export async function runShellExportCommand(
     await setConfiguredShellDir(exported.targetDir, { homeDir: options.homeDir });
     configuredGlobally = true;
   } else if (interactive) {
-    console.log('');
+    output.log('');
     const shouldSet = await confirmImpl(
       `Set "${rawDir}" as your default global shell in ~/${API_KEY_FILENAME}?`,
       true,
@@ -260,25 +275,30 @@ export async function runShellExportCommand(
   }
 
   if (jsonMode) {
-    printJsonResponse(201, `Exported built-in shell to ${exported.targetDir}.`, {
-      target_dir: exported.targetDir,
-      copied_files: exported.copiedFiles,
-      configured_globally: configuredGlobally,
-    });
+    printJsonResponse(
+      201,
+      `Exported built-in shell to ${exported.targetDir}.`,
+      {
+        target_dir: exported.targetDir,
+        copied_files: exported.copiedFiles,
+        configured_globally: configuredGlobally,
+      },
+      output,
+    );
   } else {
-    console.log('');
-    console.log(
+    output.log('');
+    output.log(
       `${fmt.boldGreen('✓')} ${fmt.bold('Exported built-in shell to')} ${fmt.magenta(exported.targetDir)}`,
     );
     for (const file of exported.copiedFiles) {
-      console.log(`  ${fmt.boldGreen('+')} ${file}`);
+      output.log(`  ${fmt.boldGreen('+')} ${file}`);
     }
     if (configuredGlobally) {
-      console.log(
+      output.log(
         `\n${fmt.boldGreen('✓')} Saved as default global shell in ${fmt.bold(`~/${API_KEY_FILENAME}`)}.`,
       );
     } else {
-      console.log(
+      output.log(
         fmt.dim(
           `\nUse it with \`cdpn serve --shell ${rawDir}\` or set it globally with \`cdpn shell set ${rawDir}\`.`,
         ),
@@ -302,6 +322,7 @@ export interface ShellSetOptions extends ShellCommandBaseOptions {
 export async function runShellSetCommand(
   options: ShellSetOptions,
 ): Promise<{ filePath: string; shellDir: string; files: string[] }> {
+  const output = options.output ?? defaultOutput;
   const jsonMode = Boolean(options.json);
   const validated = await validateShellDir(options.dirArg, {
     cwd: options.cwd,
@@ -311,13 +332,18 @@ export async function runShellSetCommand(
   const saved = await setConfiguredShellDir(validated.dir, { homeDir: options.homeDir });
 
   if (jsonMode) {
-    printJsonResponse(200, `Default global shell set to ${saved.shellDir}.`, {
-      file_path: saved.filePath,
-      shell_dir: saved.shellDir,
-      files: validated.files,
-    });
+    printJsonResponse(
+      200,
+      `Default global shell set to ${saved.shellDir}.`,
+      {
+        file_path: saved.filePath,
+        shell_dir: saved.shellDir,
+        files: validated.files,
+      },
+      output,
+    );
   } else {
-    console.log(
+    output.log(
       `${fmt.boldGreen('✓')} Default global shell set to ${fmt.magenta(saved.shellDir)} ${fmt.dim(`(in ~/${API_KEY_FILENAME})`)}`,
     );
   }
@@ -332,6 +358,7 @@ export async function runShellSetCommand(
 export async function runShellResetCommand(
   options: ShellCommandBaseOptions = {},
 ): Promise<{ filePath: string; cleared: boolean; fileDeleted: boolean }> {
+  const output = options.output ?? defaultOutput;
   const jsonMode = Boolean(options.json);
   const result = await clearConfiguredShellDir({ homeDir: options.homeDir });
 
@@ -339,33 +366,37 @@ export async function runShellResetCommand(
     const message = result.cleared
       ? `Reset default shell to built-in (updated ~/${API_KEY_FILENAME}).`
       : 'Already using the built-in shell.';
-    printJsonResponse(200, message, {
-      file_path: result.filePath,
-      cleared: result.cleared,
-      file_deleted: result.fileDeleted,
-    });
+    printJsonResponse(
+      200,
+      message,
+      {
+        file_path: result.filePath,
+        cleared: result.cleared,
+        file_deleted: result.fileDeleted,
+      },
+      output,
+    );
   } else if (result.cleared) {
-    console.log(
+    output.log(
       `${fmt.boldGreen('✓')} Reset default shell to ${fmt.boldCyan('built-in')} ${fmt.dim(`(updated ~/${API_KEY_FILENAME})`)}.`,
     );
   } else {
-    console.log(fmt.dim('Already using the built-in shell.'));
+    output.log(fmt.dim('Already using the built-in shell.'));
   }
 
   return result;
 }
 
-function resolveShellJsonOption(options: { json?: boolean }, command: Command): boolean {
-  return Boolean(options.json || command.parent?.opts<{ json?: boolean }>().json);
-}
-
-export function registerShellCommands(program: Command): void {
+export function registerShellCommand(program: Command): void {
   const shellCmd = program
     .command('shell')
     .description('Manage the demo index shell used by `cdpn serve` and `cdpn build`')
     .option('--json', 'Output shell configuration as JSON')
     .action(async (options: { json?: boolean }) => {
-      await runShellShowCommand({ json: options.json });
+      const result = await runShellShowCommand({ json: options.json });
+      if (result.exitCode !== undefined) {
+        process.exitCode = result.exitCode;
+      }
     });
 
   shellCmd
@@ -373,7 +404,12 @@ export function registerShellCommands(program: Command): void {
     .description('Show the active demo index shell (custom ~/.cdpn path or built-in)')
     .option('--json', 'Output shell configuration as JSON')
     .action(async (options: { json?: boolean }, command: Command) => {
-      await runShellShowCommand({ json: resolveShellJsonOption(options, command) });
+      const result = await runShellShowCommand({
+        json: resolveInheritedJsonOption(options, command),
+      });
+      if (result.exitCode !== undefined) {
+        process.exitCode = result.exitCode;
+      }
     });
 
   shellCmd
@@ -382,7 +418,10 @@ export function registerShellCommands(program: Command): void {
     .description('Copy the built-in shell files into a local directory so you can customize them')
     .option('-y, --yes', 'Overwrite existing files in a non-empty directory without confirmation')
     .option('-f, --force', 'Alias for --yes')
-    .option('--set', `Also set the exported directory as the default global shell in ~/${API_KEY_FILENAME}`)
+    .option(
+      '--set',
+      `Also set the exported directory as the default global shell in ~/${API_KEY_FILENAME}`,
+    )
     .option('--json', 'Output export result as JSON')
     .action(
       async (
@@ -395,7 +434,7 @@ export function registerShellCommands(program: Command): void {
           yes: options.yes,
           force: options.force,
           set: options.set,
-          json: resolveShellJsonOption(options, command),
+          json: resolveInheritedJsonOption(options, command),
         });
       },
     );
@@ -405,7 +444,10 @@ export function registerShellCommands(program: Command): void {
     .description(`Set a custom default shell directory in ~/${API_KEY_FILENAME}`)
     .option('--json', 'Output result as JSON')
     .action(async (dirArg: string, options: { json?: boolean }, command: Command) => {
-      await runShellSetCommand({ dirArg, json: resolveShellJsonOption(options, command) });
+      await runShellSetCommand({
+        dirArg,
+        json: resolveInheritedJsonOption(options, command),
+      });
     });
 
   shellCmd
@@ -414,6 +456,8 @@ export function registerShellCommands(program: Command): void {
     .description(`Reset the global shell in ~/${API_KEY_FILENAME} back to the built-in shell`)
     .option('--json', 'Output result as JSON')
     .action(async (options: { json?: boolean }, command: Command) => {
-      await runShellResetCommand({ json: resolveShellJsonOption(options, command) });
+      await runShellResetCommand({
+        json: resolveInheritedJsonOption(options, command),
+      });
     });
 }

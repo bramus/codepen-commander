@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { CodePenClient } from '../api/client.js';
-import type { BuildPatch, PenFile } from '../types.js';
+import type { BuildPatch, PenFile } from '../api/types.js';
 import {
   deleteLocalFile,
   normalizePenPath,

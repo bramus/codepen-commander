@@ -1,6 +1,8 @@
 import { CommanderError } from 'commander';
 import { isCodePenApiError } from '../api/errors.js';
+import { isCliError } from '../errors.js';
 import { stripAnsi } from './format.js';
+import { defaultOutput, type CommandOutput } from './output.js';
 
 export interface JsonStatus {
   code: number;
@@ -10,26 +12,6 @@ export interface JsonStatus {
 export interface JsonEnvelope<T = unknown> {
   status: JsonStatus;
   contents: T;
-}
-
-/**
- * Structured CLI error carrying an HTTP-modeled status code and optional structured contents
- * for `--json` output while remaining a standard `Error` for human-readable terminal output.
- */
-export class CliError extends Error {
-  public readonly statusCode: number;
-  public readonly contents: unknown;
-
-  constructor(statusCode: number, message: string, contents: unknown = null) {
-    super(message);
-    this.name = 'CliError';
-    this.statusCode = statusCode;
-    this.contents = contents;
-  }
-}
-
-export function isCliError(error: unknown): error is CliError {
-  return error instanceof CliError;
 }
 
 export function createJsonResponse<T>(code: number, message: string, contents: T): JsonEnvelope<T> {
@@ -46,9 +28,14 @@ export function formatJsonResponse<T>(code: number, message: string, contents: T
   return JSON.stringify(createJsonResponse(code, message, contents), null, 2);
 }
 
-export function printJsonResponse<T>(code: number, message: string, contents: T): JsonEnvelope<T> {
+export function printJsonResponse<T>(
+  code: number,
+  message: string,
+  contents: T,
+  output: CommandOutput = defaultOutput,
+): JsonEnvelope<T> {
   const envelope = createJsonResponse(code, message, contents);
-  console.log(JSON.stringify(envelope, null, 2));
+  output.log(JSON.stringify(envelope, null, 2));
   return envelope;
 }
 
@@ -77,24 +64,14 @@ function inferHttpStatusCode(error: Error): number {
   const msg = error.message;
   if (/no codepen api key found|not authenticated|unauthenticated/i.test(msg)) return 401;
   if (/classic pen.*read-only|cannot (fork|clone) .+ via codepen api/i.test(msg)) return 403;
-  if (
-    /not found|no \.cdpn\.json found|no profiles found|no saved versions|no codepen template found/i.test(msg)
-  ) {
+  if (/not found|no \.cdpn\.json found|no profiles found|no saved versions|no codepen template found/i.test(msg)) {
     return 404;
   }
-  if (
-    /already exists|is not empty|moved ahead|local changes detected|already contains|multiple codepen templates match/i.test(
-      msg,
-    )
-  ) {
+  if (/already exists|is not empty|moved ahead|local changes detected|already contains|multiple codepen templates match/i.test(msg)) {
     return 409;
   }
   if (/build failed/i.test(msg)) return 422;
-  if (
-    /invalid |cannot combine|must be |requires? |missing |specify |refusing to |at most |expected a codepen url|cannot be empty|not deployed yet|only supported for|only works/i.test(
-      msg,
-    )
-  ) {
+  if (/invalid |cannot combine|must be |requires? |missing |specify |refusing to |at most |expected a codepen url|cannot be empty|not deployed yet|only supported for|only works/i.test(msg)) {
     return 400;
   }
   return 500;

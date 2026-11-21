@@ -1,21 +1,19 @@
 import type { Command } from 'commander';
-import {
-  PROJECT_CONFIG_FILENAME,
-  requireProjectInDir,
-} from '../config/project.js';
-import { CODEPEN_DIR } from '../site/blocks.js';
-import type { PenInfo } from '../types.js';
+import { requireProjectInDir, type PenInfo } from '../config/project.js';
+import { CODEPEN_DIR, PROJECT_CONFIG_FILENAME } from '../constants.js';
+import { CliError } from '../errors.js';
 import { fmt } from '../utils/format.js';
-import { CliError, printJsonResponse } from '../utils/json.js';
-import { isInteractive, promptConfirm } from '../utils/prompts.js';
-import { unlinkLinkedProject } from './missing-pen.js';
+import { printJsonResponse } from '../utils/json.js';
+import { defaultOutput, type CommandOutput } from '../utils/output.js';
+import { isInteractive, promptConfirm } from '../utils/prompts/index.js';
+import { unlinkLinkedProject } from '../workflows/missing-pen.js';
 
 export interface UnlinkCliOptions {
   yes?: boolean;
   json?: boolean;
 }
 
-export interface UnlinkPenCommandOptions {
+export interface RunUnlinkCommandOptions {
   /** Skip confirmation prompt (required in non-interactive mode). */
   yes?: boolean;
   /** Output structured JSON response instead of human-readable logs. */
@@ -24,13 +22,15 @@ export interface UnlinkPenCommandOptions {
   cwd?: string;
   /** Injectable interactivity flag (for testing). */
   interactive?: boolean;
+  /** Injectable output sink (defaults to stdout/stderr). */
+  output?: CommandOutput;
   /** Injectable prompts (for testing). */
   prompts?: {
     confirm?: (question: string, defaultYes?: boolean) => Promise<boolean>;
   };
 }
 
-export interface UnlinkPenResult {
+export interface UnlinkCommandResult {
   unlinked: boolean;
   previousPenId: string;
   previousUrl: string;
@@ -49,9 +49,10 @@ export interface UnlinkPenResult {
  * Does NOT modify or delete the online Pen on CodePen.
  * Returns `null` if the user cancels at the confirmation prompt.
  */
-export async function unlinkPenCommand(
-  options: UnlinkPenCommandOptions = {},
-): Promise<UnlinkPenResult | null> {
+export async function runUnlinkCommand(
+  options: RunUnlinkCommandOptions = {},
+): Promise<UnlinkCommandResult | null> {
+  const output = options.output ?? defaultOutput;
   const cwd = options.cwd ?? process.cwd();
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
@@ -68,13 +69,13 @@ export async function unlinkPenCommand(
       throw new CliError(400, 'Refusing to unlink Pen in non-interactive mode without --yes.');
     }
 
-    console.log(`\n${fmt.yellow('About to unlink local folder from CodePen Pen:')}`);
-    console.log(`  Title:   ${fmt.bold(displayTitle)} ${fmt.dim(`(${previousPenId})`)}`);
+    output.log(`\n${fmt.yellow('About to unlink local folder from CodePen Pen:')}`);
+    output.log(`  Title:   ${fmt.bold(displayTitle)} ${fmt.dim(`(${previousPenId})`)}`);
     if (previousProfile) {
-      console.log(`  Profile: ${fmt.cyan(previousProfile)}`);
+      output.log(`  Profile: ${fmt.cyan(previousProfile)}`);
     }
-    console.log(`  Editor:  ${fmt.cyan(previousUrl)}`);
-    console.log(
+    output.log(`  Editor:  ${fmt.cyan(previousUrl)}`);
+    output.log(
       fmt.dim(
         `\nThe online Pen on CodePen, ${CODEPEN_DIR}/, and all local source files will stay untouched.\n` +
           `Only the remote link fields in ${PROJECT_CONFIG_FILENAME} will be cleared (keeping "info").`,
@@ -86,7 +87,7 @@ export async function unlinkPenCommand(
       false,
     );
     if (!ok) {
-      console.log('Aborted.');
+      output.log('Aborted.');
       return null;
     }
   }
@@ -106,18 +107,19 @@ export async function unlinkPenCommand(
         config_path: configPath,
         info: retainedInfo,
       },
+      output,
     );
   } else {
-    console.log(
+    output.log(
       `\n${fmt.boldGreen('✓')} Unlinked local folder from ${fmt.bold(displayTitle)} ${fmt.dim(`(${previousPenId})`)}`,
     );
-    console.log(
+    output.log(
       `  ${fmt.dim('Updated:')} ${fmt.cyan(PROJECT_CONFIG_FILENAME)} ${fmt.dim(`(cleared remote link; kept ${CODEPEN_DIR}/ and Pen info)`)}`,
     );
-    console.log(
+    output.log(
       `  ${fmt.dim('Online:')}  ${fmt.cyan(previousUrl)} ${fmt.dim('(left untouched on CodePen)')}`,
     );
-    console.log(
+    output.log(
       `  ${fmt.dim('Tip:')}     Run \`cdpn push\` anytime to publish this folder as a new Pen.`,
     );
   }
@@ -143,7 +145,7 @@ export function registerUnlinkCommand(program: Command): void {
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Output unlink result as JSON')
     .action(async (options: UnlinkCliOptions) => {
-      await unlinkPenCommand({
+      await runUnlinkCommand({
         yes: options.yes,
         json: options.json,
       });

@@ -1,21 +1,24 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
+import type { Pen, PenAccess, PenUpdateRequest } from '../api/types.js';
 import type { ResolvedAuth } from '../config/auth.js';
 import { requireProjectInDir, writeProjectConfig } from '../config/project.js';
+import { MIN_PROTECTED_PASSWORD_LENGTH, PEN_ACCESS_CHOICES } from '../constants.js';
+import { CliError } from '../errors.js';
 import { mergeUpdatedPenInfoIntoConfig } from '../sync/info.js';
-import type { Pen, PenAccess, PenUpdateRequest } from '../types.js';
+import { normalizeAccess } from '../utils/cli-options.js';
 import { fmt } from '../utils/format.js';
-import { CliError, printJsonResponse } from '../utils/json.js';
+import { printJsonResponse } from '../utils/json.js';
+import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import {
   isInteractive,
   promptConfirm,
   promptSecret,
   promptSelect,
   type SelectOption,
-} from '../utils/prompts.js';
-import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
-import { normalizeAccess } from './create-pen.js';
-import { fetchLinkedPenOrHandleMissing } from './missing-pen.js';
+} from '../utils/prompts/index.js';
+import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
+import { fetchLinkedPenOrHandleMissing } from '../workflows/missing-pen.js';
 
 export interface PrivacyCliOptions {
   password?: string;
@@ -23,7 +26,7 @@ export interface PrivacyCliOptions {
   json?: boolean;
 }
 
-export interface ManagePrivacyOptions {
+export interface RunPrivacyCommandOptions {
   /** Optional target privacy level (`Public`, `Private`, `Protected`, `Collaborators`). */
   levelArg?: string;
   /** Optional password for `Protected` Pens (min 8 chars). */
@@ -36,6 +39,8 @@ export interface ManagePrivacyOptions {
   cwd?: string;
   /** Explicit `--profile <name>` flag value. */
   explicitProfile?: string;
+  /** Injectable output sink (defaults to stdout/stderr). */
+  output?: CommandOutput;
   /** Injectable API base URL (for testing). */
   baseUrl?: string;
   /** Injectable interactivity flag (for testing). */
@@ -56,7 +61,7 @@ export interface ManagePrivacyOptions {
   };
 }
 
-export interface ManagePrivacyResult {
+export interface PrivacyCommandResult {
   pen: Pen;
   previousAccess: PenAccess;
   access: PenAccess;
@@ -65,21 +70,17 @@ export interface ManagePrivacyResult {
   auth: ResolvedAuth;
 }
 
-const ACCESS_CHOICES: ReadonlyArray<{ value: PenAccess; label: string; description: string }> = [
-  { value: 'Public', label: 'Public', description: 'visible to everyone' },
-  { value: 'Private', label: 'Private', description: 'unlisted; anyone with the link can view it' },
-  { value: 'Protected', label: 'Protected', description: 'private and password-protected (min 8 chars)' },
-  { value: 'Collaborators', label: 'Collaborators', description: 'private; visible only to you and collaborators' },
-];
-
 async function promptForProtectedPassword(
   secretImpl: (question: string) => Promise<string>,
   promptLabel: string,
+  output: CommandOutput,
 ): Promise<string> {
   for (;;) {
     const pw = await secretImpl(promptLabel);
-    if (pw.length >= 8) return pw;
-    console.log(fmt.yellow('Password must be at least 8 characters.'));
+    if (pw.length >= MIN_PROTECTED_PASSWORD_LENGTH) return pw;
+    output.log(
+      fmt.yellow(`Password must be at least ${MIN_PROTECTED_PASSWORD_LENGTH} characters.`),
+    );
   }
 }
 
@@ -87,9 +88,10 @@ async function promptForProtectedPassword(
  * Inspects or updates the privacy/access permissions of the Pen linked by `.cdpn.json`
  * directly inside `options.cwd` (does not walk up to parent folders).
  */
-export async function managePenPrivacy(
-  options: ManagePrivacyOptions = {},
-): Promise<ManagePrivacyResult | null> {
+export async function runPrivacyCommand(
+  options: RunPrivacyCommandOptions = {},
+): Promise<PrivacyCommandResult | null> {
+  const output = options.output ?? defaultOutput;
   const cwd = options.cwd ?? process.cwd();
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
   const selectImpl = options.prompts?.select ?? promptSelect;
@@ -101,8 +103,11 @@ export async function managePenPrivacy(
 
   const requestedAccess = normalizeAccess(options.levelArg);
   if (options.password !== undefined) {
-    if (options.password.length < 8) {
-      throw new CliError(400, 'Password must be at least 8 characters.');
+    if (options.password.length < MIN_PROTECTED_PASSWORD_LENGTH) {
+      throw new CliError(
+        400,
+        `Password must be at least ${MIN_PROTECTED_PASSWORD_LENGTH} characters.`,
+      );
     }
     if (requestedAccess && requestedAccess !== 'Protected') {
       throw new CliError(400, '--password can only be used with Protected privacy.');
@@ -118,6 +123,7 @@ export async function managePenPrivacy(
     project,
     interactive,
     persistProfileToProject: !options.json,
+    output,
     env: options.env,
     homeDir: options.homeDir,
     selectProfile: selectImpl,
@@ -131,6 +137,7 @@ export async function managePenPrivacy(
     commandName: 'privacy',
     interactive,
     json: options.json,
+    output,
     prompts: {
       select: selectImpl,
       confirm: confirmImpl,
@@ -146,20 +153,25 @@ export async function managePenPrivacy(
   // Read-only mode: `--show`, or no level/password in non-interactive / `--json` mode
   if (options.show || (!requestedAccess && options.password === undefined && !interactive)) {
     if (options.json) {
-      printJsonResponse(200, `Pen privacy is ${currentPen.access}.`, {
-        pen_id: currentPen.id,
-        title: currentPen.title,
-        access: currentPen.access,
-        editor: currentPen.editor,
-        profile: auth.profile ?? project.config.profile ?? null,
-        updated: false,
-      });
+      printJsonResponse(
+        200,
+        `Pen privacy is ${currentPen.access}.`,
+        {
+          pen_id: currentPen.id,
+          title: currentPen.title,
+          access: currentPen.access,
+          editor: currentPen.editor,
+          profile: auth.profile ?? project.config.profile ?? null,
+          updated: false,
+        },
+        output,
+      );
     } else {
-      console.log(`${fmt.bold(currentPen.title || 'Untitled')} ${fmt.dim(`(${currentPen.id})`)}`);
+      output.log(`${fmt.bold(currentPen.title || 'Untitled')} ${fmt.dim(`(${currentPen.id})`)}`);
       if (auth.profile) {
-        console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+        output.log(`  Profile: ${fmt.cyan(auth.profile)}`);
       }
-      console.log(`  Privacy: ${fmt.cyan(currentPen.access)}`);
+      output.log(`  Privacy: ${fmt.cyan(currentPen.access)}`);
     }
 
     return {
@@ -188,14 +200,14 @@ export async function managePenPrivacy(
     targetAccess = 'Protected';
   } else {
     // Interactive picker with current privacy pre-selected
-    console.log(
+    output.log(
       `Current privacy for ${fmt.bold(currentPen.title || 'Untitled')} ${fmt.dim(`(${currentPen.id})`)}: ${fmt.cyan(previousAccess)}\n`,
     );
     const defaultIndex = Math.max(
       0,
-      ACCESS_CHOICES.findIndex((c) => c.value === previousAccess),
+      PEN_ACCESS_CHOICES.findIndex((c) => c.value === previousAccess),
     );
-    const selectOptions: SelectOption<PenAccess>[] = ACCESS_CHOICES.map((choice) => ({
+    const selectOptions: SelectOption<PenAccess>[] = PEN_ACCESS_CHOICES.map((choice) => ({
       value: choice.value,
       label: choice.label,
       description:
@@ -219,9 +231,12 @@ export async function managePenPrivacy(
           );
         }
         if (!requestedAccess) {
-          const rotate = await confirmImpl('Pen is already Protected. Replace its password?', false);
+          const rotate = await confirmImpl(
+            'Pen is already Protected. Replace its password?',
+            false,
+          );
           if (!rotate) {
-            console.log(`Privacy unchanged (${fmt.cyan('Protected')}).`);
+            output.log(`Privacy unchanged (${fmt.cyan('Protected')}).`);
             return {
               pen: currentPen,
               previousAccess,
@@ -234,7 +249,8 @@ export async function managePenPrivacy(
         }
         password = await promptForProtectedPassword(
           secretImpl,
-          'New password for Protected Pen (min 8 characters)',
+          `New password for Protected Pen (min ${MIN_PROTECTED_PASSWORD_LENGTH} characters)`,
+          output,
         );
       }
       patch.password = password;
@@ -245,12 +261,13 @@ export async function managePenPrivacy(
         if (!interactive) {
           throw new CliError(
             400,
-            'Changing privacy to Protected requires --password with at least 8 characters.',
+            `Changing privacy to Protected requires --password with at least ${MIN_PROTECTED_PASSWORD_LENGTH} characters.`,
           );
         }
         password = await promptForProtectedPassword(
           secretImpl,
-          'Password for Protected Pen (min 8 characters)',
+          `Password for Protected Pen (min ${MIN_PROTECTED_PASSWORD_LENGTH} characters)`,
+          output,
         );
       }
       patch.access = 'Protected';
@@ -264,18 +281,23 @@ export async function managePenPrivacy(
   // No-op when privacy did not change
   if (Object.keys(patch).length === 0) {
     if (options.json) {
-      printJsonResponse(200, `Privacy is already ${currentPen.access} — no changes made.`, {
-        pen_id: currentPen.id,
-        title: currentPen.title,
-        previous_access: previousAccess,
-        access: currentPen.access,
-        editor: currentPen.editor,
-        profile: auth.profile ?? project.config.profile ?? null,
-        password_updated: false,
-        updated: false,
-      });
+      printJsonResponse(
+        200,
+        `Privacy is already ${currentPen.access} — no changes made.`,
+        {
+          pen_id: currentPen.id,
+          title: currentPen.title,
+          previous_access: previousAccess,
+          access: currentPen.access,
+          editor: currentPen.editor,
+          profile: auth.profile ?? project.config.profile ?? null,
+          password_updated: false,
+          updated: false,
+        },
+        output,
+      );
     } else {
-      console.log(`Privacy is already ${fmt.cyan(currentPen.access)} — no changes made.`);
+      output.log(`Privacy is already ${fmt.cyan(currentPen.access)} — no changes made.`);
     }
 
     return {
@@ -298,32 +320,37 @@ export async function managePenPrivacy(
       previousAccess === updatedPen.access && passwordUpdated
         ? 'Updated password for Protected Pen.'
         : `Updated privacy from ${previousAccess} to ${updatedPen.access}.`;
-    printJsonResponse(200, message, {
-      pen_id: updatedPen.id,
-      title: updatedPen.title,
-      previous_access: previousAccess,
-      access: updatedPen.access,
-      editor: updatedPen.editor,
-      profile: auth.profile ?? project.config.profile ?? null,
-      password_updated: passwordUpdated,
-      updated: true,
-      url: updatedPen.urls.editor,
-    });
+    printJsonResponse(
+      200,
+      message,
+      {
+        pen_id: updatedPen.id,
+        title: updatedPen.title,
+        previous_access: previousAccess,
+        access: updatedPen.access,
+        editor: updatedPen.editor,
+        profile: auth.profile ?? project.config.profile ?? null,
+        password_updated: passwordUpdated,
+        updated: true,
+        url: updatedPen.urls.editor,
+      },
+      output,
+    );
   } else if (previousAccess === updatedPen.access && passwordUpdated) {
-    console.log(
+    output.log(
       `\n${fmt.green('✓')} Updated password for Protected Pen ${fmt.bold(updatedPen.title || 'Untitled')} ${fmt.dim(`(${updatedPen.id})`)}`,
     );
   } else {
-    console.log(
+    output.log(
       `\n${fmt.green('✓')} Updated privacy for ${fmt.bold(updatedPen.title || 'Untitled')} ${fmt.dim(`(${updatedPen.id})`)}: ${fmt.dim(previousAccess)} → ${fmt.cyan(updatedPen.access)}`,
     );
   }
 
   if (!options.json) {
     if (auth.profile) {
-      console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+      output.log(`  Profile: ${fmt.cyan(auth.profile)}`);
     }
-    console.log(`  Editor:  ${fmt.cyan(updatedPen.urls.editor)}`);
+    output.log(`  Editor:  ${fmt.cyan(updatedPen.urls.editor)}`);
   }
 
   return {
@@ -343,11 +370,14 @@ export function registerPrivacyCommand(program: Command): void {
     .description(
       'View or update a Pen’s privacy permissions (Public, Private, Protected, Collaborators; requires .cdpn.json in current folder)',
     )
-    .option('--password <password>', 'Password for Protected privacy (min 8 chars; replaces password if already Protected)')
+    .option(
+      '--password <password>',
+      'Password for Protected privacy (min 8 chars; replaces password if already Protected)',
+    )
     .option('--show', 'Show the current privacy level without prompting')
     .option('--json', 'Output privacy status/result as JSON')
     .action(async (levelArg: string | undefined, options: PrivacyCliOptions, command: Command) => {
-      await managePenPrivacy({
+      await runPrivacyCommand({
         levelArg,
         password: options.password,
         show: options.show,

@@ -1,11 +1,9 @@
 import { execFile } from 'node:child_process';
+import { CliError } from '../errors.js';
+import { hasControlChars, isLoopbackHost } from './strings.js';
 
 export interface BrowserUrlOptions {
   allowLocalhostHttp?: boolean;
-}
-
-function isLocalhostHost(hostname: string): boolean {
-  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]';
 }
 
 /**
@@ -13,24 +11,24 @@ function isLocalhostHost(hostname: string): boolean {
  * with no control characters.
  */
 export function validateBrowserUrl(rawUrl: string, options: BrowserUrlOptions = {}): string {
-  if (/[\x00-\x1f\x7f]/.test(rawUrl)) {
-    throw new Error('URL contains invalid control characters.');
+  if (hasControlChars(rawUrl)) {
+    throw new CliError(400, 'URL contains invalid control characters.');
   }
 
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
   } catch {
-    throw new Error(`Invalid URL: ${rawUrl}`);
+    throw new CliError(400, `Invalid URL: ${rawUrl}`);
   }
 
   const allowedLocalHttp =
     Boolean(options.allowLocalhostHttp) &&
     parsed.protocol === 'http:' &&
-    isLocalhostHost(parsed.hostname);
+    isLoopbackHost(parsed.hostname);
 
   if (parsed.protocol !== 'https:' && !allowedLocalHttp) {
-    throw new Error(`Refusing to open non-HTTPS URL in browser: ${parsed.protocol}`);
+    throw new CliError(400, `Refusing to open non-HTTPS URL in browser: ${parsed.protocol}`);
   }
 
   return parsed.toString();

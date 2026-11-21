@@ -2,31 +2,39 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
+import type { Pen, TrashItem } from '../api/types.js';
 import type { ResolvedAuth } from '../config/auth.js';
 import {
-  PROJECT_CONFIG_FILENAME,
+  normalizePartialPenInfo,
   requireProjectInDir,
   writeUnlinkedProjectInfo,
+  type CompletePenInfo,
+  type PenInfo,
   type ProjectLocation,
 } from '../config/project.js';
-import { CODEPEN_DIR, isWithinRoot } from '../site/blocks.js';
-import { analyzeInfoSync, extractPenInfo, normalizePartialPenInfo } from '../sync/info.js';
-import type { CompletePenInfo, Pen, PenInfo, TrashItem } from '../types.js';
+import {
+  CODEPEN_DELETED_ITEMS_URL,
+  CODEPEN_DIR,
+  PROJECT_CONFIG_FILENAME,
+} from '../constants.js';
+import { CliError } from '../errors.js';
+import { analyzeInfoSync, extractPenInfo } from '../sync/info.js';
 import { fmt, formatDate } from '../utils/format.js';
-import { CliError, printJsonResponse } from '../utils/json.js';
+import { isWithinRoot } from '../utils/fs-safe.js';
+import { printJsonResponse } from '../utils/json.js';
+import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import {
   isInteractive,
   promptConfirm,
   promptSelect,
   type SelectOption,
-} from '../utils/prompts.js';
-import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
+} from '../utils/prompts/index.js';
+import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
 import {
-  CODEPEN_DELETED_ITEMS_URL,
   findProjectPenInTrash,
   isRemotePenNotFoundError,
   unlinkLinkedProject,
-} from './missing-pen.js';
+} from '../workflows/missing-pen.js';
 
 export { CODEPEN_DELETED_ITEMS_URL };
 
@@ -37,7 +45,7 @@ export interface DeleteCliOptions {
   json?: boolean;
 }
 
-export interface DeletePenCommandOptions {
+export interface RunDeleteCommandOptions {
   /** Skip confirmation prompt (required in non-interactive mode). */
   yes?: boolean;
   /** Retain `.codepen/` and only the `info` section in `.cdpn.json` (unlinked) instead of removing them. */
@@ -50,6 +58,8 @@ export interface DeletePenCommandOptions {
   cwd?: string;
   /** Explicit `--profile <name>` flag value. */
   explicitProfile?: string;
+  /** Injectable output sink (defaults to stdout/stderr). */
+  output?: CommandOutput;
   /** Injectable API base URL (for testing). */
   baseUrl?: string;
   /** Injectable interactivity flag (for testing). */
@@ -69,7 +79,7 @@ export interface DeletePenCommandOptions {
   };
 }
 
-export interface DeletePenResult {
+export interface DeleteCommandResult {
   pen: Pen | null;
   project: ProjectLocation;
   auth: ResolvedAuth;
@@ -124,9 +134,10 @@ async function removeCodepenDirSafe(rootDir: string): Promise<boolean> {
  *
  * Returns `null` if the user cancels at a confirmation prompt.
  */
-export async function deletePenCommand(
-  options: DeletePenCommandOptions = {},
-): Promise<DeletePenResult | null> {
+export async function runDeleteCommand(
+  options: RunDeleteCommandOptions = {},
+): Promise<DeleteCommandResult | null> {
+  const output = options.output ?? defaultOutput;
   const cwd = options.cwd ?? process.cwd();
   const keepConfig = Boolean(options.keepConfig || options.keepInfo);
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
@@ -141,6 +152,7 @@ export async function deletePenCommand(
     project,
     interactive,
     persistProfileToProject: false,
+    output,
     env: options.env,
     homeDir: options.homeDir,
     selectProfile: selectImpl,
@@ -168,15 +180,15 @@ export async function deletePenCommand(
       }
 
       if (trashItem) {
-        console.log('');
-        console.log(
+        output.log('');
+        output.log(
           `${fmt.boldYellow('!')} Pen ${fmt.bold(displayTitle)} ${fmt.dim(`(${project.config.pen_id})`)} is already in CodePen’s ${fmt.bold('Deleted Items (Trash)')}.`,
         );
-        console.log(
+        output.log(
           `  ${fmt.dim('Deleted:')} ${formatDate(trashItem.deleted_at)}  ${fmt.dim('·')}  ${fmt.dim('Expires:')} ${fmt.yellow(formatDate(trashItem.expires_at))}`,
         );
-        console.log(`  ${fmt.dim('URL:')}     ${fmt.cyan(project.config.url)}`);
-        console.log('');
+        output.log(`  ${fmt.dim('URL:')}     ${fmt.cyan(project.config.url)}`);
+        output.log('');
 
         const choice = await selectImpl<'purge' | 'cleanup' | 'recover' | 'cancel'>(
           'What would you like to do?',
@@ -210,13 +222,13 @@ export async function deletePenCommand(
         );
 
         if (choice === 'cancel') {
-          console.log('Aborted.');
+          output.log('Aborted.');
           return null;
         }
 
         if (choice === 'recover') {
           const restoredPen = await client.restorePen(trashItem.item_id);
-          console.log(
+          output.log(
             `\n${fmt.boldGreen('✓')} Restored ${fmt.bold(restoredPen.title || displayTitle)} ${fmt.dim(`(${restoredPen.id})`)} from CodePen Trash ${fmt.dim(`(kept ${PROJECT_CONFIG_FILENAME} linked)`)}.`,
           );
           return {
@@ -239,19 +251,19 @@ export async function deletePenCommand(
             false,
           );
           if (!confirmed) {
-            console.log('Aborted.');
+            output.log('Aborted.');
             return null;
           }
           await client.purgeTrashedPen(trashItem.item_id);
           purgedFromTrash = true;
         }
       } else {
-        console.log('');
-        console.log(
+        output.log('');
+        output.log(
           `${fmt.boldYellow('!')} Pen ${fmt.bold(displayTitle)} ${fmt.dim(`(${project.config.pen_id})`)} no longer exists on CodePen (already deleted).`,
         );
-        console.log(`  ${fmt.dim('URL:')} ${fmt.cyan(project.config.url)}`);
-        console.log('');
+        output.log(`  ${fmt.dim('URL:')} ${fmt.cyan(project.config.url)}`);
+        output.log('');
 
         const ok = await confirmImpl(
           keepConfig
@@ -260,7 +272,7 @@ export async function deletePenCommand(
           true,
         );
         if (!ok) {
-          console.log('Aborted.');
+          output.log('Aborted.');
           return null;
         }
       }
@@ -289,49 +301,54 @@ export async function deletePenCommand(
           ? `Pen ${displayTitle} (${project.config.pen_id}) no longer exists on CodePen; retained info in ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/.`
           : `Pen ${displayTitle} (${project.config.pen_id}) no longer exists on CodePen; removed ${removedSummary}.`;
 
-      printJsonResponse(200, msg, {
-        pen_id: project.config.pen_id,
-        title: displayTitle,
-        profile: auth.profile,
-        editor_url: project.config.url,
-        deleted: true,
-        already_deleted_remotely: true,
-        in_trash: Boolean(trashItem),
-        purged_from_trash: purgedFromTrash,
-        ...(trashItem ? { trash_item: trashItem, restore_url: CODEPEN_DELETED_ITEMS_URL } : {}),
-        config_removed: !keepConfig,
-        codepen_dir_removed: codepenDirRemoved,
-        info_retained: keepConfig,
-        ...(keepConfig ? { info: retainedInfo } : {}),
-      });
+      printJsonResponse(
+        200,
+        msg,
+        {
+          pen_id: project.config.pen_id,
+          title: displayTitle,
+          profile: auth.profile,
+          editor_url: project.config.url,
+          deleted: true,
+          already_deleted_remotely: true,
+          in_trash: Boolean(trashItem),
+          purged_from_trash: purgedFromTrash,
+          ...(trashItem ? { trash_item: trashItem, restore_url: CODEPEN_DELETED_ITEMS_URL } : {}),
+          config_removed: !keepConfig,
+          codepen_dir_removed: codepenDirRemoved,
+          info_retained: keepConfig,
+          ...(keepConfig ? { info: retainedInfo } : {}),
+        },
+        output,
+      );
     } else {
       if (purgedFromTrash) {
-        console.log(
+        output.log(
           `\n${fmt.boldGreen('✓')} Permanently deleted ${fmt.bold(displayTitle)} ${fmt.dim(`(${project.config.pen_id})`)} from CodePen Trash.`,
         );
       } else if (trashItem) {
-        console.log(
+        output.log(
           `\n${fmt.boldGreen('✓')} Pen ${fmt.bold(displayTitle)} ${fmt.dim(`(${project.config.pen_id})`)} was already in CodePen Deleted Items.`,
         );
       } else {
-        console.log(
+        output.log(
           `\n${fmt.boldGreen('✓')} Pen ${fmt.bold(displayTitle)} ${fmt.dim(`(${project.config.pen_id})`)} no longer exists on CodePen.`,
         );
       }
       if (auth.profile) {
-        console.log(`  Profile:  ${fmt.cyan(auth.profile)}`);
+        output.log(`  Profile:  ${fmt.cyan(auth.profile)}`);
       }
       if (keepConfig) {
-        console.log(
+        output.log(
           `  Retained: ${fmt.cyan(`${CODEPEN_DIR}/ and info in ${PROJECT_CONFIG_FILENAME}`)} ${fmt.dim('(unlinked; local files were kept untouched)')}`,
         );
       } else {
-        console.log(
+        output.log(
           `  Removed:  ${fmt.cyan(removedSummary)} ${fmt.dim('(local files were kept untouched)')}`,
         );
       }
       if (trashItem && !purgedFromTrash) {
-        console.log(`  Restore:  ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
+        output.log(`  Restore:  ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
       }
     }
 
@@ -355,16 +372,18 @@ export async function deletePenCommand(
       throw new CliError(400, 'Refusing to delete Pen in non-interactive mode without --yes.');
     }
 
-    console.log(`\n${fmt.yellow('About to delete online Pen:')}`);
-    console.log(`  Title:   ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}`);
+    output.log(`\n${fmt.yellow('About to delete online Pen:')}`);
+    output.log(`  Title:   ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}`);
     if (auth.profile) {
-      console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+      output.log(`  Profile: ${fmt.cyan(auth.profile)}`);
     }
-    console.log(`  Editor:  ${fmt.cyan(pen.urls.editor)}`);
+    output.log(`  Editor:  ${fmt.cyan(pen.urls.editor)}`);
     if (pen.deployment) {
-      console.log(`  Live:    ${fmt.yellow(pen.deployment.url)} ${fmt.dim('(will also be taken down)')}`);
+      output.log(
+        `  Live:    ${fmt.yellow(pen.deployment.url)} ${fmt.dim('(will also be taken down)')}`,
+      );
     }
-    console.log(
+    output.log(
       fmt.dim(
         keepConfig
           ? `\nLocal files and ${CODEPEN_DIR}/ will stay untouched; only the "info" section will be kept in ${PROJECT_CONFIG_FILENAME} after deletion succeeds.`
@@ -379,7 +398,7 @@ export async function deletePenCommand(
       false,
     );
     if (!ok) {
-      console.log('Aborted.');
+      output.log('Aborted.');
       return null;
     }
   }
@@ -437,6 +456,7 @@ export async function deletePenCommand(
           info: retainedInfo,
           restore_url: CODEPEN_DELETED_ITEMS_URL,
         },
+        output,
       );
     } else {
       printJsonResponse(
@@ -454,26 +474,29 @@ export async function deletePenCommand(
           info_retained: false,
           restore_url: CODEPEN_DELETED_ITEMS_URL,
         },
+        output,
       );
     }
   } else {
-    console.log(
+    output.log(
       `\n${fmt.green('✓')} Deleted ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)} on CodePen ${fmt.dim('(moved to Deleted Items; restorable for 3 days)')}`,
     );
     if (keepConfig) {
       if (auth.profile) {
-        console.log(`  Profile:  ${fmt.cyan(auth.profile)}`);
+        output.log(`  Profile:  ${fmt.cyan(auth.profile)}`);
       }
-      console.log(
+      output.log(
         `  Retained: ${fmt.cyan(`${CODEPEN_DIR}/ and info in ${PROJECT_CONFIG_FILENAME}`)} ${fmt.dim('(unlinked; local files were kept untouched)')}`,
       );
-      console.log(`  Restore:  ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
+      output.log(`  Restore:  ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
     } else {
       if (auth.profile) {
-        console.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+        output.log(`  Profile: ${fmt.cyan(auth.profile)}`);
       }
-      console.log(`  Removed: ${fmt.cyan(removedSummary)} ${fmt.dim('(local files were kept untouched)')}`);
-      console.log(`  Restore: ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
+      output.log(
+        `  Removed: ${fmt.cyan(removedSummary)} ${fmt.dim('(local files were kept untouched)')}`,
+      );
+      output.log(`  Restore: ${fmt.dim(CODEPEN_DELETED_ITEMS_URL)}`);
     }
   }
 
@@ -508,7 +531,7 @@ export function registerDeleteCommand(program: Command): void {
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Output deletion result as JSON')
     .action(async (options: DeleteCliOptions, command: Command) => {
-      await deletePenCommand({
+      await runDeleteCommand({
         yes: options.yes,
         keepConfig: options.keepConfig,
         keepInfo: options.keepInfo,

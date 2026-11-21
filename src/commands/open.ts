@@ -1,30 +1,33 @@
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
+import type { Deployment, Pen, PenDomain } from '../api/types.js';
 import type { ResolvedAuth } from '../config/auth.js';
 import { type ProjectLocation, requireProject } from '../config/project.js';
-import type { Deployment, Pen, PenDomain } from '../types.js';
+import { CliError } from '../errors.js';
 import { openBrowser } from '../utils/browser.js';
 import { fmt } from '../utils/format.js';
-import { isInteractive, promptSelect, type SelectOption } from '../utils/prompts.js';
-import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
+import { defaultOutput, type CommandOutput } from '../utils/output.js';
+import { isInteractive, promptSelect, type SelectOption } from '../utils/prompts/index.js';
+import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
 import {
   fetchLinkedPenOrHandleMissing,
   type MissingPenPrompts,
-} from './missing-pen.js';
+} from '../workflows/missing-pen.js';
 
-export interface OpenOptions {
+export interface OpenCliOptions {
   preview?: boolean;
   deploy?: boolean;
   live?: boolean;
 }
 
-export interface OpenPenCommandOptions extends OpenOptions {
+export interface RunOpenCommandOptions extends OpenCliOptions {
   cwd?: string;
   explicitProfile?: string;
   baseUrl?: string;
   interactive?: boolean;
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
+  output?: CommandOutput;
   select?: <T extends string>(
     question: string,
     options: SelectOption<T>[],
@@ -34,7 +37,7 @@ export interface OpenPenCommandOptions extends OpenOptions {
   openBrowserImpl?: (url: string) => Promise<boolean>;
 }
 
-export interface OpenPenResult {
+export interface OpenCommandResult {
   url: string;
   label: string;
   launched: boolean;
@@ -131,12 +134,13 @@ export function buildDeployedDomainChoices(
   return choices;
 }
 
-export async function openPenCommand(
-  options: OpenPenCommandOptions = {},
-): Promise<OpenPenResult | null> {
+export async function runOpenCommand(
+  options: RunOpenCommandOptions = {},
+): Promise<OpenCommandResult | null> {
+  const output = options.output ?? defaultOutput;
   const openDeployed = Boolean(options.deploy || options.live);
   if (options.preview && openDeployed) {
-    throw new Error('Specify at most one of --preview or --deploy / --live.');
+    throw new CliError(400, 'Specify at most one of --preview or --deploy / --live.');
   }
 
   const cwd = options.cwd ?? process.cwd();
@@ -149,6 +153,7 @@ export async function openPenCommand(
     explicitProfile: options.explicitProfile,
     project,
     interactive,
+    output,
     env: options.env,
     homeDir: options.homeDir,
   });
@@ -160,6 +165,7 @@ export async function openPenCommand(
     auth,
     commandName: 'open',
     interactive,
+    output,
     prompts: options.prompts ?? { select: selectImpl },
   });
   if (!penLookup.found) {
@@ -176,7 +182,7 @@ export async function openPenCommand(
 
   if (openDeployed) {
     if (!pen.deployment) {
-      throw new Error('This Pen is not deployed yet. Run `cdpn deploy` first.');
+      throw new CliError(404, 'This Pen is not deployed yet. Run `cdpn deploy` first.');
     }
 
     const choices = buildDeployedDomainChoices(pen.deployment, domains);
@@ -197,8 +203,10 @@ export async function openPenCommand(
           .slice(1)
           .map((c) => c.url)
           .join(', ');
-        console.log(
-          fmt.dim(`Deployed to multiple domains; opening default URL (other domains: ${otherUrls}).`),
+        output.log(
+          fmt.dim(
+            `Deployed to multiple domains; opening default URL (other domains: ${otherUrls}).`,
+          ),
         );
       }
     } else {
@@ -214,10 +222,10 @@ export async function openPenCommand(
     label = 'editor';
   }
 
-  console.log(`Opening ${label}: ${fmt.cyan(targetUrl)}`);
+  output.log(`Opening ${label}: ${fmt.cyan(targetUrl)}`);
   const launched = await openBrowserImpl(targetUrl);
   if (!launched) {
-    console.log(fmt.yellow('Could not launch browser automatically. Open the URL above manually.'));
+    output.log(fmt.yellow('Could not launch browser automatically. Open the URL above manually.'));
   }
 
   return {
@@ -235,10 +243,13 @@ export function registerOpenCommand(program: Command): void {
     .command('open')
     .description('Open the Pen in your browser (editor by default, or --preview / --deploy)')
     .option('-p, --preview', 'Open the saved head preview URL')
-    .option('-d, --deploy', 'Open the deployed URL (prompts to choose when multiple domains exist)')
+    .option(
+      '-d, --deploy',
+      'Open the deployed URL (prompts to choose when multiple domains exist)',
+    )
     .option('-l, --live', 'Alias for --deploy')
-    .action(async (options: OpenOptions, command: Command) => {
-      await openPenCommand({
+    .action(async (options: OpenCliOptions, command: Command) => {
+      await runOpenCommand({
         preview: options.preview,
         deploy: options.deploy,
         live: options.live,

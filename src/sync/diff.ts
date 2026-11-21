@@ -1,4 +1,5 @@
-import type { PenFile, SyncedFileEntry } from '../types.js';
+import type { PenFile } from '../api/types.js';
+import type { SyncedFileEntry } from '../config/project.js';
 import type { LocalFile } from './fs.js';
 
 export interface DiffItem {

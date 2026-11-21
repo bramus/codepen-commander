@@ -1,7 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { PROJECT_CONFIG_FILENAME, readProjectConfigFile } from '../config/project.js';
-import { CODEPEN_DIR, PEN_CONFIG_FILENAME, isWithinRoot, readPenBlocks, type PenBlockContext } from './blocks.js';
+import { readProjectConfigFile } from '../config/project.js';
+import { CODEPEN_DIR, PEN_CONFIG_FILENAME, PROJECT_CONFIG_FILENAME } from '../constants.js';
+import { resolveSafeDir, resolveSafeFile } from '../utils/fs-safe.js';
+import { readPenBlocks, type PenBlockContext } from './blocks/index.js';
 
 export type DirectoryMode = 'pen' | 'collection';
 
@@ -20,28 +22,6 @@ export interface DirectoryInspection {
   penBlocks: PenBlockContext | null;
 }
 
-async function statRegularFile(filePath: string, rootRealpath: string): Promise<boolean> {
-  try {
-    const stat = await fs.lstat(filePath);
-    if (stat.isSymbolicLink() || !stat.isFile()) return false;
-    const real = await fs.realpath(filePath);
-    return isWithinRoot(real, rootRealpath);
-  } catch {
-    return false;
-  }
-}
-
-async function statRegularDir(dirPath: string, rootRealpath: string): Promise<boolean> {
-  try {
-    const stat = await fs.lstat(dirPath);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
-    const real = await fs.realpath(dirPath);
-    return isWithinRoot(real, rootRealpath);
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Inspects a directory directly (does not walk upward) to classify whether it is a
  * CodePen Pen folder (`.cdpn.json`) or a multi-Pen collection directory.
@@ -50,14 +30,19 @@ export async function inspectTargetDirectory(targetDir: string): Promise<Directo
   const resolved = path.resolve(targetDir);
   const rootRealpath = await fs.realpath(resolved);
 
-  const [hasCdpnJson, hasCodepenDir, hasPenConfig, hasIndexHtml, hasClassicPenHtml] =
-    await Promise.all([
-      statRegularFile(path.join(rootRealpath, PROJECT_CONFIG_FILENAME), rootRealpath),
-      statRegularDir(path.join(rootRealpath, CODEPEN_DIR), rootRealpath),
-      statRegularFile(path.join(rootRealpath, CODEPEN_DIR, PEN_CONFIG_FILENAME), rootRealpath),
-      statRegularFile(path.join(rootRealpath, 'index.html'), rootRealpath),
-      statRegularFile(path.join(rootRealpath, 'index.pen.html'), rootRealpath),
-    ]);
+  const [cdpnJson, codepenDir, penConfig, indexHtml, classicPenHtml] = await Promise.all([
+    resolveSafeFile(path.join(rootRealpath, PROJECT_CONFIG_FILENAME), rootRealpath),
+    resolveSafeDir(path.join(rootRealpath, CODEPEN_DIR), rootRealpath),
+    resolveSafeFile(path.join(rootRealpath, CODEPEN_DIR, PEN_CONFIG_FILENAME), rootRealpath),
+    resolveSafeFile(path.join(rootRealpath, 'index.html'), rootRealpath),
+    resolveSafeFile(path.join(rootRealpath, 'index.pen.html'), rootRealpath),
+  ]);
+
+  const hasCdpnJson = Boolean(cdpnJson);
+  const hasCodepenDir = Boolean(codepenDir);
+  const hasPenConfig = Boolean(penConfig);
+  const hasIndexHtml = Boolean(indexHtml);
+  const hasClassicPenHtml = Boolean(classicPenHtml);
 
   let cdpnState: CdpnJsonState = 'none';
   let penTitle: string | null = null;

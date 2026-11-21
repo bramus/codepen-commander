@@ -1,4 +1,4 @@
-import type { ApiErrorBody } from '../types.js';
+import type { ApiErrorBody } from './types.js';
 
 export class CodePenApiError extends Error {
   public readonly status: number;

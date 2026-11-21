@@ -1,4 +1,9 @@
 import path from 'node:path';
+import { MAX_FILE_BYTES, MAX_MULTIPART_BYTES } from '../constants.js';
+import { CliError } from '../errors.js';
+import { extractPenIdFromUrl } from '../utils/codepen-url.js';
+import { isLoopbackHost } from '../utils/strings.js';
+import { CodePenApiError } from './errors.js';
 import type {
   ApiErrorBody,
   BinaryUploadPart,
@@ -20,18 +25,12 @@ import type {
   SettingsUpdateRequest,
   TrashItem,
   Version,
-} from '../types.js';
-import { extractPenIdFromUrl } from '../config/project.js';
-import { CodePenApiError } from './errors.js';
+} from './types.js';
 
 export const DEFAULT_API_BASE_URL = 'https://api.codepen.io';
 
 /** Conservative threshold (12 MB) under CodePen's 16 MB JSON body limit before switching to multipart. */
 const JSON_BODY_LIMIT_BYTES = 12 * 1024 * 1024;
-/** CodePen's documented max multipart request size (120 MB). */
-export const MAX_MULTIPART_BYTES = 120 * 1024 * 1024;
-/** CodePen's documented max single file size (30 MB). */
-export const MAX_FILE_BYTES = 30 * 1024 * 1024;
 
 export interface CodePenClientOptions {
   apiKey: string;
@@ -45,23 +44,62 @@ export interface SettleBuildOptions {
   onUpdate?: (build: Build) => void;
 }
 
-function isLocalLoopbackHost(hostname: string): boolean {
-  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]';
-}
-
 function validateApiBaseUrl(rawUrl: string): URL {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
   } catch {
-    throw new Error(`Invalid API base URL: ${rawUrl}`);
+    throw new CliError(400, `Invalid API base URL: ${rawUrl}`);
   }
 
-  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLocalLoopbackHost(parsed.hostname))) {
-    throw new Error(`Refusing non-HTTPS API base URL: ${rawUrl}`);
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname))) {
+    throw new CliError(400, `Refusing non-HTTPS API base URL: ${rawUrl}`);
   }
 
   return parsed;
+}
+
+async function throwApiError(response: Response): Promise<never> {
+  let parsedBody: Partial<ApiErrorBody> & { error?: string } = {};
+  try {
+    const text = await response.text();
+    if (text) {
+      parsedBody = JSON.parse(text) as Partial<ApiErrorBody> & { error?: string };
+    }
+  } catch {
+    // Non-JSON error body; keep fallback status message
+  }
+  throw new CodePenApiError(response.status, parsedBody);
+}
+
+function appendBinaryPartsToForm(
+  form: FormData,
+  binaryFiles: BinaryUploadPart[],
+  initialBytes: number,
+): void {
+  let totalBytes = initialBytes;
+  for (const part of binaryFiles) {
+    if (part.content.length === 0) {
+      throw new CliError(
+        400,
+        `Empty binary upload part is not allowed for ${part.path}; send empty files as text.`,
+      );
+    }
+    if (part.content.length > MAX_FILE_BYTES) {
+      throw new CliError(400, `File ${part.path} exceeds CodePen's 30 MB per-file limit.`);
+    }
+    totalBytes += part.content.length;
+    if (totalBytes > MAX_MULTIPART_BYTES) {
+      throw new CliError(400, `Upload exceeds CodePen's 120 MB multipart request limit.`);
+    }
+    const normalizedPath = part.path.startsWith('/') ? part.path : `/${part.path}`;
+    const filename = path.posix.basename(normalizedPath);
+    form.append(
+      normalizedPath,
+      new Blob([new Uint8Array(part.content)], { type: 'application/octet-stream' }),
+      filename,
+    );
+  }
 }
 
 export function parseLinkHeader(header: string | null): PaginatedResult<unknown>['links'] {
@@ -91,7 +129,7 @@ export class CodePenClient {
 
   constructor(options: CodePenClientOptions) {
     if (!options.apiKey || !options.apiKey.trim()) {
-      throw new Error('A CodePen API key is required.');
+      throw new CliError(401, 'A CodePen API key is required.');
     }
     this.apiKey = options.apiKey.trim();
     this.baseUrl = validateApiBaseUrl(options.baseUrl ?? DEFAULT_API_BASE_URL);
@@ -123,7 +161,7 @@ export class CodePenClient {
     if (endpointOrUrl.startsWith('http://') || endpointOrUrl.startsWith('https://')) {
       const parsed = new URL(endpointOrUrl);
       if (parsed.origin !== this.baseUrl.origin) {
-        throw new Error(`Refusing to send API credentials to unexpected origin: ${parsed.origin}`);
+        throw new CliError(400, `Refusing to send API credentials to unexpected origin: ${parsed.origin}`);
       }
       targetUrl = parsed.toString();
     } else {
@@ -150,16 +188,7 @@ export class CodePenClient {
     });
 
     if (!response.ok) {
-      let parsedBody: Partial<ApiErrorBody> & { error?: string } = {};
-      try {
-        const text = await response.text();
-        if (text) {
-          parsedBody = JSON.parse(text) as Partial<ApiErrorBody> & { error?: string };
-        }
-      } catch {
-        // Non-JSON error body; keep fallback status message
-      }
-      throw new CodePenApiError(response.status, parsedBody);
+      await throwApiError(response);
     }
 
     return response;
@@ -176,6 +205,16 @@ export class CodePenClient {
   ): Promise<T> {
     const response = await this.requestRaw(method, endpointOrUrl, options);
     return (await response.json()) as T;
+  }
+
+  private async requestPaginated<T>(
+    endpointOrUrl: string,
+    query?: Record<string, string | number | boolean | undefined>,
+  ): Promise<PaginatedResult<T>> {
+    const response = await this.requestRaw('GET', endpointOrUrl, { query });
+    const items = (await response.json()) as T[];
+    const links = parseLinkHeader(response.headers.get('link'));
+    return { items, links };
   }
 
   /**
@@ -197,34 +236,26 @@ export class CodePenClient {
   }
 
   public async listPens(params: ListPensParams = {}): Promise<PaginatedResult<Pen>> {
-    const response = await this.requestRaw('GET', '/v2/pens', {
-      query: {
-        page: params.page,
-        per_page: params.per_page,
-        sort: params.sort,
-        direction: params.direction,
-        access: params.access,
-        deployed: params.deployed,
-        template: params.template,
-        forks: params.forks,
-        editor: params.editor,
-        tags: params.tags,
-        search_term: params.search_term,
-        untitled: params.untitled,
-        block: params.block,
-        cursor: params.cursor,
-      },
+    return this.requestPaginated<Pen>('/v2/pens', {
+      page: params.page,
+      per_page: params.per_page,
+      sort: params.sort,
+      direction: params.direction,
+      access: params.access,
+      deployed: params.deployed,
+      template: params.template,
+      forks: params.forks,
+      editor: params.editor,
+      tags: params.tags,
+      search_term: params.search_term,
+      untitled: params.untitled,
+      block: params.block,
+      cursor: params.cursor,
     });
-    const items = (await response.json()) as Pen[];
-    const links = parseLinkHeader(response.headers.get('link'));
-    return { items, links };
   }
 
   public async listPensPageByUrl(nextUrl: string): Promise<PaginatedResult<Pen>> {
-    const response = await this.requestRaw('GET', nextUrl);
-    const items = (await response.json()) as Pen[];
-    const links = parseLinkHeader(response.headers.get('link'));
-    return { items, links };
+    return this.requestPaginated<Pen>(nextUrl);
   }
 
   public async getPen(penIdOrUrl: string): Promise<Pen> {
@@ -246,23 +277,7 @@ export class CodePenClient {
     const form = new FormData();
     const { wait, ...penBody } = payload;
     form.append('pen', JSON.stringify(penBody));
-
-    let totalBytes = Buffer.byteLength(jsonString, 'utf8');
-    for (const part of binaryFiles) {
-      if (part.content.length === 0) {
-        throw new Error(`Empty binary upload part is not allowed for ${part.path}; send empty files as text.`);
-      }
-      if (part.content.length > MAX_FILE_BYTES) {
-        throw new Error(`File ${part.path} exceeds CodePen's 30 MB per-file limit.`);
-      }
-      totalBytes += part.content.length;
-      if (totalBytes > MAX_MULTIPART_BYTES) {
-        throw new Error(`Upload exceeds CodePen's 120 MB multipart request limit.`);
-      }
-      const normalizedPath = part.path.startsWith('/') ? part.path : `/${part.path}`;
-      const filename = path.posix.basename(normalizedPath);
-      form.append(normalizedPath, new Blob([new Uint8Array(part.content)], { type: 'application/octet-stream' }), filename);
-    }
+    appendBinaryPartsToForm(form, binaryFiles, Buffer.byteLength(jsonString, 'utf8'));
 
     return this.requestJson<Pen>('POST', '/v2/pens', {
       query: wait !== undefined ? { wait } : undefined,
@@ -285,29 +300,21 @@ export class CodePenClient {
   }
 
   public async listTrash(params: ListTrashParams = {}): Promise<PaginatedResult<TrashItem>> {
-    const response = await this.requestRaw('GET', '/v2/trash', {
-      query: {
-        page: params.page,
-        per_page: params.per_page,
-        sort: params.sort,
-        direction: params.direction,
-      },
+    return this.requestPaginated<TrashItem>('/v2/trash', {
+      page: params.page,
+      per_page: params.per_page,
+      sort: params.sort,
+      direction: params.direction,
     });
-    const items = (await response.json()) as TrashItem[];
-    const links = parseLinkHeader(response.headers.get('link'));
-    return { items, links };
   }
 
   public async listTrashPageByUrl(nextUrl: string): Promise<PaginatedResult<TrashItem>> {
-    const response = await this.requestRaw('GET', nextUrl);
-    const items = (await response.json()) as TrashItem[];
-    const links = parseLinkHeader(response.headers.get('link'));
-    return { items, links };
+    return this.requestPaginated<TrashItem>(nextUrl);
   }
 
   /**
    * Searches CodePen Trash (`GET /v2/trash`) for a trashed Pen matching any of the given IDs.
-   * Returns `null` if not found (or if the trash endpoint is unavailable).
+   * Returns `null` if not found.
    */
   public async findTrashedPen(penIdOrIds: string | string[], maxPages = 10): Promise<TrashItem | null> {
     const candidates = new Set(
@@ -382,27 +389,12 @@ export class CodePenClient {
       ...changesRest,
       ...(expected_version_id ? { expected_version_id } : {}),
     };
-    form.append('changes', JSON.stringify(changesBody));
+    const changesJson = JSON.stringify(changesBody);
+    form.append('changes', changesJson);
     if (expected_version_id) {
       form.append('expected_version_id', expected_version_id);
     }
-
-    let totalBytes = Buffer.byteLength(JSON.stringify(changesBody), 'utf8');
-    for (const part of binaryFiles) {
-      if (part.content.length === 0) {
-        throw new Error(`Empty binary upload part is not allowed for ${part.path}; send empty files as text.`);
-      }
-      if (part.content.length > MAX_FILE_BYTES) {
-        throw new Error(`File ${part.path} exceeds CodePen's 30 MB per-file limit.`);
-      }
-      totalBytes += part.content.length;
-      if (totalBytes > MAX_MULTIPART_BYTES) {
-        throw new Error(`Upload exceeds CodePen's 120 MB multipart request limit.`);
-      }
-      const normalizedPath = part.path.startsWith('/') ? part.path : `/${part.path}`;
-      const filename = path.posix.basename(normalizedPath);
-      form.append(normalizedPath, new Blob([new Uint8Array(part.content)], { type: 'application/octet-stream' }), filename);
-    }
+    appendBinaryPartsToForm(form, binaryFiles, Buffer.byteLength(changesJson, 'utf8'));
 
     return this.requestJson<FilesWriteResult>('PUT', `/v2/pens/${encodePenId(penId)}/files`, {
       query: {
@@ -422,16 +414,16 @@ export class CodePenClient {
     try {
       parsed = new URL(downloadUrl);
     } catch {
-      throw new Error(`Invalid download URL: ${downloadUrl}`);
+      throw new CliError(400, `Invalid download URL: ${downloadUrl}`);
     }
 
     const isAllowedLocalMock =
       this.baseUrl.protocol === 'http:' &&
-      isLocalLoopbackHost(this.baseUrl.hostname) &&
+      isLoopbackHost(this.baseUrl.hostname) &&
       parsed.origin === this.baseUrl.origin;
 
     if (parsed.protocol !== 'https:' && !isAllowedLocalMock) {
-      throw new Error(`Refusing to download file over insecure protocol: ${parsed.protocol}`);
+      throw new CliError(400, `Refusing to download file over insecure protocol: ${parsed.protocol}`);
     }
 
     const response = await this.fetchImpl(parsed.toString(), {
@@ -439,16 +431,7 @@ export class CodePenClient {
     });
 
     if (!response.ok) {
-      let parsedBody: Partial<ApiErrorBody> & { error?: string } = {};
-      try {
-        const text = await response.text();
-        if (text) {
-          parsedBody = JSON.parse(text) as Partial<ApiErrorBody> & { error?: string };
-        }
-      } catch {
-        // Ignore non-JSON error
-      }
-      throw new CodePenApiError(response.status, parsedBody);
+      await throwApiError(response);
     }
 
     const arrayBuffer = await response.arrayBuffer();
@@ -460,17 +443,12 @@ export class CodePenClient {
   }
 
   public async listVersions(penId: string, params: ListVersionsParams = {}): Promise<PaginatedResult<Version>> {
-    const response = await this.requestRaw('GET', `/v2/pens/${encodePenId(penId)}/versions`, {
-      query: {
-        page: params.page,
-        per_page: params.per_page,
-        sort: params.sort,
-        direction: params.direction,
-      },
+    return this.requestPaginated<Version>(`/v2/pens/${encodePenId(penId)}/versions`, {
+      page: params.page,
+      per_page: params.per_page,
+      sort: params.sort,
+      direction: params.direction,
     });
-    const items = (await response.json()) as Version[];
-    const links = parseLinkHeader(response.headers.get('link'));
-    return { items, links };
   }
 
   public async restoreVersion(penId: string, versionId: string, label?: string): Promise<Pen> {
@@ -510,7 +488,8 @@ export class CodePenClient {
       }
 
       if (Date.now() - started > maxPollTimeMs) {
-        throw new Error(
+        throw new CliError(
+          504,
           `Timed out waiting for build ${current.id} to settle (last status: ${current.status}).`,
         );
       }

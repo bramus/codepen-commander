@@ -1,12 +1,14 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { getConfiguredShellDir } from '../config/auth.js';
+import { getConfiguredShellDir } from '../config/user-store.js';
+import { CliError } from '../errors.js';
+import { isWithinRoot, resolveSafeFile } from '../utils/fs-safe.js';
 import { escapeHtml } from '../utils/html.js';
-import { CliError } from '../utils/json.js';
-import { isWithinRoot } from './blocks.js';
-import { formatFolderTitle } from './manifest.js';
+import { resolveBuiltinShellDir } from '../utils/package-paths.js';
+import { formatFolderTitle, hasControlChars } from '../utils/strings.js';
+
+export { resolveBuiltinShellDir };
 
 export const CORE_SHELL_FILES = ['index.html', 'styles.css', 'scripts.js'] as const;
 
@@ -14,7 +16,6 @@ export const DEFAULT_SITE_SUBTITLE = 'A collection of self-contained web demos.'
 export const DEFAULT_SITE_FOOTER = 'Powered by codepen-commander.';
 export const CODEPEN_COMMANDER_NPM_URL = 'https://www.npmjs.com/package/codepen-commander';
 
-const CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
 const MAX_SHELL_WALK_DEPTH = 8;
 
 export interface SiteMetadata {
@@ -55,40 +56,6 @@ export function expandHomePath(rawPath: string, homeDir?: string): string {
     return path.join(resolvedHome, trimmed.slice(2));
   }
   return trimmed;
-}
-
-/**
- * Resolves the packaged built-in `shell/` directory reliably across:
- * - published/compiled `dist/site/shell.js` -> `dist/shell`
- * - local `src/site/shell.ts` -> `<repo>/shell`
- * - test builds `.test-dist/src/site/shell.js` -> `<repo>/shell`
- */
-export async function resolveBuiltinShellDir(): Promise<{ dir: string; realpath: string }> {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
-
-  const candidates = [
-    path.resolve(__dirname, '..', 'shell'),
-    path.resolve(__dirname, '..', '..', 'shell'),
-    path.resolve(__dirname, '..', '..', '..', 'shell'),
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      const stat = await fs.stat(path.join(candidate, 'index.html'));
-      if (stat.isFile()) {
-        const realpath = await fs.realpath(candidate);
-        return { dir: candidate, realpath };
-      }
-    } catch {
-      // Try next candidate
-    }
-  }
-
-  throw new CliError(
-    500,
-    'Built-in shell assets could not be located in the codepen-commander package.',
-  );
 }
 
 /**
@@ -147,7 +114,7 @@ export async function validateShellDir(
   options: { cwd?: string; homeDir?: string; sourceLabel?: string } = {},
 ): Promise<ValidatedShellDir> {
   const trimmed = rawPath.trim();
-  if (!trimmed || CONTROL_CHAR_PATTERN.test(trimmed)) {
+  if (!trimmed || hasControlChars(trimmed)) {
     throw new CliError(400, 'Shell directory path cannot be empty or contain control characters.');
   }
 
@@ -272,39 +239,26 @@ export async function resolveShellAssetForRequest(
   const relPosix = segments.join('/');
   const isIndexHtml = relPosix === 'index.html';
 
-  async function tryResolveIn(rootRealpath: string): Promise<string | null> {
-    const candidate = path.resolve(rootRealpath, ...segments);
-    if (!isWithinRoot(candidate, rootRealpath)) return null;
-    let lstat;
-    try {
-      lstat = await fs.lstat(candidate);
-    } catch {
-      return null;
-    }
-    if (lstat.isSymbolicLink() || !lstat.isFile()) return null;
-    try {
-      const real = await fs.realpath(candidate);
-      if (!isWithinRoot(real, rootRealpath)) return null;
-      return real;
-    } catch {
-      return null;
-    }
-  }
-
-  const primary = await tryResolveIn(shell.realpath);
+  const primary = await resolveSafeFile(
+    path.resolve(shell.realpath, ...segments),
+    shell.realpath,
+  );
   if (primary) {
     return {
-      filePath: primary,
+      filePath: primary.realPath,
       fromBuiltin: shell.source === 'builtin',
       isIndexHtml,
     };
   }
 
   if (shell.source !== 'builtin' && (CORE_SHELL_FILES as readonly string[]).includes(relPosix)) {
-    const fallback = await tryResolveIn(shell.builtinRealpath);
+    const fallback = await resolveSafeFile(
+      path.resolve(shell.builtinRealpath, ...segments),
+      shell.builtinRealpath,
+    );
     if (fallback) {
       return {
-        filePath: fallback,
+        filePath: fallback.realPath,
         fromBuiltin: true,
         isIndexHtml,
       };

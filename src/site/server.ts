@@ -1,15 +1,14 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { PROJECT_CONFIG_FILENAME } from '../config/project.js';
-import { CliError } from '../utils/json.js';
+import { PEN_HTML_SUFFIX, PROJECT_CONFIG_FILENAME } from '../constants.js';
+import { CliError } from '../errors.js';
+import { isWithinRoot, resolveSafeDir, resolveSafeFile } from '../utils/fs-safe.js';
 import {
-  PEN_HTML_SUFFIX,
-  isWithinRoot,
   resolveServedHtmlWithBlocks,
   resolveUnsupportedBlocksPage,
   resolveVirtualClassicHtml,
-} from './blocks.js';
+} from './blocks/index.js';
 import {
   classifyDirectoryMode,
   inspectTargetDirectory,
@@ -108,6 +107,26 @@ export function parseServePort(
   return parsed;
 }
 
+function sendBuffer(
+  req: IncomingMessage,
+  res: ServerResponse,
+  statusCode: number,
+  content: Buffer,
+  contentType: string,
+  headers: Record<string, string>,
+): void {
+  res.writeHead(statusCode, {
+    ...headers,
+    'Content-Type': contentType,
+    'Content-Length': content.byteLength,
+  });
+  if (req.method === 'HEAD') {
+    res.end();
+  } else {
+    res.end(content);
+  }
+}
+
 function sendError(
   res: ServerResponse,
   statusCode: number,
@@ -137,23 +156,60 @@ async function hasEnclosingCdpnJson(
 ): Promise<boolean> {
   let current = path.resolve(dirRealpath);
   while (current !== rootRealpath && isWithinRoot(current, rootRealpath)) {
-    const candidate = path.join(current, PROJECT_CONFIG_FILENAME);
-    try {
-      const stat = await fs.lstat(candidate);
-      if (!stat.isSymbolicLink() && stat.isFile()) {
-        const real = await fs.realpath(candidate);
-        if (isWithinRoot(real, rootRealpath)) {
-          return true;
-        }
-      }
-    } catch {
-      // Check parent directory
+    const cdpnFile = await resolveSafeFile(
+      path.join(current, PROJECT_CONFIG_FILENAME),
+      rootRealpath,
+    );
+    if (cdpnFile) {
+      return true;
     }
     const parent = path.dirname(current);
     if (parent === current) break;
     current = parent;
   }
   return false;
+}
+
+async function resolveUnsupportedOrClassicHtml(options: {
+  dirRealpath: string;
+  requestedFilename: string;
+  rootRealpath: string;
+  isCollectionRoot: boolean;
+  includeClassicVirtual?: boolean;
+}): Promise<PathResolution | null> {
+  const {
+    dirRealpath,
+    requestedFilename,
+    rootRealpath,
+    isCollectionRoot,
+    includeClassicVirtual = true,
+  } = options;
+
+  const unsupportedPage = await resolveUnsupportedBlocksPage({
+    dirRealpath,
+    rootRealpath,
+    isRootServe: isCollectionRoot,
+  });
+  if (unsupportedPage) {
+    return {
+      status: 501,
+      errorHtml: unsupportedPage.html,
+      csp: unsupportedPage.csp,
+    };
+  }
+
+  if (includeClassicVirtual) {
+    const virtualHtml = await resolveVirtualClassicHtml({
+      dirRealpath,
+      requestedFilename,
+      rootRealpath,
+    });
+    if (virtualHtml !== null) {
+      return { status: 200, virtualHtml, contentType: MIME_TYPES['.html']! };
+    }
+  }
+
+  return null;
 }
 
 async function resolveSafePath(
@@ -194,41 +250,26 @@ async function resolveSafePath(
       const requestedFilename = segments.at(-1)!;
       const lowerFilename = requestedFilename.toLowerCase();
       if (lowerFilename.endsWith('.html') && !lowerFilename.endsWith(PEN_HTML_SUFFIX)) {
-        const parentDir = path.dirname(resolvedPath);
-        if (isWithinRoot(parentDir, rootDir)) {
+        const realParentDir = await resolveSafeDir(
+          path.dirname(resolvedPath),
+          rootRealpath,
+          rootDir,
+        );
+        if (realParentDir) {
+          if (
+            isCollectionRoot &&
+            !(await hasEnclosingCdpnJson(realParentDir, rootRealpath))
+          ) {
+            return { status: 404, message: 'Not Found' };
+          }
           try {
-            const parentStat = await fs.lstat(parentDir);
-            if (!parentStat.isSymbolicLink() && parentStat.isDirectory()) {
-              const realParentDir = await fs.realpath(parentDir);
-              if (isWithinRoot(realParentDir, rootRealpath)) {
-                if (
-                  isCollectionRoot &&
-                  !(await hasEnclosingCdpnJson(realParentDir, rootRealpath))
-                ) {
-                  return { status: 404, message: 'Not Found' };
-                }
-                const unsupportedPage = await resolveUnsupportedBlocksPage({
-                  dirRealpath: realParentDir,
-                  rootRealpath,
-                  isRootServe: isCollectionRoot,
-                });
-                if (unsupportedPage) {
-                  return {
-                    status: 501,
-                    errorHtml: unsupportedPage.html,
-                    csp: unsupportedPage.csp,
-                  };
-                }
-                const virtualHtml = await resolveVirtualClassicHtml({
-                  dirRealpath: realParentDir,
-                  requestedFilename,
-                  rootRealpath,
-                });
-                if (virtualHtml !== null) {
-                  return { status: 200, virtualHtml, contentType: MIME_TYPES['.html']! };
-                }
-              }
-            }
+            const fallback = await resolveUnsupportedOrClassicHtml({
+              dirRealpath: realParentDir,
+              requestedFilename,
+              rootRealpath,
+              isCollectionRoot,
+            });
+            if (fallback) return fallback;
           } catch {
             // Fall through to 404
           }
@@ -269,18 +310,14 @@ async function resolveSafePath(
 
     const canResolvePenBlocks = !isCollectionRoot || segments.length > 0;
     if (canResolvePenBlocks) {
-      const unsupportedPage = await resolveUnsupportedBlocksPage({
+      const unsupported = await resolveUnsupportedOrClassicHtml({
         dirRealpath: realDirPath,
+        requestedFilename: 'index.html',
         rootRealpath,
-        isRootServe: isCollectionRoot,
+        isCollectionRoot,
+        includeClassicVirtual: false,
       });
-      if (unsupportedPage) {
-        return {
-          status: 501,
-          errorHtml: unsupportedPage.html,
-          csp: unsupportedPage.csp,
-        };
-      }
+      if (unsupported) return unsupported;
     }
 
     const indexPath = path.join(resolvedPath, 'index.html');
@@ -337,18 +374,14 @@ async function resolveSafePath(
     lowerFilePath.endsWith('.html') &&
     !lowerFilePath.endsWith(PEN_HTML_SUFFIX)
   ) {
-    const unsupportedPage = await resolveUnsupportedBlocksPage({
+    const unsupported = await resolveUnsupportedOrClassicHtml({
       dirRealpath: path.dirname(realFilePath),
+      requestedFilename: path.basename(realFilePath),
       rootRealpath,
-      isRootServe: isCollectionRoot,
+      isCollectionRoot,
+      includeClassicVirtual: false,
     });
-    if (unsupportedPage) {
-      return {
-        status: 501,
-        errorHtml: unsupportedPage.html,
-        csp: unsupportedPage.csp,
-      };
-    }
+    if (unsupported) return unsupported;
   }
 
   return { status: 200, filePath: realFilePath, size: lstat.size };
@@ -471,18 +504,20 @@ export async function startDevServer(
     }
 
     // Serve in-memory demos.json at /demos.json in collection mode if not present on disk
-    if (result.status === 404 && isCollectionRoot && manifestWatcher && requestUrl.pathname === '/demos.json') {
-      const content = Buffer.from(manifestWatcher.getSerialized(), 'utf8');
-      res.writeHead(200, {
-        ...BUILTIN_SHELL_SECURITY_HEADERS,
-        'Content-Type': 'application/json; charset=utf-8',
-        'Content-Length': content.byteLength,
-      });
-      if (req.method === 'HEAD') {
-        res.end();
-      } else {
-        res.end(content);
-      }
+    if (
+      result.status === 404 &&
+      isCollectionRoot &&
+      manifestWatcher &&
+      requestUrl.pathname === '/demos.json'
+    ) {
+      sendBuffer(
+        req,
+        res,
+        200,
+        Buffer.from(manifestWatcher.getSerialized(), 'utf8'),
+        'application/json; charset=utf-8',
+        BUILTIN_SHELL_SECURITY_HEADERS,
+      );
       return;
     }
 
@@ -490,7 +525,6 @@ export async function startDevServer(
     if (result.status === 404 && isCollectionRoot && activeShell) {
       const shellAsset = await resolveShellAssetForRequest(requestUrl.pathname, activeShell);
       if (shellAsset) {
-        // Never overwrite an existing root index.html (handled by resolveSafePath returning 200 above)
         const ext = path.extname(shellAsset.filePath).toLowerCase();
         const contentType = MIME_TYPES[ext] ?? 'application/octet-stream';
         const securityHeaders = shellAsset.fromBuiltin
@@ -509,16 +543,7 @@ export async function startDevServer(
             content = await fs.readFile(shellAsset.filePath);
           }
 
-          res.writeHead(200, {
-            ...securityHeaders,
-            'Content-Type': contentType,
-            'Content-Length': content.byteLength,
-          });
-          if (req.method === 'HEAD') {
-            res.end();
-          } else {
-            res.end(content);
-          }
+          sendBuffer(req, res, 200, content, contentType, securityHeaders);
         } catch {
           sendError(res, 500, 'Internal Server Error');
         }
@@ -527,33 +552,29 @@ export async function startDevServer(
     }
 
     if (result.status === 501) {
-      const content = Buffer.from(result.errorHtml, 'utf8');
-      res.writeHead(501, {
-        ...BASE_SECURITY_HEADERS,
-        'Content-Security-Policy': result.csp,
-        'Content-Type': MIME_TYPES['.html']!,
-        'Content-Length': content.byteLength,
-      });
-      if (req.method === 'HEAD') {
-        res.end();
-      } else {
-        res.end(content);
-      }
+      sendBuffer(
+        req,
+        res,
+        501,
+        Buffer.from(result.errorHtml, 'utf8'),
+        MIME_TYPES['.html']!,
+        {
+          ...BASE_SECURITY_HEADERS,
+          'Content-Security-Policy': result.csp,
+        },
+      );
       return;
     }
 
     if (result.status === 200 && 'virtualHtml' in result) {
-      const content = Buffer.from(result.virtualHtml, 'utf8');
-      res.writeHead(200, {
-        ...BASE_SECURITY_HEADERS,
-        'Content-Type': result.contentType,
-        'Content-Length': content.byteLength,
-      });
-      if (req.method === 'HEAD') {
-        res.end();
-      } else {
-        res.end(content);
-      }
+      sendBuffer(
+        req,
+        res,
+        200,
+        Buffer.from(result.virtualHtml, 'utf8'),
+        result.contentType,
+        BASE_SECURITY_HEADERS,
+      );
       return;
     }
 
@@ -567,7 +588,10 @@ export async function startDevServer(
 
     try {
       let content: Buffer;
-      if (ext === '.html' && (!isCollectionRoot || path.dirname(result.filePath) !== inspection.rootRealpath)) {
+      if (
+        ext === '.html' &&
+        (!isCollectionRoot || path.dirname(result.filePath) !== inspection.rootRealpath)
+      ) {
         const blockResult = await resolveServedHtmlWithBlocks({
           filePath: result.filePath,
           rootRealpath: inspection.rootRealpath,
@@ -578,16 +602,7 @@ export async function startDevServer(
       } else {
         content = await fs.readFile(result.filePath);
       }
-      res.writeHead(200, {
-        ...BASE_SECURITY_HEADERS,
-        'Content-Type': contentType,
-        'Content-Length': content.byteLength,
-      });
-      if (req.method === 'HEAD') {
-        res.end();
-      } else {
-        res.end(content);
-      }
+      sendBuffer(req, res, 200, content, contentType, BASE_SECURITY_HEADERS);
     } catch {
       sendError(res, 500, 'Internal Server Error');
     }

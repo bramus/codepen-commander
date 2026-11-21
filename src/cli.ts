@@ -1,53 +1,36 @@
 #!/usr/bin/env node
 
 import fs from 'node:fs';
-import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command, CommanderError } from 'commander';
 import { isCodePenApiError } from './api/errors.js';
-import { registerAuthCommands } from './commands/auth.js';
+import { registerAuthCommand } from './commands/auth/index.js';
 import { registerBuildCommand } from './commands/build.js';
 import { registerCloneCommand } from './commands/clone.js';
 import { registerDeleteCommand } from './commands/delete.js';
-import { registerDeployCommands } from './commands/deploy.js';
+import { registerDeployCommand } from './commands/deploy.js';
 import { registerDomainsCommand } from './commands/domains.js';
 import { registerForkCommand } from './commands/fork.js';
+import { registerInfoCommand } from './commands/info.js';
 import { registerInitCommand } from './commands/init.js';
 import { registerListCommand } from './commands/list.js';
-import { registerMetaCommands } from './commands/meta.js';
 import { registerNewCommand } from './commands/new.js';
 import { registerOpenCommand } from './commands/open.js';
 import { registerPrivacyCommand } from './commands/privacy.js';
 import { registerPullCommand } from './commands/pull.js';
 import { registerPushCommand } from './commands/push.js';
+import { registerRollbackCommand } from './commands/rollback.js';
 import { registerServeCommand } from './commands/serve.js';
-import { registerShellCommands } from './commands/shell.js';
+import { registerSettingsCommand } from './commands/settings.js';
+import { registerShellCommand } from './commands/shell.js';
 import { registerStatusCommand } from './commands/status.js';
+import { registerUndeployCommand } from './commands/undeploy.js';
 import { registerUnlinkCommand } from './commands/unlink.js';
-import { registerVersionCommands } from './commands/versions.js';
+import { registerVersionsCommand } from './commands/versions.js';
 import { fmt } from './utils/format.js';
 import { errorToJsonEnvelope, wantsJsonOutput } from './utils/json.js';
-import { isPromptCancelledError } from './utils/prompts.js';
-
-function readPackageVersion(): string {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
-  // Works both in published dist/ (package.json beside cli.js) and local dev (../package.json)
-  const candidates = [
-    path.join(__dirname, 'package.json'),
-    path.join(__dirname, '..', 'package.json'),
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(candidate, 'utf8')) as { version?: string };
-      if (pkg.version) return pkg.version;
-    } catch {
-      // Try next candidate
-    }
-  }
-  return '0.0.0';
-}
+import { readPackageVersion } from './utils/package-paths.js';
+import { isPromptCanceledError } from './utils/prompts/index.js';
 
 export function createProgram(): Command {
   const program = new Command();
@@ -58,14 +41,15 @@ export function createProgram(): Command {
     .version(readPackageVersion(), '-v, --version')
     .option('--profile <name>', 'Use a specific API key profile from ~/.cdpn');
 
-  registerAuthCommands(program);
+  registerAuthCommand(program);
   registerInitCommand(program);
   registerCloneCommand(program);
   registerForkCommand(program);
   registerPullCommand(program);
   registerStatusCommand(program);
   registerPushCommand(program);
-  registerDeployCommands(program);
+  registerDeployCommand(program);
+  registerUndeployCommand(program);
   registerDomainsCommand(program);
   registerNewCommand(program);
   registerPrivacyCommand(program);
@@ -73,11 +57,13 @@ export function createProgram(): Command {
   registerUnlinkCommand(program);
   registerOpenCommand(program);
   registerListCommand(program);
-  registerVersionCommands(program);
-  registerMetaCommands(program);
+  registerVersionsCommand(program);
+  registerRollbackCommand(program);
+  registerInfoCommand(program);
+  registerSettingsCommand(program);
   registerServeCommand(program);
   registerBuildCommand(program);
-  registerShellCommands(program);
+  registerShellCommand(program);
 
   return program;
 }
@@ -116,7 +102,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (isPromptCancelledError(error)) {
+    if (isPromptCanceledError(error)) {
       process.exitCode = 130;
       return;
     }

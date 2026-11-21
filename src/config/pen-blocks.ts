@@ -1,0 +1,214 @@
+import path from 'node:path';
+import {
+  CLASSIC_CONFIG_FILENAME,
+  CODEPEN_DIR,
+  PEN_CONFIG_FILENAME,
+} from '../constants.js';
+import { CliError } from '../errors.js';
+import { fileExistsRegular } from '../utils/fs-safe.js';
+import { hasControlChars, isPlainObject } from '../utils/strings.js';
+
+export { CLASSIC_CONFIG_FILENAME, CODEPEN_DIR, PEN_CONFIG_FILENAME };
+
+export const REQUIRED_PEN_BLOCKS = ['validate-1', 'fingerprint-1'] as const;
+
+export interface InitBlockChoice {
+  id: 'validate' | 'fingerprint' | 'packages' | 'classic';
+  blockName: string;
+  label: string;
+  description: string;
+  locked: boolean;
+}
+
+export const INIT_BLOCK_CHOICES: readonly InitBlockChoice[] = Object.freeze([
+  {
+    id: 'validate',
+    blockName: 'validate-1',
+    label: 'validate',
+    description: 'HTML/CSS/JS validation · required',
+    locked: true,
+  },
+  {
+    id: 'fingerprint',
+    blockName: 'fingerprint-1',
+    label: 'fingerprint',
+    description: 'asset fingerprinting · required',
+    locked: true,
+  },
+  {
+    id: 'packages',
+    blockName: 'packages-1',
+    label: 'packages',
+    description: 'npm packages via package.json importmap',
+    locked: false,
+  },
+  {
+    id: 'classic',
+    blockName: 'classic-1',
+    label: 'classic',
+    description: 'CodePen Classic mode (.pen.html + classic.config.json)',
+    locked: false,
+  },
+]);
+
+const KNOWN_BLOCK_MAP = new Map<string, string>(
+  INIT_BLOCK_CHOICES.map((c) => [c.id, c.blockName]),
+);
+
+const EXPLICIT_BLOCK_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,60}-\d+$/;
+const SHORT_BLOCK_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,60}$/;
+
+export function normalizeBlockType(rawName: string): string {
+  return String(rawName).trim().toLowerCase().replace(/-\d+$/, '');
+}
+
+/**
+ * Normalizes a single user-supplied block identifier (e.g. `"packages"`, `"classic"`,
+ * `"packages-1"`, `"markdown-it-14"`) into a CodePen 2.0 block name.
+ */
+export function normalizeBlockIdentifier(raw: string): string {
+  const cleaned = raw.trim().toLowerCase();
+  if (!cleaned || hasControlChars(cleaned)) {
+    throw new CliError(400, `Invalid block name "${raw}".`);
+  }
+  const known = KNOWN_BLOCK_MAP.get(cleaned);
+  if (known) return known;
+
+  if (EXPLICIT_BLOCK_NAME_PATTERN.test(cleaned)) {
+    return cleaned;
+  }
+  if (SHORT_BLOCK_NAME_PATTERN.test(cleaned)) {
+    return `${cleaned}-1`;
+  }
+
+  throw new CliError(
+    400,
+    `Invalid block name "${raw}". Use lowercase letters, numbers, and hyphens (e.g. packages, classic).`,
+  );
+}
+
+/**
+ * Normalizes a list of block identifiers, deduplicating, sorting alphabetically,
+ * and always guaranteeing `validate-1` and `fingerprint-1` are included.
+ */
+export function normalizePenBlocksList(rawBlocks: readonly string[]): string[] {
+  const byType = new Map<string, string>();
+  for (const required of REQUIRED_PEN_BLOCKS) {
+    byType.set(normalizeBlockType(required), required);
+  }
+  for (const raw of rawBlocks) {
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed.toLowerCase() === 'none') continue;
+    const normalized = normalizeBlockIdentifier(trimmed);
+    const blockType = normalizeBlockType(normalized);
+    if (blockType === 'validate') {
+      byType.set('validate', 'validate-1');
+    } else if (blockType === 'fingerprint') {
+      byType.set('fingerprint', 'fingerprint-1');
+    } else {
+      byType.set(blockType, normalized);
+    }
+  }
+  return [...byType.values()].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Parses a comma-separated `--blocks` CLI flag into normalized CodePen 2.0 block names,
+ * always including `validate-1` and `fingerprint-1`.
+ */
+export function parseBlocksOption(raw: string): string[] {
+  const parts = raw
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return normalizePenBlocksList(parts);
+}
+
+/**
+ * Builds a `.codepen/pen.config.json` object for the given block names, optionally
+ * merging onto an existing `pen.config.json` object.
+ */
+export function buildPenConfigObject(
+  rawBlocks: readonly string[],
+  options: { existing?: Record<string, unknown> | null; nowIso?: string } = {},
+): { blocks: Record<string, { createdAt: string; disabled: boolean; name: string; version: string }> } {
+  const blockNames = normalizePenBlocksList(rawBlocks);
+  const nowIso = options.nowIso ?? new Date().toISOString();
+  const existingBlocks =
+    options.existing && isPlainObject(options.existing.blocks) ? options.existing.blocks : {};
+
+  const blocks: Record<
+    string,
+    { createdAt: string; disabled: boolean; name: string; version: string }
+  > = {};
+
+  if (options.existing) {
+    for (const [key, entry] of Object.entries(existingBlocks)) {
+      if (!isPlainObject(entry)) continue;
+      const name = typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : key;
+      const createdAt =
+        typeof entry.createdAt === 'string' && entry.createdAt.trim() ? entry.createdAt.trim() : nowIso;
+      const version =
+        typeof entry.version === 'string' && entry.version.trim() ? entry.version.trim() : 'latest';
+      blocks[key] = {
+        createdAt,
+        disabled: Boolean(entry.disabled),
+        name,
+        version,
+      };
+    }
+  }
+
+  for (const name of blockNames) {
+    const prev = blocks[name];
+    blocks[name] = {
+      createdAt: prev?.createdAt ?? nowIso,
+      disabled: false,
+      name,
+      version: prev?.version ?? 'latest',
+    };
+  }
+
+  const sortedBlocks: typeof blocks = {};
+  for (const key of Object.keys(blocks).sort((a, b) => a.localeCompare(b))) {
+    sortedBlocks[key] = blocks[key]!;
+  }
+
+  return { blocks: sortedBlocks };
+}
+
+export interface StarterClassicConfig {
+  head: string;
+  htmlClasses: string;
+  scripts: string[];
+  styles: string[];
+}
+
+export function buildStarterClassicConfigFromPaths(filePaths: readonly string[]): StarterClassicConfig {
+  const pathSet = new Set(filePaths.map((p) => (p.startsWith('/') ? p : `/${p}`)));
+  return {
+    head: '<meta name="viewport" content="width=device-width" />',
+    htmlClasses: '',
+    scripts: pathSet.has('/script.js') ? ['/script.js'] : [],
+    styles: pathSet.has('/style.css') ? ['/style.css'] : [],
+  };
+}
+
+/**
+ * Generates a starter `.codepen/classic.config.json` payload, auto-linking `/style.css`
+ * and `/script.js` when those files exist in `penDir`.
+ */
+export async function buildStarterClassicConfig(penDir: string): Promise<StarterClassicConfig> {
+  const resolved = path.resolve(penDir);
+  const [hasStyleCss, hasScriptJs] = await Promise.all([
+    fileExistsRegular(path.join(resolved, 'style.css')),
+    fileExistsRegular(path.join(resolved, 'script.js')),
+  ]);
+
+  return {
+    head: '<meta name="viewport" content="width=device-width" />',
+    htmlClasses: '',
+    scripts: hasScriptJs ? ['/script.js'] : [],
+    styles: hasStyleCss ? ['/style.css'] : [],
+  };
+}

@@ -1,4 +1,5 @@
-import type { Build, BuildDiagnostic } from '../types.js';
+import type { Build, BuildDiagnostic } from '../api/types.js';
+import { defaultOutput, type CommandOutput } from './output.js';
 
 export interface Formatter {
   bold: (s: string) => string;
@@ -121,7 +122,7 @@ export function formatDiagnostic(diag: BuildDiagnostic): string {
   return `  ${badge} ${loc}${diag.message}${block}`;
 }
 
-export function printBuildSummary(build: Build): void {
+export function printBuildSummary(build: Build, output: CommandOutput = defaultOutput): void {
   const statusLabel =
     build.status === 'Success'
       ? fmt.green(build.status)
@@ -130,13 +131,13 @@ export function printBuildSummary(build: Build): void {
         : fmt.yellow(build.status);
 
   const roundsNote = build.rounds > 1 ? fmt.dim(` (${build.rounds} build rounds)`) : '';
-  console.log(`Build: ${statusLabel}${roundsNote}`);
+  output.log(`Build: ${statusLabel}${roundsNote}`);
 
   if (build.applied_patches.length > 0) {
-    console.log(fmt.cyan(`Compiler applied ${build.applied_patches.length} patch(es):`));
+    output.log(fmt.cyan(`Compiler applied ${build.applied_patches.length} patch(es):`));
     for (const patch of build.applied_patches) {
       const symbol = patch.type === 'create' ? '+' : patch.type === 'delete' ? '-' : '~';
-      console.log(`  ${fmt.cyan(symbol)} ${patch.path} ${fmt.dim(`(${patch.type})`)}`);
+      output.log(`  ${fmt.cyan(symbol)} ${patch.path} ${fmt.dim(`(${patch.type})`)}`);
     }
   }
 
@@ -144,9 +145,9 @@ export function printBuildSummary(build: Build): void {
     (d) => d.type === 'Error' || d.type === 'Warning',
   );
   if (actionableDiags.length > 0) {
-    console.log('Diagnostics:');
+    output.log('Diagnostics:');
     for (const diag of actionableDiags) {
-      console.log(formatDiagnostic(diag));
+      output.log(formatDiagnostic(diag));
     }
   }
 }
