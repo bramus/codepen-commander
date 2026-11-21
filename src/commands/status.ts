@@ -2,15 +2,20 @@ import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
 import type { Pen } from '../api/types.js';
 import { API_KEY_ENV_VAR, type ResolvedAuth } from '../config/auth.js';
-import { requireProject, type ProjectLocation } from '../config/project.js';
+import {
+  createUnlinkedProjectError,
+  findNearestConfig,
+  type ProjectLocation,
+} from '../config/project.js';
 import { PROJECT_CONFIG_FILENAME } from '../constants.js';
+import { CliError } from '../errors.js';
 import {
   computeSyncDiff,
   detectLocalChangesFromBaseline,
   hasDiffChanges,
   type SyncDiff,
 } from '../sync/diff.js';
-import { scanLocalFiles } from '../sync/fs.js';
+import { isDirectoryNonEmpty, scanLocalFiles } from '../sync/fs.js';
 import { analyzeInfoSync, formatInfoValue, type InfoSyncAnalysis } from '../sync/info.js';
 import { fmt, shortId } from '../utils/format.js';
 import { printJsonResponse } from '../utils/json.js';
@@ -55,7 +60,24 @@ export async function runStatusCommand(
   const output = options.output ?? defaultOutput;
   const cwd = options.cwd ?? process.cwd();
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
-  const project = await requireProject(cwd);
+  const nearest = await findNearestConfig(cwd);
+  if (!nearest) {
+    const hint = (await isDirectoryNonEmpty(cwd))
+      ? 'Run `cdpn init` to initialize this folder as a CodePen demo.'
+      : 'Run `cdpn clone <url>` to clone a Pen or `cdpn new` to create one.';
+    throw new CliError(
+      404,
+      `No ${PROJECT_CONFIG_FILENAME} found in this directory or any parent directory.\n${hint}`,
+    );
+  }
+  if (!nearest.linked) {
+    throw createUnlinkedProjectError(nearest.rootDir);
+  }
+  const project: ProjectLocation = {
+    rootDir: nearest.rootDir,
+    configPath: nearest.configPath,
+    config: nearest.config,
+  };
   const auth = await resolveCommandAuth({
     explicitProfile: options.explicitProfile,
     project,

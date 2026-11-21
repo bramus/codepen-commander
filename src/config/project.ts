@@ -152,7 +152,7 @@ export function parsePenInfoInput(
   return parsed;
 }
 
-function createUnlinkedProjectError(rootDir: string): CliError {
+export function createUnlinkedProjectError(rootDir: string): CliError {
   return new CliError(
     404,
     `${PROJECT_CONFIG_FILENAME} in ${rootDir} only contains Pen info and is not linked to an online Pen yet.\n` +
