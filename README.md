@@ -117,13 +117,13 @@ cdpn init ./my-demo -t "Scroll Demo" --visibility Public --blocks packages
 cdpn init -t "Template" -d "Starter pen" --tags css,layout --as-template
 ```
 
-- Interactively prompts for **Pen title**, **Pen visibility**, and **CodePen blocks** (multi-select; `validate` and `fingerprint` are required and cannot be unselected).
+- Interactively prompts for **Pen title**, **Pen visibility**, and **CodePen blocks** (multi-select; `validate` and `fingerprint` are required and cannot be unselected), then offers to push the demo to CodePen right away (defaults to `No`).
 - Optional CLI flags let you bypass prompts (`-t/--title`, `--visibility`/`--access`, `--blocks`) and set extra metadata (`-d/--description`, `--tags`, `--template [bool]` / `--as-template`) without prompting.
 - Once initialized, the folder is immediately discovered by `cdpn serve` / `cdpn build` and ready for `cdpn push`.
 
 ### Scaffold from a CodePen Template (`cdpn new`)
 
-`cdpn new [folder]` scaffolds a brand-new CodePen 2.0 Pen from a CodePen Template into a new or empty local folder (for pushing an existing local demo folder, run `cdpn push` inside that folder instead).
+`cdpn new [folder]` scaffolds a brand-new CodePen 2.0 Pen from a CodePen Template into a new or empty local folder. Running `cdpn new` in a directory that already has files is disallowed (use `cdpn init` to convert an existing local demo into a CodePen demo, or pass a new folder name like `cdpn new my-demo`).
 
 CodePen stores your reusable scaffolds as **Templates** (any Pen marked with `template: true` on CodePen or via `cdpn info --template true` / `cdpn new --as-template`), alongside CodePen's built-in 2.0 starter. When you run `cdpn new` interactively, it fetches your account's Templates from CodePen and lets you pick one (or use CodePen's default starter):
 

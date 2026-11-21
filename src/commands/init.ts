@@ -33,7 +33,12 @@ import {
   type MultiSelectOption,
   type SelectOption,
 } from '../utils/prompts.js';
-import { normalizeAccess } from './create-pen.js';
+import { getGlobalProfileOption } from './auth-context.js';
+import {
+  createPenFromDirectory,
+  normalizeAccess,
+  type CreatePenFlowResult,
+} from './create-pen.js';
 
 const CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
 
@@ -63,11 +68,13 @@ export interface InitCommandPrompts {
     options: MultiSelectOption<T>[],
   ) => Promise<T[]>;
   confirm?: (question: string, defaultYes?: boolean) => Promise<boolean>;
+  secret?: (question: string) => Promise<string>;
 }
 
 export interface InitCommandOptions {
   dirArg?: string;
   cwd?: string;
+  explicitProfile?: string;
   title?: string;
   access?: string;
   visibility?: string;
@@ -78,6 +85,9 @@ export interface InitCommandOptions {
   force?: boolean;
   yes?: boolean;
   json?: boolean;
+  baseUrl?: string;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
   interactive?: boolean;
   prompts?: InitCommandPrompts;
 }
@@ -85,6 +95,8 @@ export interface InitCommandOptions {
 export interface InitCommandResult {
   initialized: boolean;
   aborted: boolean;
+  pushed: boolean;
+  pushResult: CreatePenFlowResult | null;
   rootDir: string;
   configPath: string;
   penConfigPath: string;
@@ -252,6 +264,8 @@ export async function runInitCommand(
         return {
           initialized: false,
           aborted: true,
+          pushed: false,
+          pushResult: null,
           rootDir: realTargetDir,
           configPath,
           penConfigPath,
@@ -438,6 +452,8 @@ export async function runInitCommand(
   const result: InitCommandResult = {
     initialized: true,
     aborted: false,
+    pushed: false,
+    pushResult: null,
     rootDir: realTargetDir,
     configPath,
     penConfigPath,
@@ -470,9 +486,38 @@ export async function runInitCommand(
   for (const rel of writtenFiles) {
     console.log(`  ${fmt.boldGreen('+')} ${rel}`);
   }
-  console.log(
-    fmt.dim('\nNext steps: run `cdpn serve` to preview locally or `cdpn push` to upload to CodePen.'),
-  );
+
+  if (interactive) {
+    console.log('');
+    const shouldPush = await confirmImpl('Do you want to push this to CodePen right now?', false);
+    if (shouldPush) {
+      const pushResult = await createPenFromDirectory({
+        targetDir: realTargetDir,
+        folderDisplay: dirDisplay,
+        explicitProfile: options.explicitProfile,
+        interactive: true,
+        baseUrl: options.baseUrl,
+        env: options.env,
+        homeDir: options.homeDir,
+        prompts: {
+          confirm: confirmImpl,
+          text: options.prompts?.text,
+          select: selectImpl,
+          secret: options.prompts?.secret,
+        },
+      });
+      result.pushed = Boolean(pushResult);
+      result.pushResult = pushResult;
+    } else {
+      console.log(
+        fmt.dim('\nNext steps: run `cdpn serve` to preview locally or `cdpn push` to upload to CodePen.'),
+      );
+    }
+  } else {
+    console.log(
+      fmt.dim('\nNext steps: run `cdpn serve` to preview locally or `cdpn push` to upload to CodePen.'),
+    );
+  }
 
   return result;
 }
@@ -495,7 +540,7 @@ export function registerInitCommand(program: Command): void {
     .option('-f, --force', 'Overwrite existing .cdpn.json without confirmation')
     .option('-y, --yes', 'Alias for --force')
     .option('--json', 'Output initialization result as JSON')
-    .action(async (dirArg: string | undefined, options: InitCliOptions) => {
+    .action(async (dirArg: string | undefined, options: InitCliOptions, command: Command) => {
       const tags =
         options.tags !== undefined
           ? options.tags
@@ -507,6 +552,7 @@ export function registerInitCommand(program: Command): void {
 
       await runInitCommand({
         dirArg,
+        explicitProfile: getGlobalProfileOption(command),
         title: options.title,
         access: options.access,
         visibility: options.visibility,

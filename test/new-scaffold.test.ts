@@ -443,30 +443,60 @@ describe('template-only cdpn new and dedicated cdpn fork', () => {
     await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
   });
 
-  it('refuses to scaffold into a non-empty or already-linked folder and points to cdpn push', async () => {
+  it('disallows running cdpn new in a non-empty or already-linked folder and refers to cdpn init', async () => {
     const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-home-'));
-    const tmpWork = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-nonempty-'));
+    const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-nonempty-'));
+    const existingDemo = path.join(tmpRoot, 'existing-demo');
     createCalls = [];
 
     try {
       await saveProfileToFile('bramus', KEY_BRAMUS, { homeDir: tmpHome, setAsDefault: true });
-      await fs.writeFile(path.join(tmpWork, 'index.html'), '<h1>Existing demo</h1>', 'utf8');
+      await fs.mkdir(existingDemo, { recursive: true });
+      await fs.writeFile(path.join(existingDemo, 'index.html'), '<h1>Existing demo</h1>', 'utf8');
 
+      // 1. Bare `cdpn new` (no folderArg) in a directory with files must be disallowed
+      await assert.rejects(
+        () =>
+          scaffoldNewPen({
+            cwd: existingDemo,
+            baseUrl,
+            env: {},
+            homeDir: tmpHome,
+            interactive: true,
+          }),
+        /is not empty[\s\S]*cdpn init/,
+      );
+
+      // 2. `cdpn new .` in a directory with files must be disallowed
       await assert.rejects(
         () =>
           scaffoldNewPen({
             folderArg: '.',
-            cwd: tmpWork,
+            cwd: existingDemo,
             baseUrl,
             env: {},
             homeDir: tmpHome,
             interactive: false,
           }),
-        /is not empty[\s\S]*cdpn push/,
+        /is not empty[\s\S]*cdpn init/,
+      );
+
+      // 3. `cdpn new existing-demo` targeting a non-empty folder must be disallowed
+      await assert.rejects(
+        () =>
+          scaffoldNewPen({
+            folderArg: 'existing-demo',
+            cwd: tmpRoot,
+            baseUrl,
+            env: {},
+            homeDir: tmpHome,
+            interactive: false,
+          }),
+        /is not empty[\s\S]*cdpn init/,
       );
       assert.equal(createCalls.length, 0, 'Must not call CodePen API when folder is non-empty');
 
-      await writeProjectConfig(tmpWork, {
+      await writeProjectConfig(existingDemo, {
         url: 'https://codepen.io/bramus/pen/existing',
         pen_id: 'existing',
         last_synced_version_id: null,
@@ -475,35 +505,35 @@ describe('template-only cdpn new and dedicated cdpn fork', () => {
       await assert.rejects(
         () =>
           scaffoldNewPen({
-            folderArg: '.',
-            cwd: tmpWork,
+            cwd: existingDemo,
             baseUrl,
             env: {},
             homeDir: tmpHome,
             interactive: false,
           }),
-        /already contains \.cdpn\.json/,
+        /already contains \.cdpn\.json[\s\S]*cdpn init/,
       );
+      assert.equal(createCalls.length, 0);
     } finally {
       await fs.rm(tmpHome, { recursive: true, force: true });
-      await fs.rm(tmpWork, { recursive: true, force: true });
+      await fs.rm(tmpRoot, { recursive: true, force: true });
     }
   });
 
-  it('presents only CodePen default starter and account CodePen Templates interactively', async () => {
+  it('presents only CodePen default starter and account CodePen Templates interactively in an empty folder', async () => {
     const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-home-'));
     const tmpParent = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-parent-'));
+    const emptyDemoDir = path.join(tmpParent, 'anchor-popover-demo');
     createCalls = [];
 
     try {
       await saveProfileToFile('bramus', KEY_BRAMUS, { homeDir: tmpHome, setAsDefault: true });
       await saveProfileToFile('username', KEY_USERNAME, { homeDir: tmpHome });
-      // Make parent non-empty (like ~/demos/) to verify `cdpn new` without folder creates a subfolder
-      await fs.writeFile(path.join(tmpParent, 'other-demo.txt'), 'existing sibling\n', 'utf8');
+      await fs.mkdir(emptyDemoDir, { recursive: true });
 
       let seenTemplateChoices: string[] = [];
       const result = await scaffoldNewPen({
-        cwd: tmpParent,
+        cwd: emptyDemoDir,
         baseUrl,
         env: {},
         homeDir: tmpHome,
@@ -520,11 +550,9 @@ describe('template-only cdpn new and dedicated cdpn fork', () => {
             return 'Private' as never;
           },
           text: async (question, defaultVal) => {
-            if (question.toLowerCase().includes('title')) {
-              return 'Anchor Popover Demo';
-            }
+            assert.ok(question.toLowerCase().includes('title'));
             assert.equal(defaultVal, 'anchor-popover-demo');
-            return defaultVal ?? '';
+            return 'Anchor Popover Demo';
           },
         },
       });
@@ -542,19 +570,18 @@ describe('template-only cdpn new and dedicated cdpn fork', () => {
       assert.equal(createCalls[0]?.body.access, 'Private');
       assert.equal(createCalls[0]?.body.template, undefined);
 
-      const outDir = path.join(tmpParent, 'anchor-popover-demo');
-      assert.equal(result.project.rootDir, outDir);
+      assert.equal(result.project.rootDir, emptyDemoDir);
       assert.equal(
-        await fs.readFile(path.join(outDir, 'index.html'), 'utf8'),
+        await fs.readFile(path.join(emptyDemoDir, 'index.html'), 'utf8'),
         '<h1>From CSS Template</h1>\n',
       );
       assert.equal(
-        await fs.readFile(path.join(outDir, '.codepen', 'pen.config.json'), 'utf8'),
+        await fs.readFile(path.join(emptyDemoDir, '.codepen', 'pen.config.json'), 'utf8'),
         '{"blocks":["sass-1"]}',
       );
-      assert.deepEqual(await fs.readFile(path.join(outDir, 'img', 'icon.png')), PNG_BYTES);
+      assert.deepEqual(await fs.readFile(path.join(emptyDemoDir, 'img', 'icon.png')), PNG_BYTES);
 
-      const cfg = await readProjectConfig(outDir);
+      const cfg = await readProjectConfig(emptyDemoDir);
       assert.equal(cfg.profile, 'username');
     } finally {
       await fs.rm(tmpHome, { recursive: true, force: true });

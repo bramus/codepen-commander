@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { runInitCommand } from '../src/commands/init.js';
+import { saveProfileToFile } from '../src/config/auth.js';
 import { readProjectConfigFile, writeProjectConfig } from '../src/config/project.js';
 import { startDevServer } from '../src/site/server.js';
 import { CliError } from '../src/utils/json.js';
 import type { MultiSelectOption } from '../src/utils/prompts.js';
 
 describe('cdpn init command', () => {
-  it('asks interactively only for title, visibility, and blocks (with validate & fingerprint locked) and writes unlinked .cdpn.json + .codepen/', async () => {
+  it('asks interactively only for title, visibility, blocks (with validate & fingerprint locked), and push confirmation (default No)', async () => {
     const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-init-interactive-'));
     const demoDir = path.join(tmpRoot, 'scroll-cards');
     try {
@@ -27,6 +30,7 @@ describe('cdpn init command', () => {
 
       const askedText: Array<{ question: string; defaultValue?: string }> = [];
       const askedSelect: string[] = [];
+      const askedConfirm: Array<{ question: string; defaultYes?: boolean }> = [];
       let receivedBlockOptions: MultiSelectOption<string>[] = [];
 
       const res = await runInitCommand({
@@ -50,16 +54,25 @@ describe('cdpn init command', () => {
             // Even if caller returned only classic-1, validate-1 & fingerprint-1 are always enforced
             return ['classic-1', 'packages-1'] as never;
           },
+          confirm: async (question, defaultYes) => {
+            askedConfirm.push({ question, defaultYes });
+            return false;
+          },
         },
       });
 
       assert.equal(res.initialized, true);
       assert.equal(res.aborted, false);
-      // Verify ONLY title, visibility, and blocks were prompted
+      assert.equal(res.pushed, false);
+      assert.equal(res.pushResult, null);
+      // Verify ONLY title, visibility, blocks, and post-init push offer (default No) were prompted
       assert.equal(askedText.length, 1);
       assert.equal(askedText[0]?.question, 'Pen title');
       assert.equal(askedText[0]?.defaultValue, 'Scroll Cards HTML Title');
       assert.deepEqual(askedSelect, ['Pen visibility']);
+      assert.deepEqual(askedConfirm, [
+        { question: 'Do you want to push this to CodePen right now?', defaultYes: false },
+      ]);
 
       // Verify validate & fingerprint are locked and checked, and packages was auto-checked due to package.json
       const validateOpt = receivedBlockOptions.find((o) => o.value === 'validate-1');
@@ -269,6 +282,181 @@ describe('cdpn init command', () => {
       }
     } finally {
       await fs.rm(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('pushes to CodePen immediately after cdpn init when the user answers Yes to the push prompt', async () => {
+    const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-init-push-'));
+    const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-init-push-home-'));
+    const demoDir = path.join(tmpRoot, 'push-now-demo');
+    const createRequests: Array<{ auth: string | undefined; body: Record<string, unknown> }> = [];
+
+    const server = http.createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const rawBody = Buffer.concat(chunks).toString('utf8');
+
+      const sendJson = (status: number, body: unknown) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(body));
+      };
+
+      if (req.method === 'POST' && url.pathname === '/v2/pens') {
+        const parsed = JSON.parse(rawBody) as Record<string, unknown>;
+        createRequests.push({ auth: req.headers.authorization, body: parsed });
+
+        return sendJson(201, {
+          id: 'pen-pushed-1',
+          title: (parsed.title as string) || 'Untitled',
+          description: (parsed.description as string) || '',
+          tags: Array.isArray(parsed.tags) ? parsed.tags : [],
+          access: (parsed.access as string) || 'Public',
+          password: null,
+          template: Boolean(parsed.template),
+          popularity: 0,
+          views_count: 0,
+          loves_count: 0,
+          editor: 'V2',
+          created_at: '2026-11-21T12:00:00Z',
+          updated_at: '2026-11-21T12:00:00Z',
+          urls: {
+            editor: 'https://codepen.io/bramus/pen/pen-pushed-1',
+            preview: 'https://pen-pushed-1.codepen.dev/',
+          },
+          screenshot_urls: null,
+          saved_version: {
+            id: 'ver-pushed-1',
+            pen_id: 'pen-pushed-1',
+            hash: 'hash-1',
+            created_at: '2026-11-21T12:00:00Z',
+            deployed: false,
+            saved: true,
+            label: null,
+            build: null,
+            preview_url: 'https://pen-pushed-1.codepen.dev/',
+          },
+          deployment: null,
+          settings: {
+            auto_deploy: false,
+            auto_run: true,
+            auto_save: true,
+            indent_with: 'spaces',
+            tab_size: 2,
+          },
+          build: {
+            id: 'bld-pushed-1',
+            status: 'Success',
+            started_at: '2026-11-21T12:00:00Z',
+            ended_at: '2026-11-21T12:00:01Z',
+            rounds: 1,
+            diagnostics: [],
+            errors: [],
+            applied_patches: [],
+            patches: [],
+            version_id: 'ver-pushed-1',
+            next_id: null,
+            previous_id: null,
+          },
+        });
+      }
+
+      if (req.method === 'GET' && url.pathname === '/v2/versions/ver-pushed-1') {
+        const uploaded = (createRequests[0]?.body.files as Array<{ path: string; content: string }>) ?? [];
+        return sendJson(200, {
+          id: 'ver-pushed-1',
+          pen_id: 'pen-pushed-1',
+          hash: 'hash-1',
+          created_at: '2026-11-21T12:00:00Z',
+          deployed: false,
+          saved: true,
+          label: null,
+          build: null,
+          preview_url: null,
+          files: uploaded.map((f, idx) => ({
+            id: `f-${idx}`,
+            path: f.path,
+            name: path.posix.basename(f.path),
+            content_hash: `h-${idx}`,
+            is_binary: false,
+            bytes: Buffer.byteLength(f.content),
+            content_type: 'text/plain',
+            content: f.content,
+            url: null,
+            download_url: null,
+          })),
+        });
+      }
+
+      sendJson(404, { code: 'NOT_FOUND', message: 'Not found' });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      await saveProfileToFile('bramus', 'cp_user_bramus_initpush', {
+        homeDir: tmpHome,
+        setAsDefault: true,
+      });
+      await fs.mkdir(demoDir, { recursive: true });
+      await fs.writeFile(
+        path.join(demoDir, 'index.html'),
+        '<!DOCTYPE html><html><head><title>Push Now</title></head><body>Hi</body></html>',
+      );
+
+      const confirmCalls: Array<{ question: string; defaultYes?: boolean }> = [];
+      const res = await runInitCommand({
+        cwd: demoDir,
+        description: 'Pushed right after init',
+        tags: ['css', 'init'],
+        template: false,
+        interactive: true,
+        baseUrl,
+        env: {},
+        homeDir: tmpHome,
+        prompts: {
+          text: async () => 'Push Now Demo',
+          select: async () => 'Private' as never,
+          multiSelect: async () => ['validate-1', 'fingerprint-1', 'packages-1'] as never,
+          confirm: async (question, defaultYes) => {
+            confirmCalls.push({ question, defaultYes });
+            return true;
+          },
+        },
+      });
+
+      assert.equal(res.initialized, true);
+      assert.equal(res.pushed, true);
+      assert.equal(res.pushResult?.pen.id, 'pen-pushed-1');
+      assert.deepEqual(confirmCalls, [
+        { question: 'Do you want to push this to CodePen right now?', defaultYes: false },
+      ]);
+
+      // Verify POST /v2/pens received init's metadata + index.html + .codepen/pen.config.json
+      assert.equal(createRequests.length, 1);
+      assert.equal(createRequests[0]?.auth, 'Bearer cp_user_bramus_initpush');
+      assert.equal(createRequests[0]?.body.title, 'Push Now Demo');
+      assert.equal(createRequests[0]?.body.description, 'Pushed right after init');
+      assert.deepEqual(createRequests[0]?.body.tags, ['css', 'init']);
+      assert.equal(createRequests[0]?.body.access, 'Private');
+      const sentPaths = (createRequests[0]?.body.files as Array<{ path: string }>).map((f) => f.path).sort();
+      assert.deepEqual(sentPaths, ['/.codepen/pen.config.json', '/index.html']);
+
+      // Verify .cdpn.json is now linked to the created CodePen Pen
+      const linked = await readProjectConfigFile(demoDir);
+      assert.equal(linked.linked, true);
+      if (linked.linked) {
+        assert.equal(linked.config.pen_id, 'pen-pushed-1');
+        assert.equal(linked.config.url, 'https://codepen.io/bramus/pen/pen-pushed-1');
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+      await fs.rm(tmpRoot, { recursive: true, force: true });
+      await fs.rm(tmpHome, { recursive: true, force: true });
     }
   });
 });

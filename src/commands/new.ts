@@ -5,7 +5,6 @@ import { CodePenClient } from '../api/client.js';
 import type { ResolvedAuth } from '../config/auth.js';
 import {
   buildSyncedFileMap,
-  slugifyTitle,
   writeProjectConfig,
   type ProjectLocation,
 } from '../config/project.js';
@@ -17,7 +16,6 @@ import {
   parseBlocksOption,
   PEN_CONFIG_FILENAME,
 } from '../site/blocks.js';
-import { isDirectoryNonEmpty } from '../sync/fs.js';
 import { buildPenInfoConfigFields } from '../sync/info.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
 import type { BinaryUploadPart, Build, FileChange, Pen, PenFile, PenFileRequest } from '../types.js';
@@ -111,7 +109,7 @@ type SelectedTemplate =
   | { kind: 'template'; pen: Pen; label: string };
 
 const NEW_NON_EMPTY_HINT =
-  'To push an existing local demo folder to CodePen, run `cdpn push` inside that folder, or pass a new folder name (e.g. `cdpn new my-pen`).';
+  'To convert an existing local demo into a CodePen demo, run `cdpn init` inside that folder — or pass a new folder name (e.g. `cdpn new my-pen`).';
 
 const PEN_CONFIG_PEN_PATH = `/${CODEPEN_DIR}/${PEN_CONFIG_FILENAME}`;
 const CLASSIC_CONFIG_PEN_PATH = `/${CODEPEN_DIR}/${CLASSIC_CONFIG_FILENAME}`;
@@ -185,16 +183,13 @@ export async function scaffoldNewPen(
     throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
   }
 
-  // If the user passed an explicit folder argument, validate immediately that it is empty/new
-  let targetDir: string | null = null;
-  let folderDisplay = options.folderArg?.trim() || '';
-  if (folderDisplay) {
-    targetDir = path.resolve(cwd, folderDisplay);
-    await assertEmptyTargetDirectory(targetDir, folderDisplay, {
-      commandName: 'new',
-      nonEmptyHint: NEW_NON_EMPTY_HINT,
-    });
-  }
+  // Validate target directory immediately (defaults to current directory `.` when omitted)
+  const folderDisplay = options.folderArg?.trim() || '.';
+  const targetDir = path.resolve(cwd, folderDisplay);
+  await assertEmptyTargetDirectory(targetDir, folderDisplay, {
+    commandName: 'new',
+    nonEmptyHint: NEW_NON_EMPTY_HINT,
+  });
 
   const urlHint =
     options.template && /^https?:\/\//i.test(options.template.trim())
@@ -267,13 +262,7 @@ export async function scaffoldNewPen(
   }
 
   // 3. Determine Pen title
-  const cwdIsEmpty = !(await isDirectoryNonEmpty(cwd));
-  const defaultTitle =
-    targetDir && folderDisplay !== '.'
-      ? path.basename(targetDir) || 'Untitled'
-      : cwdIsEmpty
-        ? path.basename(cwd) || 'Untitled'
-        : 'Untitled';
+  const defaultTitle = path.basename(targetDir) || 'Untitled';
 
   let title = options.title?.trim();
   if (!title) {
@@ -295,23 +284,7 @@ export async function scaffoldNewPen(
     },
   });
 
-  // 5. Resolve & validate target folder (if omitted on CLI) BEFORE creating the Pen on CodePen
-  if (!targetDir) {
-    const defaultFolder = cwdIsEmpty ? '.' : (slugifyTitle(title) ?? 'new-pen');
-    if (interactive) {
-      const chosenFolder = (await textImpl('Local folder to scaffold into', defaultFolder)).trim();
-      folderDisplay = chosenFolder || defaultFolder;
-    } else {
-      folderDisplay = defaultFolder;
-    }
-    targetDir = path.resolve(cwd, folderDisplay);
-    await assertEmptyTargetDirectory(targetDir, folderDisplay, {
-      commandName: 'new',
-      nonEmptyHint: NEW_NON_EMPTY_HINT,
-    });
-  }
-
-  // 6. Fetch template files (if using a custom CodePen Template) and create Pen
+  // 5. Fetch template files (if using a custom CodePen Template) and create Pen
   const shouldWait = options.wait !== false;
   let textFiles: PenFileRequest[] | undefined;
   let binaryFiles: BinaryUploadPart[] = [];
