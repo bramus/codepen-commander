@@ -23,6 +23,7 @@ import { registerPushCommand } from './commands/push.js';
 import { registerServeCommand } from './commands/serve.js';
 import { registerShellCommands } from './commands/shell.js';
 import { registerStatusCommand } from './commands/status.js';
+import { registerUnlinkCommand } from './commands/unlink.js';
 import { registerVersionCommands } from './commands/versions.js';
 import { fmt } from './utils/format.js';
 import { errorToJsonEnvelope, wantsJsonOutput } from './utils/json.js';
@@ -69,6 +70,7 @@ export function createProgram(): Command {
   registerNewCommand(program);
   registerPrivacyCommand(program);
   registerDeleteCommand(program);
+  registerUnlinkCommand(program);
   registerOpenCommand(program);
   registerListCommand(program);
   registerVersionCommands(program);

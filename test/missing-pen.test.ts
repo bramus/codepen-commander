@@ -395,6 +395,12 @@ describe('missing / trashed remote Pen handling across commands', () => {
 
     try {
       const relink = async () => {
+        await fs.mkdir(path.join(tmpDemo, '.codepen'), { recursive: true });
+        await fs.writeFile(
+          path.join(tmpDemo, '.codepen', 'pen.config.json'),
+          JSON.stringify({ blocks: ['classic-1', 'fingerprint-1', 'validate-1'] }, null, 2),
+          'utf8',
+        );
         await writeProjectConfig(tmpDemo, {
           url: `https://codepen.io/editor/bramus/pen/${PEN_ID}`,
           pen_id: PEN_ID,
@@ -404,7 +410,8 @@ describe('missing / trashed remote Pen handling across commands', () => {
         });
       };
 
-      // 1. Already in Trash + interactive purge -> purges Trash and removes .cdpn.json
+      // 1. Already in Trash + interactive purge -> purges Trash and removes .cdpn.json and .codepen/
+      await relink();
       penState = 'trashed';
       const purged = await deletePenCommand({
         cwd: tmpDemo,
@@ -421,16 +428,18 @@ describe('missing / trashed remote Pen handling across commands', () => {
       assert.equal(purged.alreadyDeletedRemotely, true);
       assert.equal(purged.purgedFromTrash, true);
       assert.equal(purged.configRemoved, true);
+      assert.equal(purged.codepenDirRemoved, true);
       assert.equal(penState, 'purged');
       await assert.rejects(() => fs.stat(path.join(tmpDemo, PROJECT_CONFIG_FILENAME)), /ENOENT/);
+      await assert.rejects(() => fs.stat(path.join(tmpDemo, '.codepen')), /ENOENT/);
 
-      // 2. Already in Trash + --yes --keep-info --json -> does NOT fail or purge Trash, retains unlinked info
+      // 2. Already in Trash + --yes --keep-config --json -> does NOT fail or purge Trash, retains .codepen/ & unlinked info
       await relink();
       penState = 'trashed';
       const cleaned = await deletePenCommand({
         cwd: tmpDemo,
         yes: true,
-        keepInfo: true,
+        keepConfig: true,
         json: true,
         baseUrl,
         env: {},
@@ -440,8 +449,10 @@ describe('missing / trashed remote Pen handling across commands', () => {
       assert.ok(cleaned);
       assert.equal(cleaned.alreadyDeletedRemotely, true);
       assert.equal(cleaned.purgedFromTrash, false);
+      assert.equal(cleaned.codepenDirRemoved, false);
       assert.equal(cleaned.infoRetained, true);
       assert.equal(penState, 'trashed', '--yes cleanup must not silently permanently purge Trash');
+      assert.ok((await fs.stat(path.join(tmpDemo, '.codepen', 'pen.config.json'))).isFile());
       const keptCfg = await readProjectConfigFile(tmpDemo);
       assert.equal(keptCfg.linked, false);
       assert.equal(keptCfg.config.info.title, 'Deleted Demo');
@@ -462,11 +473,13 @@ describe('missing / trashed remote Pen handling across commands', () => {
       });
       assert.ok(recovered);
       assert.equal(recovered.recoveredFromTrash, true);
+      assert.equal(recovered.codepenDirRemoved, false);
       assert.equal(recovered.pen?.id, PEN_ID);
       assert.equal(penState, 'active');
       assert.equal((await readProjectConfigFile(tmpDemo)).linked, true);
+      assert.ok((await fs.stat(path.join(tmpDemo, '.codepen', 'pen.config.json'))).isFile());
 
-      // 4. Permanently deleted (not in Trash) + --yes -> removes .cdpn.json cleanly instead of 404
+      // 4. Permanently deleted (not in Trash) + --yes -> removes .cdpn.json and .codepen/ cleanly instead of 404
       await relink();
       penState = 'purged';
       const cleanedPurged = await deletePenCommand({
@@ -480,7 +493,9 @@ describe('missing / trashed remote Pen handling across commands', () => {
       assert.ok(cleanedPurged);
       assert.equal(cleanedPurged.alreadyDeletedRemotely, true);
       assert.equal(cleanedPurged.configRemoved, true);
+      assert.equal(cleanedPurged.codepenDirRemoved, true);
       await assert.rejects(() => fs.stat(path.join(tmpDemo, PROJECT_CONFIG_FILENAME)), /ENOENT/);
+      await assert.rejects(() => fs.stat(path.join(tmpDemo, '.codepen')), /ENOENT/);
 
       // 5. Permanently deleted without --yes non-interactively still refuses safely with 400
       await relink();

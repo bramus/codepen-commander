@@ -168,6 +168,12 @@ describe('cdpn delete command', () => {
 
       const writeLinkedPen = async () => {
         await fs.writeFile(path.join(tmpPen, 'index.html'), '<h1>Keep Me</h1>\n', 'utf8');
+        await fs.mkdir(path.join(tmpPen, '.codepen'), { recursive: true });
+        await fs.writeFile(
+          path.join(tmpPen, '.codepen', 'pen.config.json'),
+          JSON.stringify({ blocks: {} }),
+          'utf8',
+        );
         await writeProjectConfig(tmpPen, {
           url: `https://codepen.io/editor/bramus/pen/${PEN_ID}`,
           pen_id: PEN_ID,
@@ -178,7 +184,7 @@ describe('cdpn delete command', () => {
 
       await writeLinkedPen();
 
-      // 1. Non-interactive without --yes -> refuses without calling DELETE, keeps .cdpn.json
+      // 1. Non-interactive without --yes -> refuses without calling DELETE, keeps .cdpn.json & .codepen/
       requestLog = [];
       await assert.rejects(
         () =>
@@ -193,8 +199,9 @@ describe('cdpn delete command', () => {
       );
       assert.deepEqual(requestLog, [`GET /v2/pens/${PEN_ID}`]);
       await fs.stat(path.join(tmpPen, PROJECT_CONFIG_FILENAME));
+      await fs.stat(path.join(tmpPen, '.codepen', 'pen.config.json'));
 
-      // 2. Interactive decline -> aborts without calling DELETE, defaults confirm to false, keeps .cdpn.json
+      // 2. Interactive decline -> aborts without calling DELETE, defaults confirm to false, keeps .cdpn.json & .codepen/
       requestLog = [];
       let confirmDefault: boolean | undefined;
       penDeploymentUrl = 'https://live-demo.codepen.app/';
@@ -215,8 +222,9 @@ describe('cdpn delete command', () => {
       assert.equal(confirmDefault, false, 'Destructive delete confirmation must default to No');
       assert.deepEqual(requestLog, [`GET /v2/pens/${PEN_ID}`]);
       await fs.stat(path.join(tmpPen, PROJECT_CONFIG_FILENAME));
+      await fs.stat(path.join(tmpPen, '.codepen', 'pen.config.json'));
 
-      // 3. Remote DELETE fails (403 FORBIDDEN) -> throws and MUST keep .cdpn.json intact
+      // 3. Remote DELETE fails (403 FORBIDDEN) -> throws and MUST keep .cdpn.json & .codepen/ intact
       deleteMode = 'forbidden';
       requestLog = [];
       await assert.rejects(
@@ -237,8 +245,9 @@ describe('cdpn delete command', () => {
       );
       assert.deepEqual(requestLog, [`GET /v2/pens/${PEN_ID}`, `DELETE /v2/pens/${PEN_ID}`]);
       await fs.stat(path.join(tmpPen, PROJECT_CONFIG_FILENAME));
+      await fs.stat(path.join(tmpPen, '.codepen', 'pen.config.json'));
 
-      // 4. Interactive confirm with succeeding DELETE -> removes .cdpn.json and keeps local files untouched
+      // 4. Interactive confirm with succeeding DELETE -> removes .cdpn.json & .codepen/, keeps local source files untouched
       deleteMode = 'ok';
       penDeploymentUrl = null;
       requestLog = [];
@@ -254,6 +263,7 @@ describe('cdpn delete command', () => {
       });
       assert.ok(deletedInteractive);
       assert.equal(deletedInteractive.configRemoved, true);
+      assert.equal(deletedInteractive.codepenDirRemoved, true);
       assert.equal(deletedInteractive.pen?.id, PEN_ID);
       assert.deepEqual(requestLog, [`GET /v2/pens/${PEN_ID}`, `DELETE /v2/pens/${PEN_ID}`]);
       await assert.rejects(
@@ -261,9 +271,14 @@ describe('cdpn delete command', () => {
         /ENOENT/,
         '.cdpn.json must be removed after deletion succeeds',
       );
+      await assert.rejects(
+        () => fs.stat(path.join(tmpPen, '.codepen')),
+        /ENOENT/,
+        '.codepen/ must be removed after deletion succeeds',
+      );
       assert.equal(await fs.readFile(path.join(tmpPen, 'index.html'), 'utf8'), '<h1>Keep Me</h1>\n');
 
-      // 5. Non-interactive with --yes -> deletes online Pen and removes .cdpn.json without prompting
+      // 5. Non-interactive with --yes -> deletes online Pen and removes .cdpn.json & .codepen/ without prompting
       await writeLinkedPen();
       requestLog = [];
       const deletedNonInteractive = await deletePenCommand({
@@ -276,25 +291,59 @@ describe('cdpn delete command', () => {
       });
       assert.ok(deletedNonInteractive);
       assert.equal(deletedNonInteractive.configRemoved, true);
+      assert.equal(deletedNonInteractive.codepenDirRemoved, true);
       assert.equal(deletedNonInteractive.infoRetained, false);
       assert.deepEqual(requestLog, [`GET /v2/pens/${PEN_ID}`, `DELETE /v2/pens/${PEN_ID}`]);
       await assert.rejects(() => fs.stat(path.join(tmpPen, PROJECT_CONFIG_FILENAME)), /ENOENT/);
+      await assert.rejects(() => fs.stat(path.join(tmpPen, '.codepen')), /ENOENT/);
       assert.equal(await fs.readFile(path.join(tmpPen, 'index.html'), 'utf8'), '<h1>Keep Me</h1>\n');
+
+      // 6. Symlinked .codepen/ outside Pen folder is never followed or deleted
+      const outsideTarget = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-del-outside-'));
+      try {
+        await fs.writeFile(path.join(outsideTarget, 'precious.txt'), 'do not delete', 'utf8');
+        await fs.symlink(outsideTarget, path.join(tmpPen, '.codepen'));
+        await writeProjectConfig(tmpPen, {
+          url: `https://codepen.io/editor/bramus/pen/${PEN_ID}`,
+          pen_id: PEN_ID,
+          profile: 'bramus',
+          last_synced_version_id: null,
+        });
+        const symlinkDel = await deletePenCommand({
+          cwd: tmpPen,
+          yes: true,
+          baseUrl,
+          interactive: false,
+          env: {},
+          homeDir: tmpHome,
+        });
+        assert.ok(symlinkDel);
+        assert.equal(symlinkDel.codepenDirRemoved, false);
+        assert.equal(await fs.readFile(path.join(outsideTarget, 'precious.txt'), 'utf8'), 'do not delete');
+      } finally {
+        await fs.rm(outsideTarget, { recursive: true, force: true });
+      }
     } finally {
       await fs.rm(tmpHome, { recursive: true, force: true });
       await fs.rm(tmpPen, { recursive: true, force: true });
     }
   });
 
-  it('retains only the info section in .cdpn.json when --keep-info is passed', async () => {
+  it('retains .codepen/ and only the info section in .cdpn.json when --keep-config (or --keep-info) is passed', async () => {
     const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-del-keep-home-'));
     const tmpPen = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-del-keep-pen-'));
 
     try {
       await saveProfileToFile('bramus', KEY_BRAMUS, { homeDir: tmpHome, setAsDefault: true });
       await fs.writeFile(path.join(tmpPen, 'index.html'), '<h1>Keep Info</h1>\n', 'utf8');
+      await fs.mkdir(path.join(tmpPen, '.codepen'), { recursive: true });
+      await fs.writeFile(
+        path.join(tmpPen, '.codepen', 'pen.config.json'),
+        JSON.stringify({ blocks: ['classic-1', 'fingerprint-1', 'validate-1'] }, null, 2),
+        'utf8',
+      );
 
-      // 1. Legacy .cdpn.json without `info` -> still retains Pen metadata fetched from CodePen
+      // 1. Legacy .cdpn.json without `info` -> still retains Pen metadata fetched from CodePen & keeps `.codepen/`
       await writeProjectConfig(tmpPen, {
         url: `https://codepen.io/editor/bramus/pen/${PEN_ID}`,
         pen_id: PEN_ID,
@@ -303,12 +352,12 @@ describe('cdpn delete command', () => {
         editor: 'V2',
       });
 
-      // Cancel at confirmation prompt -> .cdpn.json stays fully linked & untouched
+      // Cancel at confirmation prompt -> .cdpn.json and .codepen/ stay fully linked & untouched
       let promptQuestion = '';
       requestLog = [];
       const cancelled = await deletePenCommand({
         cwd: tmpPen,
-        keepInfo: true,
+        keepConfig: true,
         baseUrl,
         interactive: true,
         env: {},
@@ -322,19 +371,21 @@ describe('cdpn delete command', () => {
       });
       assert.equal(cancelled, null);
       assert.match(promptQuestion, /keep only "info"/i);
+      assert.match(promptQuestion, /\.codepen/i);
       assert.deepEqual(requestLog, [`GET /v2/pens/${PEN_ID}`]);
       const stillLinkedRaw = JSON.parse(
         await fs.readFile(path.join(tmpPen, PROJECT_CONFIG_FILENAME), 'utf8'),
       ) as Record<string, unknown>;
       assert.equal(stillLinkedRaw.pen_id, PEN_ID);
+      assert.ok((await fs.stat(path.join(tmpPen, '.codepen', 'pen.config.json'))).isFile());
 
-      // Remote DELETE fails -> .cdpn.json stays linked & untouched
+      // Remote DELETE fails -> .cdpn.json and .codepen/ stay linked & untouched
       deleteMode = 'server-error';
       await assert.rejects(
         () =>
           deletePenCommand({
             cwd: tmpPen,
-            keepInfo: true,
+            keepConfig: true,
             yes: true,
             baseUrl,
             interactive: false,
@@ -347,13 +398,14 @@ describe('cdpn delete command', () => {
         await fs.readFile(path.join(tmpPen, PROJECT_CONFIG_FILENAME), 'utf8'),
       ) as Record<string, unknown>;
       assert.equal(afterErrRaw.pen_id, PEN_ID);
+      assert.ok((await fs.stat(path.join(tmpPen, '.codepen', 'pen.config.json'))).isFile());
 
-      // Succeeding delete with --keep-info -> rewrites .cdpn.json with ONLY `info`
+      // Succeeding delete with --keep-config -> keeps .codepen/ and rewrites .cdpn.json with ONLY `info`
       deleteMode = 'ok';
       requestLog = [];
       const keptLegacy = await deletePenCommand({
         cwd: tmpPen,
-        keepInfo: true,
+        keepConfig: true,
         yes: true,
         baseUrl,
         interactive: false,
@@ -362,6 +414,7 @@ describe('cdpn delete command', () => {
       });
       assert.ok(keptLegacy);
       assert.equal(keptLegacy.configRemoved, false);
+      assert.equal(keptLegacy.codepenDirRemoved, false);
       assert.equal(keptLegacy.infoRetained, true);
       assert.deepEqual(keptLegacy.retainedInfo, {
         title: 'Delete Test Pen',
@@ -381,6 +434,10 @@ describe('cdpn delete command', () => {
       assert.equal('pen_id' in rawLegacyAfter, false, 'pen_id must not be retained');
       assert.equal('url' in rawLegacyAfter, false, 'url must not be retained');
       assert.equal(await fs.readFile(path.join(tmpPen, 'index.html'), 'utf8'), '<h1>Keep Info</h1>\n');
+      assert.ok(
+        (await fs.stat(path.join(tmpPen, '.codepen', 'pen.config.json'))).isFile(),
+        '--keep-config must keep .codepen/ intact',
+      );
 
       // Running delete again on the now-unlinked info-only .cdpn.json fails cleanly without calling API
       requestLog = [];
@@ -388,7 +445,7 @@ describe('cdpn delete command', () => {
         () =>
           deletePenCommand({
             cwd: tmpPen,
-            keepInfo: true,
+            keepConfig: true,
             yes: true,
             baseUrl,
             interactive: false,
@@ -399,7 +456,7 @@ describe('cdpn delete command', () => {
       );
       assert.equal(requestLog.length, 0);
 
-      // 2. Local edits in `.cdpn.json` `info` are preserved (and merged with remote fields) + JSON output
+      // 2. Backwards-compatible `--keep-info` alias also preserves local edits in `.cdpn.json` `info` AND `.codepen/` + JSON output
       await writeProjectConfig(tmpPen, {
         url: `https://codepen.io/editor/bramus/pen/${PEN_ID}`,
         pen_id: PEN_ID,
@@ -437,6 +494,7 @@ describe('cdpn delete command', () => {
 
       assert.ok(keptLocal);
       assert.equal(keptLocal.configRemoved, false);
+      assert.equal(keptLocal.codepenDirRemoved, false);
       assert.equal(keptLocal.infoRetained, true);
       assert.deepEqual(keptLocal.retainedInfo, {
         title: 'Locally Edited Title',
@@ -451,6 +509,7 @@ describe('cdpn delete command', () => {
         contents: {
           deleted: boolean;
           config_removed: boolean;
+          codepen_dir_removed: boolean;
           info_retained: boolean;
           info: Record<string, unknown>;
         };
@@ -459,6 +518,7 @@ describe('cdpn delete command', () => {
       assert.match(jsonEnvelope.status.message, /retained info/i);
       assert.equal(jsonEnvelope.contents.deleted, true);
       assert.equal(jsonEnvelope.contents.config_removed, false);
+      assert.equal(jsonEnvelope.contents.codepen_dir_removed, false);
       assert.equal(jsonEnvelope.contents.info_retained, true);
       assert.deepEqual(jsonEnvelope.contents.info, keptLocal.retainedInfo);
 
@@ -466,9 +526,13 @@ describe('cdpn delete command', () => {
         await fs.readFile(path.join(tmpPen, PROJECT_CONFIG_FILENAME), 'utf8'),
       ) as Record<string, unknown>;
       assert.deepEqual(rawLocalAfter, { info: keptLocal.retainedInfo });
+      assert.ok(
+        (await fs.stat(path.join(tmpPen, '.codepen', 'pen.config.json'))).isFile(),
+        '--keep-info alias must also keep .codepen/ intact',
+      );
 
       // 3. When local `.cdpn.json` info was NOT edited (matches baseline hash) and remote Pen metadata
-      //    changed on CodePen, `--keep-info` retains the fresher remote metadata
+      //    changed on CodePen, `--keep-config` retains the fresher remote metadata and keeps `.codepen/`
       const oldSyncedInfo = {
         title: 'Old Synced Title',
         description: 'Old description',
@@ -488,7 +552,7 @@ describe('cdpn delete command', () => {
 
       const keptRemote = await deletePenCommand({
         cwd: tmpPen,
-        keepInfo: true,
+        keepConfig: true,
         yes: true,
         baseUrl,
         interactive: false,
@@ -496,6 +560,7 @@ describe('cdpn delete command', () => {
         homeDir: tmpHome,
       });
       assert.ok(keptRemote);
+      assert.equal(keptRemote.codepenDirRemoved, false);
       assert.deepEqual(keptRemote.retainedInfo, {
         title: 'Delete Test Pen',
         description: '',
@@ -503,6 +568,7 @@ describe('cdpn delete command', () => {
         access: 'Public',
         template: false,
       });
+      assert.ok((await fs.stat(path.join(tmpPen, '.codepen', 'pen.config.json'))).isFile());
     } finally {
       await fs.rm(tmpHome, { recursive: true, force: true });
       await fs.rm(tmpPen, { recursive: true, force: true });

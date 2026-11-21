@@ -228,7 +228,7 @@ export async function handleMissingRemotePen(
       404,
       `Pen "${displayTitle}" (${project.config.pen_id}) no longer exists on CodePen.\n` +
         `It may have been permanently deleted, or belongs to a different account/profile${profileHint}.\n` +
-        `Run \`cdpn ${commandName}\` interactively to unlink ${PROJECT_CONFIG_FILENAME}, \`cdpn delete --keep-info --yes\` to clear the remote link, or pass --profile <name> if another profile owns it.`,
+        `Run \`cdpn ${commandName}\` interactively to unlink ${PROJECT_CONFIG_FILENAME}, \`cdpn unlink --yes\` to clear the remote link, or pass --profile <name> if another profile owns it.`,
       {
         pen_id: project.config.pen_id,
         url: project.config.url,

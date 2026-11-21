@@ -99,6 +99,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       'new',
       'privacy',
       'delete',
+      'unlink',
       'open',
       'list',
       'versions',
@@ -219,8 +220,28 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
         '--help',
       ]);
       assert.ok(aliasHelp.includes('Usage: cdpn delete'), `Expected "${alias}" to alias "delete"`);
+      assert.ok(aliasHelp.includes('--keep-config'), `Expected "${alias} --help" to include --keep-config`);
       assert.ok(aliasHelp.includes('--keep-info'), `Expected "${alias} --help" to include --keep-info`);
     }
+
+    // `cdpn unlink` takes no positional arguments and exposes --yes and --json
+    await assert.rejects(
+      () =>
+        execFileAsync(process.execPath, [
+          path.join(distDir, 'cli.js'),
+          'unlink',
+          'https://codepen.io/username/pen/abcde',
+        ]),
+      /too many arguments/i,
+    );
+    const { stdout: unlinkHelp } = await execFileAsync(process.execPath, [
+      path.join(distDir, 'cli.js'),
+      'unlink',
+      '--help',
+    ]);
+    assert.ok(unlinkHelp.includes('Usage: cdpn unlink'));
+    assert.ok(unlinkHelp.includes('--yes'));
+    assert.ok(unlinkHelp.includes('--json'));
 
     // `cdpn fork` without mandatory <url> must fail
     await assert.rejects(
@@ -288,6 +309,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       ['domains', 'delete'],
       ['privacy'],
       ['delete'],
+      ['unlink'],
       ['list'],
       ['versions'],
       ['rollback'],
