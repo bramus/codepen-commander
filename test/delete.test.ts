@@ -254,7 +254,7 @@ describe('cdpn delete command', () => {
       });
       assert.ok(deletedInteractive);
       assert.equal(deletedInteractive.configRemoved, true);
-      assert.equal(deletedInteractive.pen.id, PEN_ID);
+      assert.equal(deletedInteractive.pen?.id, PEN_ID);
       assert.deepEqual(requestLog, [`GET /v2/pens/${PEN_ID}`, `DELETE /v2/pens/${PEN_ID}`]);
       await assert.rejects(
         () => fs.stat(path.join(tmpPen, PROJECT_CONFIG_FILENAME)),

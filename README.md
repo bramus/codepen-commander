@@ -100,6 +100,10 @@ Older `.cdpn.json` files created without an `info` section remain fully supporte
 
 You can also run `cdpn delete --keep-info` to delete the online Pen while stripping `.cdpn.json` down to only its `info` section (unlinked). When you later push the folder for the first time with `cdpn push` or `cdpn deploy`, the saved `title`, `description`, `tags`, `access`, and `template` are reused automatically without re-prompting for title or visibility (explicit `--title` / `--access` flags still override them, and `Protected` Pens still prompt for or require `--password`).
 
+If a synced Pen was deleted on CodePen, commands like `cdpn status`, `cdpn pull`, `cdpn push`, `cdpn delete`, etc. automatically check CodePen’s Trash (`GET /v2/trash`):
+- **Found in Deleted Items (Trash):** interactively offers to **recover the Pen** (`POST /v2/pens/{id}/restore`) and continue, **delete it permanently** (`DELETE /v2/trash/pens/{id}`) and unlink `.cdpn.json`, or **unlink the local copy** (keeping `info` so you can re-push as a new Pen).
+- **Permanently deleted:** explains that the Pen no longer exists on CodePen and offers to unlink `.cdpn.json` (and `cdpn delete` cleans up `.cdpn.json` cleanly instead of failing with `404`).
+
 > **Why `.cdpn.json` instead of `.codepen`?**  
 > CodePen 2.0 Pens already contain a `.codepen/` directory (housing `.codepen/pen.config.json`). Using `.cdpn.json` avoids filesystem collisions while allowing `.codepen/pen.config.json` to sync cleanly with CodePen.
 

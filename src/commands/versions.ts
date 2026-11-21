@@ -8,6 +8,7 @@ import { fmt, formatDate, formatTable, shortId } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
 import { isInteractive, promptConfirm, promptSelect } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
+import { fetchLinkedPenOrHandleMissing } from './missing-pen.js';
 
 export function registerVersionCommands(program: Command): void {
   program
@@ -21,23 +22,34 @@ export function registerVersionCommands(program: Command): void {
         throw new CliError(400, '--limit must be a positive integer.');
       }
 
+      const interactive = !options.json && isInteractive();
       const project = await requireProject();
       const auth = await resolveCommandAuth({
         explicitProfile: getGlobalProfileOption(command),
         project,
-        interactive: options.json ? false : undefined,
+        interactive,
         persistProfileToProject: !options.json,
       });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
-      const [pen, versionsPage] = await Promise.all([
-        client.getPen(project.config.pen_id),
-        client.listVersions(project.config.pen_id, {
-          per_page: Math.min(limit, 100),
-          sort: 'created',
-          direction: 'desc',
-        }),
-      ]);
+      const penLookup = await fetchLinkedPenOrHandleMissing({
+        client,
+        project,
+        auth,
+        commandName: 'versions',
+        interactive,
+        json: options.json,
+      });
+      if (!penLookup.found) {
+        return;
+      }
+
+      const pen = penLookup.pen;
+      const versionsPage = await client.listVersions(project.config.pen_id, {
+        per_page: Math.min(limit, 100),
+        sort: 'created',
+        direction: 'desc',
+      });
 
       if (pen.editor === 'Classic') {
         if (options.json) {
@@ -117,6 +129,18 @@ export function registerVersionCommands(program: Command): void {
           persistProfileToProject: !options.json,
         });
         const client = new CodePenClient({ apiKey: auth.apiKey });
+
+        const penLookup = await fetchLinkedPenOrHandleMissing({
+          client,
+          project,
+          auth,
+          commandName: 'rollback',
+          interactive,
+          json: options.json,
+        });
+        if (!penLookup.found) {
+          return;
+        }
 
         let targetVersionId = versionIdArg?.trim();
 

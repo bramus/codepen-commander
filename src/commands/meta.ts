@@ -13,8 +13,14 @@ import type {
 } from '../types.js';
 import { fmt, formatDate, shortId } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
-import type { SelectOption } from '../utils/prompts.js';
+import { isInteractive, type SelectOption } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
+import {
+  fetchLinkedPenOrHandleMissing,
+  handleMissingRemotePen,
+  isRemotePenNotFoundError,
+  type MissingPenPrompts,
+} from './missing-pen.js';
 
 const VALID_ACCESS = new Set(['public', 'private', 'protected', 'collaborators']);
 
@@ -37,6 +43,7 @@ export interface InfoPenCommandOptions {
     options: SelectOption<string>[],
     defaultIndex: number,
   ) => Promise<string>;
+  prompts?: MissingPenPrompts;
 }
 
 export interface InfoPenResult {
@@ -88,12 +95,15 @@ function renderPenSettings(settings: PenSettings): void {
   console.log(`tab_size:    ${fmt.cyan(String(settings.tab_size))}`);
 }
 
-export async function infoPenCommand(options: InfoPenCommandOptions = {}): Promise<InfoPenResult> {
+export async function infoPenCommand(
+  options: InfoPenCommandOptions = {},
+): Promise<InfoPenResult | null> {
+  const interactive = (options.interactive ?? isInteractive()) && !options.json;
   const project = await requireProject(options.cwd ?? process.cwd());
   const auth = await resolveCommandAuth({
     explicitProfile: options.explicitProfile,
     project,
-    interactive: options.json ? false : options.interactive,
+    interactive,
     persistProfileToProject: !options.json,
     env: options.env,
     homeDir: options.homeDir,
@@ -135,9 +145,43 @@ export async function infoPenCommand(options: InfoPenCommandOptions = {}): Promi
   }
 
   const hasUpdates = Object.keys(patch).length > 0;
-  const pen = hasUpdates
-    ? await client.updatePen(project.config.pen_id, patch)
-    : await client.getPen(project.config.pen_id);
+  let pen: Pen;
+  if (hasUpdates) {
+    try {
+      pen = await client.updatePen(project.config.pen_id, patch);
+    } catch (error) {
+      if (!isRemotePenNotFoundError(error)) {
+        throw error;
+      }
+      const resolution = await handleMissingRemotePen({
+        client,
+        project,
+        auth,
+        commandName: 'info',
+        interactive,
+        json: options.json,
+        prompts: options.prompts,
+      });
+      if (resolution.action !== 'recovered') {
+        return null;
+      }
+      pen = await client.updatePen(project.config.pen_id, patch);
+    }
+  } else {
+    const penLookup = await fetchLinkedPenOrHandleMissing({
+      client,
+      project,
+      auth,
+      commandName: 'info',
+      interactive,
+      json: options.json,
+      prompts: options.prompts,
+    });
+    if (!penLookup.found) {
+      return null;
+    }
+    pen = penLookup.pen;
+  }
 
   if (hasUpdates) {
     const nextConfig = mergeUpdatedPenInfoIntoConfig(project.config, pen, patch);
@@ -213,11 +257,12 @@ export function registerMetaCommands(program: Command): void {
         },
         command: Command,
       ) => {
+        const interactive = !options.json && isInteractive();
         const project = await requireProject();
         const auth = await resolveCommandAuth({
           explicitProfile: getGlobalProfileOption(command),
           project,
-          interactive: options.json ? false : undefined,
+          interactive,
           persistProfileToProject: !options.json,
         });
         const client = new CodePenClient({ apiKey: auth.apiKey });
@@ -248,9 +293,41 @@ export function registerMetaCommands(program: Command): void {
         }
 
         const hasUpdates = Object.keys(patch).length > 0;
-        const settings = hasUpdates
-          ? await client.updateSettings(project.config.pen_id, patch)
-          : (await client.getPen(project.config.pen_id)).settings;
+        let settings: PenSettings;
+        if (hasUpdates) {
+          try {
+            settings = await client.updateSettings(project.config.pen_id, patch);
+          } catch (error) {
+            if (!isRemotePenNotFoundError(error)) {
+              throw error;
+            }
+            const resolution = await handleMissingRemotePen({
+              client,
+              project,
+              auth,
+              commandName: 'settings',
+              interactive,
+              json: options.json,
+            });
+            if (resolution.action !== 'recovered') {
+              return;
+            }
+            settings = await client.updateSettings(project.config.pen_id, patch);
+          }
+        } else {
+          const penLookup = await fetchLinkedPenOrHandleMissing({
+            client,
+            project,
+            auth,
+            commandName: 'settings',
+            interactive,
+            json: options.json,
+          });
+          if (!penLookup.found) {
+            return;
+          }
+          settings = penLookup.pen.settings;
+        }
 
         if (options.json) {
           printJsonResponse(

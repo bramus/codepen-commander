@@ -7,6 +7,7 @@ import type {
   FilesWriteRequest,
   FilesWriteResult,
   ListPensParams,
+  ListTrashParams,
   ListVersionsParams,
   PaginatedResult,
   Pen,
@@ -17,6 +18,7 @@ import type {
   PenSettings,
   PenUpdateRequest,
   SettingsUpdateRequest,
+  TrashItem,
   Version,
 } from '../types.js';
 import { extractPenIdFromUrl } from '../config/project.js';
@@ -280,6 +282,73 @@ export class CodePenClient {
 
   public async deletePen(penId: string): Promise<void> {
     await this.requestRaw('DELETE', `/v2/pens/${encodePenId(penId)}`);
+  }
+
+  public async listTrash(params: ListTrashParams = {}): Promise<PaginatedResult<TrashItem>> {
+    const response = await this.requestRaw('GET', '/v2/trash', {
+      query: {
+        page: params.page,
+        per_page: params.per_page,
+        sort: params.sort,
+        direction: params.direction,
+      },
+    });
+    const items = (await response.json()) as TrashItem[];
+    const links = parseLinkHeader(response.headers.get('link'));
+    return { items, links };
+  }
+
+  public async listTrashPageByUrl(nextUrl: string): Promise<PaginatedResult<TrashItem>> {
+    const response = await this.requestRaw('GET', nextUrl);
+    const items = (await response.json()) as TrashItem[];
+    const links = parseLinkHeader(response.headers.get('link'));
+    return { items, links };
+  }
+
+  /**
+   * Searches CodePen Trash (`GET /v2/trash`) for a trashed Pen matching any of the given IDs.
+   * Returns `null` if not found (or if the trash endpoint is unavailable).
+   */
+  public async findTrashedPen(penIdOrIds: string | string[], maxPages = 10): Promise<TrashItem | null> {
+    const candidates = new Set(
+      (Array.isArray(penIdOrIds) ? penIdOrIds : [penIdOrIds])
+        .map((id) => id.trim())
+        .filter(Boolean),
+    );
+    if (candidates.size === 0) return null;
+
+    let page = await this.listTrash({ per_page: 100 });
+    let pagesRead = 1;
+    for (;;) {
+      for (const item of page.items) {
+        if (item.type === 'Pen' && (candidates.has(item.item_id) || candidates.has(item.id))) {
+          return item;
+        }
+      }
+      if (!page.links.next || pagesRead >= maxPages) {
+        return null;
+      }
+      page = await this.listTrashPageByUrl(page.links.next);
+      pagesRead++;
+    }
+  }
+
+  /** Restores a trashed Pen via `POST /v2/pens/{id}/restore` (`id` is the trash item's `item_id`). */
+  public async restorePen(penId: string): Promise<Pen> {
+    return this.requestJson<Pen>('POST', `/v2/pens/${encodePenId(penId)}/restore`);
+  }
+
+  /** Permanently deletes a trashed Pen via `DELETE /v2/trash/pens/{id}`. */
+  public async purgeTrashedPen(penId: string): Promise<TrashItem | null> {
+    const response = await this.requestRaw('DELETE', `/v2/trash/pens/${encodePenId(penId)}`);
+    if (response.status === 204) {
+      return null;
+    }
+    const text = await response.text();
+    if (!text.trim()) {
+      return null;
+    }
+    return JSON.parse(text) as TrashItem;
   }
 
   public async updateSettings(penId: string, payload: SettingsUpdateRequest): Promise<PenSettings> {

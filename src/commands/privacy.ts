@@ -15,6 +15,7 @@ import {
 } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 import { normalizeAccess } from './create-pen.js';
+import { fetchLinkedPenOrHandleMissing } from './missing-pen.js';
 
 export interface PrivacyCliOptions {
   password?: string;
@@ -88,7 +89,7 @@ async function promptForProtectedPassword(
  */
 export async function managePenPrivacy(
   options: ManagePrivacyOptions = {},
-): Promise<ManagePrivacyResult> {
+): Promise<ManagePrivacyResult | null> {
   const cwd = options.cwd ?? process.cwd();
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
   const selectImpl = options.prompts?.select ?? promptSelect;
@@ -123,7 +124,23 @@ export async function managePenPrivacy(
   });
   const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
 
-  const currentPen = await client.getPen(project.config.pen_id);
+  const penLookup = await fetchLinkedPenOrHandleMissing({
+    client,
+    project,
+    auth,
+    commandName: 'privacy',
+    interactive,
+    json: options.json,
+    prompts: {
+      select: selectImpl,
+      confirm: confirmImpl,
+    },
+  });
+  if (!penLookup.found) {
+    return null;
+  }
+
+  const currentPen = penLookup.pen;
   const previousAccess = currentPen.access;
 
   // Read-only mode: `--show`, or no level/password in non-interactive / `--json` mode

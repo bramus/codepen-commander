@@ -7,6 +7,10 @@ import { openBrowser } from '../utils/browser.js';
 import { fmt } from '../utils/format.js';
 import { isInteractive, promptSelect, type SelectOption } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
+import {
+  fetchLinkedPenOrHandleMissing,
+  type MissingPenPrompts,
+} from './missing-pen.js';
 
 export interface OpenOptions {
   preview?: boolean;
@@ -26,6 +30,7 @@ export interface OpenPenCommandOptions extends OpenOptions {
     options: SelectOption<T>[],
     defaultIndex?: number,
   ) => Promise<T>;
+  prompts?: MissingPenPrompts;
   openBrowserImpl?: (url: string) => Promise<boolean>;
 }
 
@@ -126,7 +131,9 @@ export function buildDeployedDomainChoices(
   return choices;
 }
 
-export async function openPenCommand(options: OpenPenCommandOptions = {}): Promise<OpenPenResult> {
+export async function openPenCommand(
+  options: OpenPenCommandOptions = {},
+): Promise<OpenPenResult | null> {
   const openDeployed = Boolean(options.deploy || options.live);
   if (options.preview && openDeployed) {
     throw new Error('Specify at most one of --preview or --deploy / --live.');
@@ -147,16 +154,22 @@ export async function openPenCommand(options: OpenPenCommandOptions = {}): Promi
   });
   const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
 
-  let pen: Pen;
-  let domains: PenDomain[] = [];
-  if (openDeployed) {
-    [pen, domains] = await Promise.all([
-      client.getPen(project.config.pen_id),
-      client.listDomains(project.config.pen_id).catch(() => []),
-    ]);
-  } else {
-    pen = await client.getPen(project.config.pen_id);
+  const penLookup = await fetchLinkedPenOrHandleMissing({
+    client,
+    project,
+    auth,
+    commandName: 'open',
+    interactive,
+    prompts: options.prompts ?? { select: selectImpl },
+  });
+  if (!penLookup.found) {
+    return null;
   }
+
+  const pen = penLookup.pen;
+  const domains: PenDomain[] = openDeployed
+    ? await client.listDomains(project.config.pen_id).catch(() => [])
+    : [];
 
   let targetUrl: string;
   let label: string;

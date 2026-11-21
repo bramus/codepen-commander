@@ -7,6 +7,10 @@ import { fmt, formatTable } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
 import { isInteractive, promptConfirm } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
+import {
+  fetchLinkedPenOrHandleMissing,
+  type MissingPenPrompts,
+} from './missing-pen.js';
 
 export interface DomainsBaseOptions {
   json?: boolean;
@@ -16,6 +20,7 @@ export interface DomainsBaseOptions {
   interactive?: boolean;
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
+  prompts?: MissingPenPrompts;
 }
 
 export interface DeleteDomainOptions extends DomainsBaseOptions {
@@ -73,7 +78,7 @@ export function renderDomains(domains: PenDomain[], defaultUrl: string | null): 
 
 export async function listPenDomains(
   options: DomainsBaseOptions = {},
-): Promise<DomainsCommandResult> {
+): Promise<DomainsCommandResult | null> {
   const cwd = options.cwd ?? process.cwd();
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
 
@@ -88,10 +93,21 @@ export async function listPenDomains(
   });
   const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
 
-  const [pen, domains] = await Promise.all([
-    client.getPen(project.config.pen_id),
-    client.listDomains(project.config.pen_id),
-  ]);
+  const penLookup = await fetchLinkedPenOrHandleMissing({
+    client,
+    project,
+    auth,
+    commandName: 'domains',
+    interactive,
+    json: options.json,
+    prompts: options.prompts,
+  });
+  if (!penLookup.found) {
+    return null;
+  }
+
+  const pen = penLookup.pen;
+  const domains = await client.listDomains(project.config.pen_id);
   const defaultUrl = pen.deployment?.url ?? null;
 
   if (options.json) {
@@ -113,7 +129,7 @@ export async function listPenDomains(
 export async function addPenDomain(
   host: string,
   options: DomainsBaseOptions = {},
-): Promise<DomainsCommandResult> {
+): Promise<DomainsCommandResult | null> {
   const cleanHost = host.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
   if (!cleanHost || !/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(cleanHost)) {
     throw new CliError(
@@ -135,6 +151,19 @@ export async function addPenDomain(
     homeDir: options.homeDir,
   });
   const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
+
+  const penLookup = await fetchLinkedPenOrHandleMissing({
+    client,
+    project,
+    auth,
+    commandName: 'domains add',
+    interactive,
+    json: options.json,
+    prompts: options.prompts,
+  });
+  if (!penLookup.found) {
+    return null;
+  }
 
   const domains = await client.addDomain(project.config.pen_id, cleanHost);
   const pen = await client.getPen(project.config.pen_id);
@@ -191,6 +220,19 @@ export async function deletePenDomain(
     homeDir: options.homeDir,
   });
   const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
+
+  const penLookup = await fetchLinkedPenOrHandleMissing({
+    client,
+    project,
+    auth,
+    commandName: 'domains delete',
+    interactive,
+    json: options.json,
+    prompts: options.prompts,
+  });
+  if (!penLookup.found) {
+    return null;
+  }
 
   const remaining = await client.removeDomain(project.config.pen_id, cleanHost);
   const pen = await client.getPen(project.config.pen_id);

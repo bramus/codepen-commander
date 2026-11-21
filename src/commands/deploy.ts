@@ -12,6 +12,7 @@ import { CliError, printJsonResponse } from '../utils/json.js';
 import { isInteractive, promptConfirm } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
 import { createPenFromDirectory } from './create-pen.js';
+import { fetchLinkedPenOrHandleMissing } from './missing-pen.js';
 import { executePush } from './push.js';
 
 export interface DeployOptions {
@@ -115,20 +116,34 @@ export function registerDeployCommands(program: Command): void {
         activeProfile = created.auth.profile;
         client = new CodePenClient({ apiKey: created.auth.apiKey });
       } else {
+        const interactive = !options.json && isInteractive();
         const auth = await resolveCommandAuth({
           explicitProfile,
           project,
-          interactive: !options.json && isInteractive(),
+          interactive,
           persistProfileToProject: !options.json,
         });
         activeProfile = auth.profile;
         client = new CodePenClient({ apiKey: auth.apiKey });
+
+        const penLookup = await fetchLinkedPenOrHandleMissing({
+          client,
+          project,
+          auth,
+          commandName: 'deploy',
+          interactive,
+          json: options.json,
+        });
+        if (!penLookup.found) {
+          return;
+        }
 
         if (!versionIdToDeploy && options.push !== false) {
           const pushResult = await executePush(client, project, {
             force: options.force,
             label: options.label,
             wait: true,
+            prefetchedPen: penLookup.pen,
             silent: Boolean(options.json),
           });
 
@@ -201,7 +216,18 @@ export function registerDeployCommands(program: Command): void {
       });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
-      const pen = await client.getPen(project.config.pen_id);
+      const penLookup = await fetchLinkedPenOrHandleMissing({
+        client,
+        project,
+        auth,
+        commandName: 'undeploy',
+        interactive,
+        json: options.json,
+      });
+      if (!penLookup.found) {
+        return;
+      }
+      const pen = penLookup.pen;
       if (!pen.deployment) {
         if (options.json) {
           printJsonResponse(200, 'This Pen is not currently deployed.', {

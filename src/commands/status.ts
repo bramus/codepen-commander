@@ -13,8 +13,12 @@ import { analyzeInfoSync, formatInfoValue, type InfoSyncAnalysis } from '../sync
 import type { Pen } from '../types.js';
 import { fmt, shortId } from '../utils/format.js';
 import { printJsonResponse } from '../utils/json.js';
-import type { SelectOption } from '../utils/prompts.js';
+import { isInteractive, type SelectOption } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
+import {
+  fetchLinkedPenOrHandleMissing,
+  type MissingPenPrompts,
+} from './missing-pen.js';
 
 export interface StatusPenCommandOptions {
   json?: boolean;
@@ -29,6 +33,7 @@ export interface StatusPenCommandOptions {
     options: SelectOption<string>[],
     defaultIndex: number,
   ) => Promise<string>;
+  prompts?: MissingPenPrompts;
 }
 
 export interface StatusPenResult {
@@ -43,13 +48,14 @@ export interface StatusPenResult {
 
 export async function statusPenCommand(
   options: StatusPenCommandOptions = {},
-): Promise<StatusPenResult> {
+): Promise<StatusPenResult | null> {
   const cwd = options.cwd ?? process.cwd();
+  const interactive = (options.interactive ?? isInteractive()) && !options.json;
   const project = await requireProject(cwd);
   const auth = await resolveCommandAuth({
     explicitProfile: options.explicitProfile,
     project,
-    interactive: options.json ? false : options.interactive,
+    interactive,
     persistProfileToProject: !options.json,
     env: options.env,
     homeDir: options.homeDir,
@@ -57,8 +63,21 @@ export async function statusPenCommand(
   });
   const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
 
-  const [pen, remoteFiles, localFiles] = await Promise.all([
-    client.getPen(project.config.pen_id),
+  const penLookup = await fetchLinkedPenOrHandleMissing({
+    client,
+    project,
+    auth,
+    commandName: 'status',
+    interactive,
+    json: options.json,
+    prompts: options.prompts,
+  });
+  if (!penLookup.found) {
+    return null;
+  }
+
+  const pen = penLookup.pen;
+  const [remoteFiles, localFiles] = await Promise.all([
     client.getPenFiles(project.config.pen_id),
     scanLocalFiles(project.rootDir),
   ]);

@@ -198,6 +198,7 @@ describe('cdpn open command', () => {
           },
         }),
       );
+      assert.ok(editorRes);
       assert.equal(editorRes.url, `https://codepen.io/editor/username/pen/${PEN_ID}`);
       assert.deepEqual(requestLog, [`GET /v2/pens/${PEN_ID}`]);
 
@@ -216,6 +217,7 @@ describe('cdpn open command', () => {
           },
         }),
       );
+      assert.ok(previewRes);
       assert.equal(previewRes.url, `https://${PEN_ID}.codepen.dev/`);
       assert.deepEqual(requestLog, [`GET /v2/pens/${PEN_ID}`]);
       assert.deepEqual(openedUrls, [
@@ -289,6 +291,7 @@ describe('cdpn open command', () => {
       );
 
       assert.equal(promptCalled, false);
+      assert.ok(result);
       assert.equal(result.url, DEFAULT_DEPLOY_URL);
       assert.deepEqual(openedUrls, [DEFAULT_DEPLOY_URL]);
       assert.ok(output.includes(`Opening deployed site: ${DEFAULT_DEPLOY_URL}`), `Unexpected output:\n${output}`);
@@ -359,6 +362,7 @@ describe('cdpn open command', () => {
       assert.equal(seenOptions[1]!.description, 'custom domain · Verified');
       assert.equal(seenOptions[2]!.value, 'https://beta.example.com/');
       assert.equal(seenOptions[2]!.description, 'custom domain · Pending');
+      assert.ok(result);
       assert.equal(result.url, 'https://demo.example.com/');
       assert.deepEqual(openedUrls, ['https://demo.example.com/']);
     } finally {
@@ -397,6 +401,7 @@ describe('cdpn open command', () => {
         }),
       );
 
+      assert.ok(result);
       assert.equal(result.url, DEFAULT_DEPLOY_URL);
       assert.deepEqual(openedUrls, [DEFAULT_DEPLOY_URL]);
       assert.ok(output.includes('https://demo.example.com/'), `Expected other domains note in output:\n${output}`);

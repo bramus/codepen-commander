@@ -169,6 +169,7 @@ describe('cdpn privacy command', () => {
         homeDir: tmpHome,
         interactive: true,
       });
+      assert.ok(shown);
       assert.equal(shown.access, 'Public');
       assert.equal(shown.updated, false);
       assert.equal(patchCalls.length, 0);
@@ -182,6 +183,7 @@ describe('cdpn privacy command', () => {
         homeDir: tmpHome,
         interactive: false,
       });
+      assert.ok(toPrivate);
       assert.equal(toPrivate.previousAccess, 'Public');
       assert.equal(toPrivate.access, 'Private');
       assert.equal(toPrivate.updated, true);
@@ -196,6 +198,7 @@ describe('cdpn privacy command', () => {
         homeDir: tmpHome,
         interactive: false,
       });
+      assert.ok(noop);
       assert.equal(noop.updated, false);
       assert.equal(patchCalls.length, 1);
 
@@ -221,6 +224,7 @@ describe('cdpn privacy command', () => {
       });
       assert.equal(seenDefaultIndex, 1, 'Expected Private (index 1) to be pre-selected');
       assert.equal(secretPrompted, true);
+      assert.ok(toProtected);
       assert.equal(toProtected.access, 'Protected');
       assert.equal(toProtected.passwordUpdated, true);
       assert.deepEqual(patchCalls[1], { access: 'Protected', password: 'secretpass99' });
@@ -234,6 +238,7 @@ describe('cdpn privacy command', () => {
         homeDir: tmpHome,
         interactive: false,
       });
+      assert.ok(rotated);
       assert.equal(rotated.updated, true);
       assert.equal(rotated.passwordUpdated, true);
       assert.deepEqual(patchCalls[2], { password: 'newpassword123' });
@@ -261,6 +266,7 @@ describe('cdpn privacy command', () => {
         homeDir: tmpHome,
         interactive: false,
       });
+      assert.ok(toCollab);
       assert.equal(toCollab.access, 'Collaborators');
       assert.deepEqual(patchCalls[3], { access: 'Collaborators' });
     } finally {

@@ -724,6 +724,7 @@ describe('Pen info syncing integration (127.0.0.1 mock API)', () => {
         env: {},
         homeDir: tmpHome,
       });
+      assert.ok(afterInfoStatus);
       assert.equal(afterInfoStatus.upToDate, true);
       assert.deepEqual(afterInfoStatus.infoAnalysis.changes, []);
 
@@ -799,6 +800,7 @@ describe('Pen info syncing integration (127.0.0.1 mock API)', () => {
         env: {},
         homeDir: tmpHome,
       });
+      assert.ok(statusRemote);
       assert.equal(statusRemote.upToDate, false);
       assert.equal(statusRemote.infoAnalysis.localChanged, false);
       assert.equal(statusRemote.infoAnalysis.remoteChanged, true);
@@ -951,6 +953,7 @@ describe('Pen info syncing integration (127.0.0.1 mock API)', () => {
       const { output: legacyHumanStatus, result: legacyStatusRes } = await captureStdout(() =>
         statusPenCommand({ cwd: legacyStatusDir, baseUrl, env: {}, homeDir: tmpHome }),
       );
+      assert.ok(legacyStatusRes);
       assert.equal(legacyStatusRes.upToDate, true);
       assert.equal(legacyStatusRes.infoAnalysis.tracked, false);
       assert.deepEqual(legacyStatusRes.infoAnalysis.changes, []);

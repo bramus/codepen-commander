@@ -265,6 +265,24 @@ export interface ListVersionsParams {
   direction?: SortDirection;
 }
 
+export type TrashItemType = 'Pen' | 'Collection';
+
+export interface TrashItem {
+  id: string;
+  type: TrashItemType;
+  item_id: string;
+  title: string;
+  deleted_at: string;
+  expires_at: string;
+}
+
+export interface ListTrashParams {
+  page?: number;
+  per_page?: number;
+  sort?: BasicSortField;
+  direction?: SortDirection;
+}
+
 export interface PaginatedResult<T> {
   items: T[];
   links: {

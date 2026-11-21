@@ -26,6 +26,11 @@ import type { BinaryUploadPart, Build, BuildPatch, FileChange, Pen, PenFile } fr
 import { fmt, printBuildSummary, shortId } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
 import { isInteractive } from '../utils/prompts.js';
+import {
+  fetchLinkedPenOrHandleMissing,
+  handleMissingRemotePen,
+  isRemotePenNotFoundError,
+} from './missing-pen.js';
 
 export interface PushOptions {
   label?: string;
@@ -37,6 +42,7 @@ export interface PushOptions {
   password?: string;
   json?: boolean;
   silent?: boolean;
+  prefetchedPen?: Pen;
 }
 
 export interface PushExecutionResult {
@@ -61,8 +67,25 @@ export async function executePush(
   options: PushOptions = {},
 ): Promise<PushExecutionResult> {
   const silent = Boolean(options.silent);
-  const [pen, remoteFiles, localFiles] = await Promise.all([
-    client.getPen(project.config.pen_id),
+  let pen = options.prefetchedPen;
+  if (!pen) {
+    try {
+      pen = await client.getPen(project.config.pen_id);
+    } catch (error) {
+      if (isRemotePenNotFoundError(error)) {
+        await handleMissingRemotePen({
+          client,
+          project,
+          auth: { profile: project.config.profile ?? null },
+          commandName: 'push',
+          interactive: false,
+          json: options.json,
+        });
+      }
+      throw error;
+    }
+  }
+  const [remoteFiles, localFiles] = await Promise.all([
     client.getPenFiles(project.config.pen_id),
     scanLocalFiles(project.rootDir),
   ]);
@@ -488,16 +511,30 @@ export function registerPushCommand(program: Command): void {
         config: nearest.config,
       };
 
+      const interactive = !options.json && isInteractive();
       const auth = await resolveCommandAuth({
         explicitProfile,
         project,
-        interactive: !options.json && isInteractive(),
+        interactive,
         persistProfileToProject: !options.json,
       });
       const client = new CodePenClient({ apiKey: auth.apiKey });
 
+      const penLookup = await fetchLinkedPenOrHandleMissing({
+        client,
+        project,
+        auth,
+        commandName: 'push',
+        interactive,
+        json: options.json,
+      });
+      if (!penLookup.found) {
+        return;
+      }
+
       const result = await executePush(client, project, {
         ...options,
+        prefetchedPen: penLookup.pen,
         silent: Boolean(options.json),
       });
 

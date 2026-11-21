@@ -169,6 +169,7 @@ describe('cdpn domains command', () => {
         }),
       );
 
+      assert.ok(result);
       assert.equal(result.defaultUrl, DEFAULT_DEPLOY_URL);
       assert.deepEqual(result.domains, []);
       assert.ok(output.includes(`Default URL: ${DEFAULT_DEPLOY_URL}`), `Unexpected output:\n${output}`);
@@ -238,6 +239,7 @@ describe('cdpn domains command', () => {
         }),
       );
 
+      assert.ok(result);
       assert.equal(result.defaultUrl, null);
       assert.ok(output.includes('Default URL: not deployed'), `Unexpected output:\n${output}`);
       assert.ok(output.includes('cdpn deploy'), `Unexpected output:\n${output}`);

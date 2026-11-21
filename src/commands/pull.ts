@@ -27,6 +27,7 @@ import {
   type SelectOption,
 } from '../utils/prompts.js';
 import { getGlobalProfileOption, resolveCommandAuth } from './auth-context.js';
+import { fetchLinkedPenOrHandleMissing } from './missing-pen.js';
 
 export interface PullCliOptions {
   force?: boolean;
@@ -138,10 +139,21 @@ export async function pullPenCommand(
     }
   }
 
-  const [pen, remoteFiles] = await Promise.all([
-    client.getPen(config.pen_id),
-    client.getPenFiles(config.pen_id),
-  ]);
+  const penLookup = await fetchLinkedPenOrHandleMissing({
+    client,
+    project,
+    auth,
+    commandName: 'pull',
+    interactive,
+    json: jsonMode,
+    prompts: options.prompts,
+  });
+  if (!penLookup.found) {
+    return null;
+  }
+
+  const pen = penLookup.pen;
+  const remoteFiles = await client.getPenFiles(config.pen_id);
 
   const hadInfoBefore = hasAnyPenInfoFields(config.info);
   const infoAnalysis = analyzeInfoSync(config.info, config.last_synced_info_hash, pen);
