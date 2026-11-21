@@ -12,6 +12,7 @@ import { registerDeleteCommand } from './commands/delete.js';
 import { registerDeployCommands } from './commands/deploy.js';
 import { registerDomainsCommand } from './commands/domains.js';
 import { registerForkCommand } from './commands/fork.js';
+import { registerInitCommand } from './commands/init.js';
 import { registerListCommand } from './commands/list.js';
 import { registerMetaCommands } from './commands/meta.js';
 import { registerNewCommand } from './commands/new.js';
@@ -57,6 +58,7 @@ export function createProgram(): Command {
     .option('--profile <name>', 'Use a specific API key profile from ~/.cdpn');
 
   registerAuthCommands(program);
+  registerInitCommand(program);
   registerCloneCommand(program);
   registerForkCommand(program);
   registerPullCommand(program);

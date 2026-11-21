@@ -95,6 +95,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       'deploy',
       'undeploy',
       'domains',
+      'init',
       'new',
       'privacy',
       'delete',
@@ -116,11 +117,38 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       'new',
       '--help',
     ]);
+    assert.ok(newHelp.includes('--title'));
+    assert.ok(newHelp.includes('--description'));
+    assert.ok(newHelp.includes('--tags'));
+    assert.ok(newHelp.includes('--access'));
+    assert.ok(newHelp.includes('--visibility'));
+    assert.ok(newHelp.includes('--blocks'));
     assert.ok(newHelp.includes('--template'));
     assert.ok(newHelp.includes('--as-template'));
     assert.equal(newHelp.includes('--scaffold'), false);
     assert.equal(newHelp.includes('--files'), false);
     assert.equal(newHelp.includes('--from'), false);
+
+    const { stdout: initHelp } = await execFileAsync(process.execPath, [
+      path.join(distDir, 'cli.js'),
+      'init',
+      '--help',
+    ]);
+    for (const flag of [
+      '--title',
+      '--access',
+      '--visibility',
+      '--blocks',
+      '--description',
+      '--tags',
+      '--template',
+      '--as-template',
+      '--force',
+      '--yes',
+      '--json',
+    ]) {
+      assert.ok(initHelp.includes(flag), `Expected init --help to include ${flag}`);
+    }
 
     // Verify `cdpn serve`, `cdpn build`, and `cdpn shell` expose expected options & subcommands
     const { stdout: serveHelp } = await execFileAsync(process.execPath, [
@@ -247,6 +275,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       ['auth', 'logout'],
       ['clone'],
       ['fork'],
+      ['init'],
       ['new'],
       ['pull'],
       ['status'],

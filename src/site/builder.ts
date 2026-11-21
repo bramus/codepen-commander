@@ -329,6 +329,42 @@ export async function updateGitIgnore(
   return { updated: true, created: false, entry: status.entry, filePath: status.filePath };
 }
 
+function collectManifestDirSets(
+  manifest: DemoManifest,
+  rootRealpath: string,
+): { demoDirs: Set<string>; groupDirs: Set<string> } {
+  const demoDirs = new Set<string>();
+  const groupDirs = new Set<string>();
+
+  const registerDemo = (relPathWithSlash: string) => {
+    const segments = relPathWithSlash.replace(/\/+$/, '').split('/').filter(Boolean);
+    if (segments.length === 0) return;
+    const demoAbs = path.resolve(rootRealpath, ...segments);
+    demoDirs.add(demoAbs);
+    for (let i = 1; i < segments.length; i++) {
+      groupDirs.add(path.resolve(rootRealpath, ...segments.slice(0, i)));
+    }
+  };
+
+  const walkGroups = (groups: DemoManifest['groups']) => {
+    for (const group of groups) {
+      for (const demo of group.demos) {
+        registerDemo(demo.path);
+      }
+      if (group.groups.length > 0) {
+        walkGroups(group.groups);
+      }
+    }
+  };
+
+  for (const demo of manifest.standalone) {
+    registerDemo(demo.path);
+  }
+  walkGroups(manifest.groups);
+
+  return { demoDirs, groupDirs };
+}
+
 async function copyDirectoryTree(options: {
   currentSrcDir: string;
   currentDestDir: string;
@@ -336,6 +372,9 @@ async function copyDirectoryTree(options: {
   excludedRealpaths: ReadonlySet<string>;
   isCollectionRootLevel: boolean;
   mode: DirectoryMode;
+  insideDemo: boolean;
+  allowedDemoDirs: ReadonlySet<string> | null;
+  allowedGroupDirs: ReadonlySet<string> | null;
   inheritedPenContext: PenBlockContext | null;
   activeIgnoreRoot: string | null;
   activeIgnoreMatchers: RegExp[];
@@ -348,6 +387,9 @@ async function copyDirectoryTree(options: {
     excludedRealpaths,
     isCollectionRootLevel,
     mode,
+    insideDemo,
+    allowedDemoDirs,
+    allowedGroupDirs,
     inheritedPenContext,
     unsupportedDemos,
   } = options;
@@ -429,11 +471,19 @@ async function copyDirectoryTree(options: {
     }
 
     if (lstat.isDirectory()) {
-      if (
-        mode === 'collection' &&
-        (await isBuiltCollectionOutputDir(realSrcPath, rootRealpath))
-      ) {
-        continue;
+      let nextInsideDemo = insideDemo;
+      if (mode === 'collection' && !insideDemo) {
+        if (await isBuiltCollectionOutputDir(realSrcPath, rootRealpath)) {
+          continue;
+        }
+        const isAllowedDemo = Boolean(allowedDemoDirs?.has(realSrcPath));
+        const isAllowedGroup = Boolean(allowedGroupDirs?.has(realSrcPath));
+        if (!isAllowedDemo && !isAllowedGroup) {
+          continue;
+        }
+        if (isAllowedDemo) {
+          nextInsideDemo = true;
+        }
       }
       await fs.mkdir(destPath, { recursive: true });
       await copyDirectoryTree({
@@ -443,12 +493,20 @@ async function copyDirectoryTree(options: {
         excludedRealpaths,
         isCollectionRootLevel: false,
         mode,
+        insideDemo: nextInsideDemo,
+        allowedDemoDirs,
+        allowedGroupDirs,
         inheritedPenContext: penContext,
         activeIgnoreRoot,
         activeIgnoreMatchers,
         unsupportedDemos,
       });
     } else if (lstat.isFile()) {
+      // In collection mode, skip stray files sitting inside group folders outside any `.cdpn.json` demo
+      if (mode === 'collection' && !isCollectionRootLevel && !insideDemo) {
+        continue;
+      }
+
       const lowerName = entry.name.toLowerCase();
 
       if (penContext?.hasClassic && lowerName.endsWith(PEN_HTML_SUFFIX)) {
@@ -487,7 +545,7 @@ async function copyDirectoryTree(options: {
 }
 
 /**
- * Builds a single Pen, standalone HTML demo, or collection directory into `outDir`.
+ * Builds a single Pen (`.cdpn.json`) or collection directory into `outDir`.
  */
 export async function buildProject(options: BuildProjectOptions): Promise<BuildProjectResult> {
   const baseCwd = path.resolve(options.cwd ?? process.cwd());
@@ -516,15 +574,19 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
 
   const { outDir, canonicalOutDir } = targetValidation.target;
   const excludedRealpaths = new Set<string>([canonicalOutDir]);
+  const mode = classifyDirectoryMode(inspection);
 
   let preScannedManifest: DemoManifest | null = null;
-  if (!inspection.hasCdpnJson && !inspection.hasCodepenDir && !inspection.hasPenConfig) {
+  let allowedDemoDirs: Set<string> | null = null;
+  let allowedGroupDirs: Set<string> | null = null;
+  if (mode === 'collection') {
     preScannedManifest = await scanDemos(inspection.rootRealpath, {
       excludeDirs: excludedRealpaths,
     });
+    const sets = collectManifestDirSets(preScannedManifest, inspection.rootRealpath);
+    allowedDemoDirs = sets.demoDirs;
+    allowedGroupDirs = sets.groupDirs;
   }
-  const subDemoCount = preScannedManifest ? countDemos(preScannedManifest) : 0;
-  const mode = classifyDirectoryMode(inspection, subDemoCount);
 
   // In single-Pen mode, fail loudly when unsupported CodePen blocks are active
   if (mode === 'pen' && inspection.penBlocks && inspection.penBlocks.unsupportedBlocks.length > 0) {
@@ -567,6 +629,9 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
     excludedRealpaths,
     isCollectionRootLevel: mode === 'collection',
     mode,
+    insideDemo: mode === 'pen',
+    allowedDemoDirs,
+    allowedGroupDirs,
     inheritedPenContext: null,
     activeIgnoreRoot: null,
     activeIgnoreMatchers: [],

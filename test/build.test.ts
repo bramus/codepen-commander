@@ -162,6 +162,10 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
     try {
       await fs.mkdir(path.join(tmpDir, '.codepen'), { recursive: true });
       await fs.writeFile(
+        path.join(tmpDir, '.cdpn.json'),
+        JSON.stringify({ info: { title: 'Sass Pen', access: 'Public' } }),
+      );
+      await fs.writeFile(
         path.join(tmpDir, '.codepen', 'pen.config.json'),
         JSON.stringify({ blocks: { 'sass-1': { name: 'sass-1', disabled: false } } }),
       );
@@ -176,7 +180,7 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
     }
   });
 
-  it('builds a collection directory with custom --shell, preserves root index.html when present, excludes repo files and previous builds, and renders unsupported sub-demo pages', async () => {
+  it('builds a collection directory with custom --shell, preserves root index.html when present, excludes unmarked dirs/repo files/previous builds, and renders unsupported sub-demo pages', async () => {
     const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-build-collection-'));
     const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-build-home-'));
     const srcDir = path.join(tmpRoot, 'cool-demos');
@@ -185,15 +189,30 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
     try {
       await fs.mkdir(path.join(srcDir, 'demo-one'), { recursive: true });
       await fs.writeFile(
+        path.join(srcDir, 'demo-one', '.cdpn.json'),
+        JSON.stringify({ info: { title: 'Demo One', access: 'Public' } }),
+      );
+      await fs.writeFile(
         path.join(srcDir, 'demo-one', 'index.html'),
         '<!DOCTYPE html><html><head><title>Demo One</title></head><body>One</body></html>',
       );
       await fs.mkdir(path.join(srcDir, 'broken-demo', '.codepen'), { recursive: true });
       await fs.writeFile(
+        path.join(srcDir, 'broken-demo', '.cdpn.json'),
+        JSON.stringify({ info: { title: 'Broken Demo', access: 'Public' } }),
+      );
+      await fs.writeFile(
         path.join(srcDir, 'broken-demo', '.codepen', 'pen.config.json'),
         JSON.stringify({ blocks: { 'markdown-1': { name: 'markdown-1', disabled: false } } }),
       );
       await fs.writeFile(path.join(srcDir, 'broken-demo', 'index.md'), '# Hi');
+
+      // Unmarked directory (NO .cdpn.json) must NOT be indexed or copied into build output
+      await fs.mkdir(path.join(srcDir, 'unmarked-folder'), { recursive: true });
+      await fs.writeFile(
+        path.join(srcDir, 'unmarked-folder', 'index.html'),
+        '<h1>Should Not Be Built</h1>',
+      );
 
       // Repo-root metadata files should not leak into collection build output
       await fs.writeFile(path.join(srcDir, 'README.md'), '# Repo readme');
@@ -232,7 +251,8 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
       // Unsupported demo received error page
       const brokenHtml = await fs.readFile(path.join(srcDir, 'dist', 'broken-demo', 'index.html'), 'utf8');
       assert.ok(brokenHtml.includes('Unsupported CodePen Block'));
-      // Repo-root README.md and package.json were excluded
+      // Unmarked directory and repo-root README.md / package.json were excluded
+      await assert.rejects(() => fs.stat(path.join(srcDir, 'dist', 'unmarked-folder')));
       await assert.rejects(() => fs.stat(path.join(srcDir, 'dist', 'README.md')));
       await assert.rejects(() => fs.stat(path.join(srcDir, 'dist', 'package.json')));
 
@@ -245,6 +265,7 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
       });
       assert.equal(out2.result?.demoCount, 2);
       await assert.rejects(() => fs.stat(path.join(srcDir, 'build', 'dist')));
+      await assert.rejects(() => fs.stat(path.join(srcDir, 'build', 'unmarked-folder')));
     } finally {
       await fs.rm(tmpRoot, { recursive: true, force: true });
       await fs.rm(tmpHome, { recursive: true, force: true });

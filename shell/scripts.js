@@ -1,6 +1,7 @@
 const directoryEl = document.getElementById('demo-directory');
 const cardTemplate = document.getElementById('demo-card-template');
 const emptyStateTemplate = document.getElementById('empty-state-template');
+const missingDemoWarningTemplate = document.getElementById('missing-demo-warning-template');
 
 function toSafeLocalHref(rawHref) {
   if (typeof rawHref !== 'string' || !rawHref.startsWith('./')) {
@@ -258,6 +259,9 @@ async function loadDemos() {
       return;
     }
 
+    if (missingDemoWarningTemplate) {
+      sections.push(missingDemoWarningTemplate.content.cloneNode(true));
+    }
     directoryEl.replaceChildren(...sections);
     syncPathOverflowFallback();
   } catch {

@@ -9,10 +9,18 @@ import {
   writeProjectConfig,
   type ProjectLocation,
 } from '../config/project.js';
+import {
+  buildPenConfigObject,
+  CLASSIC_CONFIG_FILENAME,
+  CODEPEN_DIR,
+  normalizePenBlocksList,
+  parseBlocksOption,
+  PEN_CONFIG_FILENAME,
+} from '../site/blocks.js';
 import { isDirectoryNonEmpty } from '../sync/fs.js';
 import { buildPenInfoConfigFields } from '../sync/info.js';
 import { syncRemoteFilesToDisk } from '../sync/materialize.js';
-import type { BinaryUploadPart, Build, Pen, PenFileRequest } from '../types.js';
+import type { BinaryUploadPart, Build, FileChange, Pen, PenFile, PenFileRequest } from '../types.js';
 import { fmt, formatDate, printBuildSummary, shortId } from '../utils/format.js';
 import { CliError, printJsonResponse } from '../utils/json.js';
 import {
@@ -36,6 +44,8 @@ export interface NewPenCliOptions {
   description?: string;
   tags?: string;
   access?: string;
+  visibility?: string;
+  blocks?: string;
   password?: string;
   template?: string;
   asTemplate?: boolean;
@@ -54,6 +64,9 @@ export interface ScaffoldNewPenOptions {
   description?: string;
   tags?: string[];
   access?: string;
+  visibility?: string;
+  /** Optional CodePen blocks to enable (`validate-1` and `fingerprint-1` are always included). */
+  blocks?: string | string[];
   password?: string;
   /** CodePen Template ID, URL, or title (`--template`). */
   template?: string;
@@ -90,6 +103,7 @@ export interface ScaffoldNewPenResult {
   auth: ResolvedAuth;
   project: ProjectLocation;
   templateLabel: string;
+  blocks?: string[];
 }
 
 type SelectedTemplate =
@@ -98,6 +112,32 @@ type SelectedTemplate =
 
 const NEW_NON_EMPTY_HINT =
   'To push an existing local demo folder to CodePen, run `cdpn push` inside that folder, or pass a new folder name (e.g. `cdpn new my-pen`).';
+
+const PEN_CONFIG_PEN_PATH = `/${CODEPEN_DIR}/${PEN_CONFIG_FILENAME}`;
+const CLASSIC_CONFIG_PEN_PATH = `/${CODEPEN_DIR}/${CLASSIC_CONFIG_FILENAME}`;
+
+function parseJsonObjectSafe(raw: string | null | undefined): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildStarterClassicConfigFromPaths(filePaths: readonly string[]): string {
+  const pathSet = new Set(filePaths.map((p) => (p.startsWith('/') ? p : `/${p}`)));
+  const config = {
+    head: '<meta name="viewport" content="width=device-width" />',
+    htmlClasses: '',
+    scripts: pathSet.has('/script.js') ? ['/script.js'] : [],
+    styles: pathSet.has('/style.css') ? ['/style.css'] : [],
+  };
+  return `${JSON.stringify(config, null, 2)}\n`;
+}
 
 /**
  * Scaffolds a brand-new CodePen 2.0 Pen strictly from CodePen's built-in default starter
@@ -118,8 +158,26 @@ export async function scaffoldNewPen(
     throw new CliError(400, 'CodePen allows at most 5 tags per Pen.');
   }
 
-  // Pre-validate --access and --password before hitting the network
-  const prevalidatedAccess = normalizeAccess(options.access);
+  // Pre-validate --access / --visibility, --blocks, and --password before hitting the network
+  const parsedAccessFlag = normalizeAccess(options.access);
+  const parsedVisibilityFlag = normalizeAccess(options.visibility);
+  if (parsedAccessFlag && parsedVisibilityFlag && parsedAccessFlag !== parsedVisibilityFlag) {
+    throw new CliError(
+      400,
+      `Conflicting --access ("${parsedAccessFlag}") and --visibility ("${parsedVisibilityFlag}") values.`,
+    );
+  }
+  const effectiveRawAccess = options.access ?? options.visibility;
+  const prevalidatedAccess = parsedAccessFlag ?? parsedVisibilityFlag;
+
+  let resolvedBlocks: string[] | undefined;
+  if (options.blocks !== undefined) {
+    resolvedBlocks =
+      typeof options.blocks === 'string'
+        ? parseBlocksOption(options.blocks)
+        : normalizePenBlocksList(options.blocks);
+  }
+
   if (prevalidatedAccess === 'Protected' && options.password !== undefined && options.password.length < 8) {
     throw new CliError(400, 'Protected Pens require --password with at least 8 characters.');
   }
@@ -228,7 +286,7 @@ export async function scaffoldNewPen(
 
   // 4. Determine visibility (Public default, Private, Protected, Collaborators)
   const { access, password } = await resolveVisibilityAndPassword({
-    rawAccess: options.access,
+    rawAccess: effectiveRawAccess,
     rawPassword: options.password,
     interactive,
     prompts: {
@@ -269,6 +327,41 @@ export async function scaffoldNewPen(
       textFiles = payload.textFiles;
       binaryFiles = payload.binaryFiles;
     }
+
+    if (resolvedBlocks !== undefined) {
+      const mergedFiles = textFiles ? [...textFiles] : [];
+      const existingPenConfigIdx = mergedFiles.findIndex(
+        (file) => (file.path.startsWith('/') ? file.path : `/${file.path}`) === PEN_CONFIG_PEN_PATH,
+      );
+      const existingPenConfig =
+        existingPenConfigIdx >= 0 ? parseJsonObjectSafe(mergedFiles[existingPenConfigIdx]?.content) : null;
+      const penConfigJson = `${JSON.stringify(
+        buildPenConfigObject(resolvedBlocks, { existing: existingPenConfig }),
+        null,
+        2,
+      )}\n`;
+
+      if (existingPenConfigIdx >= 0) {
+        mergedFiles[existingPenConfigIdx] = { path: PEN_CONFIG_PEN_PATH, content: penConfigJson };
+      } else {
+        mergedFiles.push({ path: PEN_CONFIG_PEN_PATH, content: penConfigJson });
+      }
+
+      const hasClassicConfig = mergedFiles.some(
+        (file) => (file.path.startsWith('/') ? file.path : `/${file.path}`) === CLASSIC_CONFIG_PEN_PATH,
+      );
+      if (resolvedBlocks.includes('classic-1') && !hasClassicConfig) {
+        mergedFiles.push({
+          path: CLASSIC_CONFIG_PEN_PATH,
+          content: buildStarterClassicConfigFromPaths([
+            ...mergedFiles.map((file) => file.path),
+            ...binaryFiles.map((file) => file.path),
+          ]),
+        });
+      }
+
+      textFiles = mergedFiles;
+    }
   }
 
   if (!jsonMode) {
@@ -301,12 +394,71 @@ export async function scaffoldNewPen(
     }
   }
 
-  await fs.mkdir(targetDir, { recursive: true });
-
-  const finalVersionId = finalBuild?.version_id ?? created.saved_version?.id ?? null;
-  const remoteFiles = finalVersionId
+  let finalVersionId = finalBuild?.version_id ?? created.saved_version?.id ?? null;
+  let remoteFiles: PenFile[] = finalVersionId
     ? (await client.getVersion(finalVersionId)).files ?? (await client.getPenFiles(created.id))
     : await client.getPenFiles(created.id);
+
+  // When scaffolding from CodePen's default starter with explicit --blocks, apply the
+  // block configuration in a follow-up file write so CodePen's starter files are preserved.
+  if (selected.kind === 'default-starter' && resolvedBlocks !== undefined) {
+    const existingPenConfigFile = remoteFiles.find(
+      (file) => (file.path.startsWith('/') ? file.path : `/${file.path}`) === PEN_CONFIG_PEN_PATH,
+    );
+    let existingPenConfigRaw: string | null = null;
+    if (existingPenConfigFile && !existingPenConfigFile.is_binary) {
+      if (existingPenConfigFile.content !== null) {
+        existingPenConfigRaw = existingPenConfigFile.content;
+      } else if (existingPenConfigFile.download_url) {
+        existingPenConfigRaw = (await client.downloadFile(existingPenConfigFile.download_url)).toString('utf8');
+      }
+    }
+
+    const penConfigJson = `${JSON.stringify(
+      buildPenConfigObject(resolvedBlocks, { existing: parseJsonObjectSafe(existingPenConfigRaw) }),
+      null,
+      2,
+    )}\n`;
+
+    const blockChanges: FileChange[] = [
+      {
+        ...(existingPenConfigFile ? { id: existingPenConfigFile.id } : {}),
+        path: PEN_CONFIG_PEN_PATH,
+        content: penConfigJson,
+      },
+    ];
+
+    const hasClassicConfig = remoteFiles.some(
+      (file) => (file.path.startsWith('/') ? file.path : `/${file.path}`) === CLASSIC_CONFIG_PEN_PATH,
+    );
+    if (resolvedBlocks.includes('classic-1') && !hasClassicConfig) {
+      blockChanges.push({
+        path: CLASSIC_CONFIG_PEN_PATH,
+        content: buildStarterClassicConfigFromPaths(remoteFiles.map((file) => file.path)),
+      });
+    }
+
+    if (!jsonMode) {
+      console.log(fmt.dim(`Configuring CodePen blocks (${resolvedBlocks.join(', ')})…`));
+    }
+    const writeResult = await client.writePenFiles(created.id, {
+      files: blockChanges,
+      ...(finalVersionId ? { expected_version_id: finalVersionId } : {}),
+      wait: shouldWait ? 45 : 0,
+    });
+    if (writeResult.build) {
+      finalBuild = shouldWait ? await client.settleBuild(writeResult.build) : writeResult.build;
+      if (shouldWait && !jsonMode) {
+        printBuildSummary(finalBuild);
+      }
+    }
+    finalVersionId = finalBuild?.version_id ?? writeResult.version?.id ?? finalVersionId;
+    remoteFiles = finalVersionId
+      ? (await client.getVersion(finalVersionId)).files ?? (await client.getPenFiles(created.id))
+      : await client.getPenFiles(created.id);
+  }
+
+  await fs.mkdir(targetDir, { recursive: true });
 
   const materialized = await syncRemoteFilesToDisk({
     client,
@@ -346,6 +498,7 @@ export async function scaffoldNewPen(
       version_id: finalVersionId,
       build: finalBuild,
       written_paths: materialized.writtenPaths,
+      ...(resolvedBlocks ? { blocks: resolvedBlocks } : {}),
     });
   } else {
     if (buildFailed) {
@@ -362,6 +515,9 @@ export async function scaffoldNewPen(
       console.log(`  Profile:    ${fmt.cyan(auth.profile)}`);
     }
     console.log(`  Visibility: ${created.access}${created.template ? fmt.dim(' · Template') : ''}`);
+    if (resolvedBlocks) {
+      console.log(`  Blocks:     ${fmt.cyan(resolvedBlocks.join(', '))}`);
+    }
     console.log(`  Folder:     ${fmt.cyan(folderDisplay)}`);
     console.log(`  Files:      ${materialized.writtenPaths.length} written`);
     console.log(`  Editor:     ${fmt.cyan(created.urls.editor)}`);
@@ -380,6 +536,7 @@ export async function scaffoldNewPen(
       config,
     },
     templateLabel: selected.label,
+    ...(resolvedBlocks ? { blocks: resolvedBlocks } : {}),
   };
 }
 
@@ -391,6 +548,11 @@ export function registerNewCommand(program: Command): void {
     .option('-d, --description <text>', 'Description for the new Pen')
     .option('--tags <tags>', 'Comma-separated tags (up to 5)')
     .option('--access <level>', 'Privacy: Public, Private, Protected, or Collaborators')
+    .option('--visibility <level>', 'Alias for --access (Public, Private, Protected, or Collaborators)')
+    .option(
+      '--blocks <blocks>',
+      'Comma-separated CodePen blocks to enable (e.g. packages,classic; validate and fingerprint are always included)',
+    )
     .option('--password <password>', 'Password (min 8 chars; required with --access Protected)')
     .option('--template <id-or-name>', 'Scaffold from one of your CodePen Templates (ID, URL, or title)')
     .option('--as-template', 'Mark the newly created Pen as a Template on CodePen')
@@ -411,6 +573,8 @@ export function registerNewCommand(program: Command): void {
         description: options.description,
         tags,
         access: options.access,
+        visibility: options.visibility,
+        blocks: options.blocks,
         password: options.password,
         template: options.template,
         asTemplate: options.asTemplate,

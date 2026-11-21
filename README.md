@@ -105,16 +105,32 @@ You can also run `cdpn delete --keep-info` to delete the online Pen while stripp
 
 You can also add an optional `.cdpnignore` file in a Pen folder to exclude extra local files from syncing (`.cdpn.json`, `.cdpnignore`, `.git`, `node_modules`, and `.DS_Store` are ignored automatically).
 
-## Scaffolding & Templates (`cdpn new`)
+## Initializing & Scaffolding (`cdpn init` & `cdpn new`)
 
-`cdpn new [folder]` is dedicated to scaffolding a brand-new CodePen 2.0 Pen from a CodePen Template into a new or empty local folder (for pushing an existing local demo folder, run `cdpn push` inside that folder instead).
+### Initialize an existing local folder (`cdpn init`)
+
+Run `cdpn init [dir]` inside any local folder to mark it as a CodePen demo by creating an unlinked `.cdpn.json` metadata file and `.codepen/pen.config.json` (plus a starter `.codepen/classic.config.json` if the `classic` block is selected):
+
+```bash
+cdpn init                                        # Interactive: asks for title, visibility, and blocks (multi-select)
+cdpn init ./my-demo -t "Scroll Demo" --visibility Public --blocks packages
+cdpn init -t "Template" -d "Starter pen" --tags css,layout --as-template
+```
+
+- Interactively prompts for **Pen title**, **Pen visibility**, and **CodePen blocks** (multi-select; `validate` and `fingerprint` are required and cannot be unselected).
+- Optional CLI flags let you bypass prompts (`-t/--title`, `--visibility`/`--access`, `--blocks`) and set extra metadata (`-d/--description`, `--tags`, `--template [bool]` / `--as-template`) without prompting.
+- Once initialized, the folder is immediately discovered by `cdpn serve` / `cdpn build` and ready for `cdpn push`.
+
+### Scaffold from a CodePen Template (`cdpn new`)
+
+`cdpn new [folder]` scaffolds a brand-new CodePen 2.0 Pen from a CodePen Template into a new or empty local folder (for pushing an existing local demo folder, run `cdpn push` inside that folder instead).
 
 CodePen stores your reusable scaffolds as **Templates** (any Pen marked with `template: true` on CodePen or via `cdpn info --template true` / `cdpn new --as-template`), alongside CodePen's built-in 2.0 starter. When you run `cdpn new` interactively, it fetches your account's Templates from CodePen and lets you pick one (or use CodePen's default starter):
 
 ```bash
 cdpn new my-demo                                 # Interactive picker (your CodePen Templates + CodePen default starter)
 cdpn new my-demo --template "CSS Demo Base"      # Scaffold from a CodePen Template by title, ID, or URL
-cdpn new my-starter --as-template                # Create a new reusable Template on CodePen
+cdpn new my-starter --as-template --blocks packages -d "Reusable starter" --tags css,starter
 ```
 
 To fork one of your own 2.0 Pens into a new local folder, use `cdpn fork`:
@@ -150,8 +166,8 @@ cdpn serve --shell ./my-shell --title "CSS Demos" --subtitle "Handcrafted experi
 cdpn build --out dist --shell ./my-shell --title "CSS Demos"
 ```
 
-- **Pen folder** (`.cdpn.json` and/or `.codepen/`): serves or builds the Pen directly (if `.codepen/` is missing, `cdpn serve` serves it as plain static files with a helpful tip). When building a Pen into a subfolder of itself, `cdpn build` automatically adds that subfolder to `.cdpnignore` and offers to create/update `.gitignore`.
-- **Directory of Pens** (neither `.cdpn.json` nor `.codepen/`): recursively discovers subdirectories containing `.cdpn.json`, `.codepen/`, or `index.html` and generates an in-memory `demos.json` (on `serve`) or static `demos.json` (on `build`) with the index shell—preserving an existing root `index.html` if present.
+- **Pen folder** (contains `.cdpn.json`): serves or builds the Pen directly (if `.codepen/` is missing, `cdpn serve` serves it as plain static files with a helpful tip). When building a Pen into a subfolder of itself, `cdpn build` automatically adds that subfolder to `.cdpnignore` and offers to create/update `.gitignore`.
+- **Directory of Pens** (no `.cdpn.json` at the root): recursively discovers subdirectories containing `.cdpn.json` and generates an in-memory `demos.json` (on `serve`) or static `demos.json` (on `build`) with the index shell—preserving an existing root `index.html` if present. Subdirectories without a `.cdpn.json` file are not indexed or served; the shell displays a hint to run `cdpn init` in any missing demo folder to mark it as a CodePen demo.
 
 ## Commands
 
@@ -164,7 +180,8 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn auth list [--json]` | List stored profiles in `~/.cdpn` (alias: `cdpn auth ls`) |
 | `cdpn auth default [profile] [--json]` | Set the default profile in `~/.cdpn` |
 | `cdpn auth logout [profile] [--all] [--json]` | Remove a specific profile or clear all profiles from `~/.cdpn` (preserves global config if set) |
-| `cdpn new [folder] [--template <id\|url\|title>] [--as-template] [--json]` | Scaffold a brand-new 2.0 Pen from a CodePen Template (or CodePen default starter) into a new or empty folder |
+| `cdpn init [dir] [-t ...] [--visibility ...] [--blocks ...] [-d ...] [--tags ...] [--template [bool]\|--as-template] [-f\|-y] [--json]` | Initialize a local directory as a CodePen demo by creating `.cdpn.json` and `.codepen/pen.config.json` |
+| `cdpn new [folder] [-t ...] [-d ...] [--tags ...] [--access\|--visibility ...] [--blocks ...] [--template <id\|url\|title>] [--as-template] [--json]` | Scaffold a brand-new 2.0 Pen from a CodePen Template (or CodePen default starter) into a new or empty folder |
 | `cdpn fork <url> [folder] [--title ...] [--access ...] [--json]` | Fork one of your own 2.0 Pens into a local folder (for other users' Pens, offers to open in browser to fork and clone back) |
 | `cdpn clone <url> [folder] [--force] [--json]` | Clone a CodePen Pen into a local folder (auto-matches stored profile by URL owner; offers to convert Classic Pens or clone them unlinked; offers browser fork-and-clone fallback for unowned Pens) |
 | `cdpn pull [--force] [--json]` | Pull latest remote file and Pen info changes into an existing cloned folder (requires `.cdpn.json`) |
@@ -183,8 +200,8 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn delete [--keep-info] [--yes] [--json]` | Delete the online Pen on CodePen (moves to Deleted Items for 3 days) and remove `.cdpn.json` — or keep only its `info` section with `--keep-info` for a later first push — while keeping local files untouched (aliases: `cdpn del`, `cdpn rm`) |
 | `cdpn info [--title ...] [--tags ...] [--access ...] [--template true\|false] [--json]` | View or update Pen metadata |
 | `cdpn settings [--auto-deploy ...] [--indent-with ...] [--json]` | View or update Pen editor & deployment settings |
-| `cdpn serve [dir] [-p <port>] [-o] [--shell <dir>] [--title ...] [--subtitle ...] [--footer ...]` | Serve a local Pen or directory of Pens on `127.0.0.1` with live in-memory `demos.json` and `classic`/`packages` Blocks support |
-| `cdpn build [dir] [-o <dir>] [-y\|-f] [-w] [--shell <dir>] [--title ...] [--subtitle ...] [--footer ...] [--json]` | Build a local Pen or directory of Pens into a static deployable folder (auto-updates `.cdpnignore` and offers `.gitignore` when building inside a Pen) |
+| `cdpn serve [dir] [-p <port>] [-o] [--shell <dir>] [--title ...] [--subtitle ...] [--footer ...]` | Serve a local Pen (`.cdpn.json`) or directory of `.cdpn.json` Pens on `127.0.0.1` with live in-memory `demos.json` and `classic`/`packages` Blocks support |
+| `cdpn build [dir] [-o <dir>] [-y\|-f] [-w] [--shell <dir>] [--title ...] [--subtitle ...] [--footer ...] [--json]` | Build a local Pen or directory of `.cdpn.json` Pens into a static deployable folder (auto-updates `.cdpnignore` and offers `.gitignore` when building inside a Pen) |
 | `cdpn shell [show] [--json]` | Show the active demo index shell (custom `~/.cdpn` path or built-in) |
 | `cdpn shell export [dir] [--set] [-y\|-f] [--json]` | Copy the built-in shell files into a local directory for customization (aliases: `eject`, `init`) |
 | `cdpn shell set <dir> [--json]` | Set a custom default shell directory in `~/.cdpn` |

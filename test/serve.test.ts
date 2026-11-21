@@ -106,10 +106,16 @@ describe('cdpn serve (single Pen, standalone, collection, blocks, custom shells,
     }
   });
 
-  it('serves a Pen with .codepen/ alone (no .cdpn.json) in pen mode and renders 501 for unsupported blocks', async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-serve-codepen-only-'));
+  it('renders 501 for a Pen with .cdpn.json and unsupported blocks, and does not serve .codepen-only dirs without .cdpn.json as a Pen', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-serve-unsupported-'));
+    const noCdpnDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-serve-no-cdpn-'));
     try {
+      // 1. Pen WITH .cdpn.json + unsupported markdown-1 block -> 501
       await fs.mkdir(path.join(tmpDir, '.codepen'), { recursive: true });
+      await fs.writeFile(
+        path.join(tmpDir, '.cdpn.json'),
+        JSON.stringify({ info: { title: 'Markdown Pen', access: 'Public' } }),
+      );
       await fs.writeFile(
         path.join(tmpDir, '.codepen', 'pen.config.json'),
         JSON.stringify({
@@ -135,23 +141,63 @@ describe('cdpn serve (single Pen, standalone, collection, blocks, custom shells,
       } finally {
         await running.close();
       }
+
+      // 2. Folder with .codepen/ alone (NO .cdpn.json) -> collection mode (0 demos), serves shell with warning
+      await fs.mkdir(path.join(noCdpnDir, '.codepen'), { recursive: true });
+      await fs.writeFile(
+        path.join(noCdpnDir, '.codepen', 'pen.config.json'),
+        JSON.stringify({
+          blocks: { 'markdown-1': { name: 'markdown-1', disabled: false } },
+        }),
+      );
+      await fs.writeFile(path.join(noCdpnDir, 'index.md'), '# Unmarked');
+
+      const runningUnmarked = await startDevServer({
+        targetDir: noCdpnDir,
+        port: 0,
+        allowEphemeralPort: true,
+      });
+
+      try {
+        assert.equal(runningUnmarked.mode, 'collection');
+        assert.equal(runningUnmarked.demoCount, 0);
+        const res = await fetch(`${runningUnmarked.url}/`);
+        assert.equal(res.status, 200);
+        const html = await res.text();
+        assert.ok(
+          html.includes('Missing a demo? Run <code>cdpn init</code> in it to mark it as a CodePen demo.'),
+        );
+      } finally {
+        await runningUnmarked.close();
+      }
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
+      await fs.rm(noCdpnDir, { recursive: true, force: true });
     }
   });
 
-  it('serves a collection directory dynamically with in-memory demos.json, built-in shell, and custom --shell / ~/.cdpn shell', async () => {
+  it('serves a collection directory dynamically with in-memory demos.json, built-in shell, 404 for unmarked dirs, and custom --shell / ~/.cdpn shell', async () => {
     const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-serve-collection-'));
     const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-serve-home-'));
     const collectionDir = path.join(tmpRoot, 'my-css-demos');
     const customShellDir = path.join(tmpRoot, 'custom-shell');
 
     try {
-      // Create nested demos: one with .cdpn.json, one plain index.html, one classic Pen
+      // Create demos: one unlinked .cdpn.json demo, one linked classic Pen, and one UNMARKED dir (no .cdpn.json)
       await fs.mkdir(path.join(collectionDir, 'alpha-demo'), { recursive: true });
+      await fs.writeFile(
+        path.join(collectionDir, 'alpha-demo', '.cdpn.json'),
+        JSON.stringify({ info: { title: 'Alpha Demo', description: 'Unlinked demo', access: 'Public' } }),
+      );
       await fs.writeFile(
         path.join(collectionDir, 'alpha-demo', 'index.html'),
         '<!DOCTYPE html><html><head><title>Alpha Demo</title><meta name="description" content="Plain demo"></head><body>Alpha</body></html>',
+      );
+
+      await fs.mkdir(path.join(collectionDir, 'unmarked-demo'), { recursive: true });
+      await fs.writeFile(
+        path.join(collectionDir, 'unmarked-demo', 'index.html'),
+        '<!DOCTYPE html><html><head><title>Unmarked</title></head><body>Hidden</body></html>',
       );
 
       await fs.mkdir(path.join(collectionDir, 'css', 'classic-pen', '.codepen'), {
@@ -200,6 +246,9 @@ describe('cdpn serve (single Pen, standalone, collection, blocks, custom shells,
         assert.ok(indexHtml.includes('<title>My CSS Demos</title>'));
         assert.ok(indexHtml.includes('Custom subtitle here'));
         assert.ok(indexHtml.includes('codepen-commander'));
+        assert.ok(
+          indexHtml.includes('Missing a demo? Run <code>cdpn init</code> in it to mark it as a CodePen demo.'),
+        );
 
         const demosRes = await fetch(`${running.url}/demos.json`);
         assert.equal(demosRes.status, 200);
@@ -213,6 +262,14 @@ describe('cdpn serve (single Pen, standalone, collection, blocks, custom shells,
         assert.equal(manifest.groups[0]?.title, 'CSS');
         assert.equal(manifest.groups[0]?.demos[0]?.title, 'Classic Pen');
         assert.equal(manifest.groups[0]?.demos[0]?.codepenUrl, 'https://codepen.io/bramus/pen/cls1');
+
+        // Marked demos serve cleanly, while directories without .cdpn.json return 404
+        const alphaRes = await fetch(`${running.url}/alpha-demo/`);
+        assert.equal(alphaRes.status, 200);
+        const unmarkedDirRes = await fetch(`${running.url}/unmarked-demo/`);
+        assert.equal(unmarkedDirRes.status, 404);
+        const unmarkedFileRes = await fetch(`${running.url}/unmarked-demo/index.html`);
+        assert.equal(unmarkedFileRes.status, 404);
 
         // Classic sub-pen compiles on the fly
         const classicRes = await fetch(`${running.url}/css/classic-pen/`);

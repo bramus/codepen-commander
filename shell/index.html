@@ -61,9 +61,20 @@
 
   <template id="empty-state-template">
     <section class="empty-state">
-      <h2>No demos yet</h2>
-      <p>Add a self-contained demo folder in a subdirectory (e.g., <code>my-demo/</code> or <code>my-group/my-demo/</code>) with a <code>.cdpn.json</code>, <code>.codepen/</code>, or <code>index.html</code> file. Refresh this page and it will appear automatically.</p>
+      <h2>No CodePen demos found</h2>
+      <p>Missing a demo? Run <code>cdpn init</code> in it to mark it as a CodePen demo.</p>
     </section>
+  </template>
+
+  <template id="missing-demo-warning-template">
+    <aside class="shell-warning" role="note">
+      <svg class="shell-warning-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M8 2 14.5 13.5h-13L8 2Z" />
+        <line x1="8" y1="6.2" x2="8" y2="9.4" />
+        <circle cx="8" cy="11.5" r="0.6" fill="currentColor" stroke="none" />
+      </svg>
+      <p>Missing a demo? Run <code>cdpn init</code> in it to mark it as a CodePen demo.</p>
+    </aside>
   </template>
 </body>
 </html>

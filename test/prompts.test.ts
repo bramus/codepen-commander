@@ -4,8 +4,10 @@ import { PassThrough } from 'node:stream';
 import { describe, it } from 'node:test';
 import { stripAnsi } from '../src/utils/format.js';
 import {
+  type MultiSelectOption,
   PromptCancelledError,
   promptConfirmWithIO,
+  promptMultiSelectWithIO,
   type PromptSelectInputStream,
   type PromptSelectOutputStream,
   promptSelectWithIO,
@@ -385,5 +387,86 @@ describe('arrow-key promptSelect', () => {
     await new Promise((r) => setImmediate(r));
     cancelTty.input.write('\x1b');
     await assert.rejects(() => cancelPromise, (err: unknown) => err instanceof PromptCancelledError);
+  });
+
+  it('supports arrow-key promptMultiSelect with locked items, Space/a toggles, Escape cancel, and non-TTY fallback', async () => {
+    const blockOptions: MultiSelectOption<string>[] = [
+      { value: 'validate-1', label: 'validate', description: 'required', checked: true, locked: true },
+      { value: 'fingerprint-1', label: 'fingerprint', description: 'required', checked: true, locked: true },
+      { value: 'packages-1', label: 'packages', description: 'esm.sh packages', checked: false },
+      { value: 'classic-1', label: 'classic', description: 'classic mode', checked: false },
+    ];
+
+    const tty = createMockTty({ isTTY: true, columns: 100, rows: 24 });
+    const promise = promptMultiSelectWithIO('Blocks to add', blockOptions, {
+      input: tty.input,
+      output: tty.output,
+      term: 'xterm-256color',
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Initial cursor starts on first unlocked item ("packages")
+    const initial = stripAnsi(tty.getLastChunk());
+    assert.ok(initial.includes('→ [ ] packages'), initial);
+    assert.ok(initial.includes('[✓] validate'), initial);
+    assert.ok(initial.includes('[✓] fingerprint'), initial);
+
+    // Space toggles "packages" on
+    tty.input.write(' ');
+    await new Promise((r) => setImmediate(r));
+    assert.ok(stripAnsi(tty.getLastChunk()).includes('→ [✓] packages'));
+
+    // Move up twice to "validate" (locked) and press Space -> must stay checked & show notice
+    tty.input.write('\x1b[A\x1b[A ');
+    await new Promise((r) => setImmediate(r));
+    const lockedFrame = stripAnsi(tty.getLastChunk());
+    assert.ok(lockedFrame.includes('→ [✓] validate'), lockedFrame);
+    assert.ok(lockedFrame.includes('cannot be unselected'), lockedFrame);
+
+    // Press 'a' -> toggles all unlocked items ON (since classic wasn't checked yet)
+    tty.input.write('a');
+    await new Promise((r) => setImmediate(r));
+    const allOnFrame = stripAnsi(tty.getLastChunk());
+    assert.ok(allOnFrame.includes('[✓] packages'), allOnFrame);
+    assert.ok(allOnFrame.includes('[✓] classic'), allOnFrame);
+
+    // Press 'a' again -> toggles all unlocked items OFF while locked items stay checked
+    tty.input.write('a');
+    await new Promise((r) => setImmediate(r));
+    const unlockedOffFrame = stripAnsi(tty.getLastChunk());
+    assert.ok(unlockedOffFrame.includes('[✓] validate'), unlockedOffFrame);
+    assert.ok(unlockedOffFrame.includes('[✓] fingerprint'), unlockedOffFrame);
+    assert.ok(unlockedOffFrame.includes('[ ] packages'), unlockedOffFrame);
+    assert.ok(unlockedOffFrame.includes('[ ] classic'), unlockedOffFrame);
+
+    // Move down 2 to packages and check it, then Enter
+    tty.input.write('\x1b[B\x1b[B \r');
+    const selected = await promise;
+    assert.deepEqual(selected, ['validate-1', 'fingerprint-1', 'packages-1']);
+    assert.equal(tty.input.isRaw, false);
+    assert.ok(stripAnsi(tty.getLastChunk()).includes('validate, fingerprint, packages'));
+
+    // Escape cancels cleanly with PromptCancelledError
+    const cancelTty = createMockTty({ isTTY: true, columns: 100, rows: 24 });
+    const cancelPromise = promptMultiSelectWithIO('Blocks to add', blockOptions, {
+      input: cancelTty.input,
+      output: cancelTty.output,
+      term: 'xterm-256color',
+    });
+    await new Promise((r) => setImmediate(r));
+    cancelTty.input.write('\x1b');
+    await assert.rejects(() => cancelPromise, (err: unknown) => err instanceof PromptCancelledError);
+    assert.equal(cancelTty.input.isRaw, false);
+
+    // Non-TTY fallback always preserves locked items and applies selected numbers
+    const nonTty = createMockTty({ isTTY: false });
+    const fallbackPromise = promptMultiSelectWithIO('Blocks to add', blockOptions, {
+      input: nonTty.input,
+      output: nonTty.output,
+    });
+    await new Promise((r) => setImmediate(r));
+    nonTty.input.write('4\n');
+    const fallbackSelected = await fallbackPromise;
+    assert.deepEqual(fallbackSelected, ['validate-1', 'fingerprint-1', 'classic-1']);
   });
 });

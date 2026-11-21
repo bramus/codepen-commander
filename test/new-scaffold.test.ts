@@ -84,6 +84,11 @@ describe('template-only cdpn new and dedicated cdpn fork', () => {
     penId: string;
     body: Record<string, unknown>;
   }> = [];
+  let writeFileCalls: Array<{
+    auth: string | undefined;
+    penId: string;
+    body: Record<string, unknown>;
+  }> = [];
   let createdFilesByVersion = new Map<string, PenFile[]>();
   let createCounter = 0;
 
@@ -296,10 +301,79 @@ describe('template-only cdpn new and dedicated cdpn fork', () => {
           makePen({
             id: penId,
             title: (parsed.title as string) || 'Untitled',
+            description: (parsed.description as string) || '',
+            tags: Array.isArray(parsed.tags) ? (parsed.tags as string[]) : [],
             access: (parsed.access as Pen['access']) || 'Public',
             template: Boolean(parsed.template),
           }),
         );
+      }
+
+      const writeFilesMatch = url.pathname.match(/^\/v2\/pens\/([^/]+)\/files$/);
+      if (req.method === 'PUT' && writeFilesMatch?.[1]) {
+        const penId = decodeURIComponent(writeFilesMatch[1]);
+        const parsed = rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : {};
+        writeFileCalls.push({ auth, penId, body: parsed });
+
+        const prevVerId = (parsed.expected_version_id as string | undefined) ?? `ver-${penId}`;
+        const nextVerId = `${prevVerId}-blocks`;
+        const existingFiles = [...(createdFilesByVersion.get(prevVerId) ?? [])];
+        const changes = Array.isArray(parsed.files)
+          ? (parsed.files as Array<{ id?: string; path?: string; content?: string }>)
+          : [];
+
+        for (const [idx, change] of changes.entries()) {
+          if (!change.path || change.content === undefined) continue;
+          const normalized = change.path.startsWith('/') ? change.path : `/${change.path}`;
+          const existingIdx = existingFiles.findIndex((f) => f.path === normalized);
+          const nextFile: PenFile = {
+            id: change.id ?? `wf-${idx}`,
+            path: normalized,
+            name: path.posix.basename(normalized),
+            content_hash: `hw-${idx}`,
+            is_binary: false,
+            bytes: Buffer.byteLength(change.content),
+            content_type: 'application/json',
+            content: change.content,
+            url: null,
+            download_url: null,
+          };
+          if (existingIdx >= 0) {
+            existingFiles[existingIdx] = nextFile;
+          } else {
+            existingFiles.push(nextFile);
+          }
+        }
+        createdFilesByVersion.set(nextVerId, existingFiles);
+
+        return sendJson(200, {
+          pen: null,
+          version: {
+            id: nextVerId,
+            pen_id: penId,
+            hash: 'vh-blocks',
+            created_at: '2026-09-10T12:00:02Z',
+            deployed: false,
+            saved: true,
+            label: null,
+            build: null,
+            preview_url: null,
+          },
+          build: {
+            id: `bld-${nextVerId}`,
+            status: 'Success',
+            started_at: '2026-09-10T12:00:02Z',
+            ended_at: '2026-09-10T12:00:03Z',
+            rounds: 1,
+            diagnostics: [],
+            errors: [],
+            applied_patches: [],
+            patches: [],
+            version_id: nextVerId,
+            next_id: null,
+            previous_id: null,
+          },
+        });
       }
 
       const forkMatch = url.pathname.match(/^\/v2\/pens\/([^/]+)\/fork$/);
@@ -671,6 +745,109 @@ describe('template-only cdpn new and dedicated cdpn fork', () => {
       });
       assert.equal(secretPromptCalled, true);
       assert.equal(forkCalls[forkCalls.length - 1]?.body.password, 'forksecret99');
+    } finally {
+      await fs.rm(tmpHome, { recursive: true, force: true });
+      await fs.rm(tmpParent, { recursive: true, force: true });
+    }
+  });
+
+  it('supports --visibility, --blocks, --description, --tags, and --as-template on cdpn new (default starter & template)', async () => {
+    const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-blocks-home-'));
+    const tmpParent = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-new-blocks-dir-'));
+
+    try {
+      await saveProfileToFile('bramus', KEY_BRAMUS, { homeDir: tmpHome, setAsDefault: true });
+
+      // 1. Default starter with --visibility, --blocks, --description, --tags, --as-template
+      const writeCallsBefore = writeFileCalls.length;
+      const defaultRes = await scaffoldNewPen({
+        folderArg: 'starter-with-blocks',
+        cwd: tmpParent,
+        title: 'Blocks Starter',
+        description: 'Demo created with extra flags',
+        tags: ['css', 'animation'],
+        visibility: 'Private',
+        blocks: 'packages,classic',
+        asTemplate: true,
+        baseUrl,
+        env: {},
+        homeDir: tmpHome,
+        interactive: false,
+      });
+
+      assert.equal(defaultRes.pen.access, 'Private');
+      assert.equal(defaultRes.pen.description, 'Demo created with extra flags');
+      assert.deepEqual(defaultRes.pen.tags, ['css', 'animation']);
+      assert.equal(defaultRes.pen.template, true);
+      assert.deepEqual(defaultRes.blocks, ['classic-1', 'fingerprint-1', 'packages-1', 'validate-1']);
+      assert.equal(writeFileCalls.length, writeCallsBefore + 1);
+
+      const penConfigRaw = await fs.readFile(
+        path.join(tmpParent, 'starter-with-blocks', '.codepen', 'pen.config.json'),
+        'utf8',
+      );
+      const penConfig = JSON.parse(penConfigRaw) as { blocks: Record<string, { name: string; disabled: boolean }> };
+      assert.deepEqual(Object.keys(penConfig.blocks).sort(), [
+        'classic-1',
+        'fingerprint-1',
+        'packages-1',
+        'validate-1',
+      ]);
+      const classicConfigRaw = await fs.readFile(
+        path.join(tmpParent, 'starter-with-blocks', '.codepen', 'classic.config.json'),
+        'utf8',
+      );
+      assert.ok(classicConfigRaw.includes('"head"'));
+
+      const linkedCfg = await readProjectConfig(path.join(tmpParent, 'starter-with-blocks'));
+      assert.equal(linkedCfg.info?.description, 'Demo created with extra flags');
+      assert.deepEqual(linkedCfg.info?.tags, ['css', 'animation']);
+      assert.equal(linkedCfg.info?.access, 'Private');
+      assert.equal(linkedCfg.info?.template, true);
+
+      // 2. Custom template with --blocks merges pen.config.json directly in initial POST /v2/pens
+      const writeCallsBeforeTpl = writeFileCalls.length;
+      const tplRes = await scaffoldNewPen({
+        folderArg: 'template-with-blocks',
+        cwd: tmpParent,
+        template: TEMPLATE_CSS_ID,
+        title: 'Template With Packages',
+        visibility: 'Collaborators',
+        blocks: 'packages',
+        baseUrl,
+        env: {},
+        homeDir: tmpHome,
+        interactive: false,
+      });
+
+      assert.equal(tplRes.pen.access, 'Collaborators');
+      assert.equal(writeFileCalls.length, writeCallsBeforeTpl);
+      const tplPenConfig = JSON.parse(
+        await fs.readFile(path.join(tmpParent, 'template-with-blocks', '.codepen', 'pen.config.json'), 'utf8'),
+      ) as { blocks: Record<string, unknown> };
+      assert.deepEqual(Object.keys(tplPenConfig.blocks).sort(), [
+        'fingerprint-1',
+        'packages-1',
+        'validate-1',
+      ]);
+
+      // 3. Rejects conflicting --access and --visibility before hitting API
+      const createCallsBefore = createCalls.length;
+      await assert.rejects(
+        () =>
+          scaffoldNewPen({
+            folderArg: 'conflict-dir',
+            cwd: tmpParent,
+            access: 'Public',
+            visibility: 'Private',
+            baseUrl,
+            env: {},
+            homeDir: tmpHome,
+            interactive: false,
+          }),
+        /Conflicting --access/,
+      );
+      assert.equal(createCalls.length, createCallsBefore);
     } finally {
       await fs.rm(tmpHome, { recursive: true, force: true });
       await fs.rm(tmpParent, { recursive: true, force: true });

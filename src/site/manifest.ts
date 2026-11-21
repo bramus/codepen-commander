@@ -220,6 +220,10 @@ async function readDemoEntry(
     rootDir,
     rootRealpath,
   );
+  if (!cdpnFile) {
+    return null;
+  }
+
   const codepenDir = await resolveSafeRealDir(
     path.join(demoDir, CODEPEN_DIR),
     rootDir,
@@ -232,22 +236,15 @@ async function readDemoEntry(
   );
 
   let classicIndexFile: { realPath: string; size: number } | null = null;
-  let hasUnsupportedBlocks = false;
   if (!indexFile && codepenDir) {
     const penBlocks = await readPenBlocks(demoRealpath, rootRealpath);
-    if (penBlocks && penBlocks.unsupportedBlocks.length > 0) {
-      hasUnsupportedBlocks = true;
-    } else if (penBlocks?.hasClassic) {
+    if (penBlocks?.hasClassic) {
       classicIndexFile = await resolveSafeRealFile(
         path.join(demoDir, 'index.pen.html'),
         rootDir,
         rootRealpath,
       );
     }
-  }
-
-  if (!cdpnFile && !codepenDir && !indexFile && !classicIndexFile && !hasUnsupportedBlocks) {
-    return null;
   }
 
   let htmlTitle: string | null = null;

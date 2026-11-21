@@ -98,13 +98,6 @@ export async function runServeCommand(options: ServeCommandOptions = {}): Promis
     if (options.shell) {
       console.log(`  ${fmt.dim('Note: --shell is only used when serving a directory of Pens.')}`);
     }
-  } else if (running.mode === 'standalone') {
-    console.log(
-      `${fmt.boldGreen('✓')} ${fmt.bold('Serving local demo')} ${fmt.magenta(displayDir)}`,
-    );
-    if (options.shell) {
-      console.log(`  ${fmt.dim('Note: --shell is only used when serving a directory of Pens.')}`);
-    }
   } else {
     const countLabel = `${running.demoCount} ${running.demoCount === 1 ? 'demo' : 'demos'}`;
     console.log(
@@ -117,6 +110,11 @@ export async function runServeCommand(options: ServeCommandOptions = {}): Promis
       console.log(`  ${fmt.dim('Shell:')}  ${fmt.magenta(running.shell.dir)} ${fmt.dim(`(${sourceLabel})`)}`);
     }
     console.log(`  ${fmt.dim('Watch:')}  watching subdirectories for changes ${fmt.dim('(in-memory demos.json)')}`);
+    if (running.demoCount === 0) {
+      console.log(
+        `  ${fmt.boldYellow('!')} ${fmt.dim('No .cdpn.json demos found. Run `cdpn init` inside a demo folder to mark it as a CodePen demo.')}`,
+      );
+    }
   }
 
   console.log(`  ${fmt.dim('URL:')}    ${fmt.boldCyan(running.url)}`);

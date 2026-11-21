@@ -1,6 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { PROJECT_CONFIG_FILENAME } from '../config/project.js';
 import { CliError } from '../utils/json.js';
 import {
   PEN_HTML_SUFFIX,
@@ -130,6 +131,31 @@ type PathResolution =
   | { status: 501; errorHtml: string; csp: string }
   | { status: 400 | 403 | 404; message: string };
 
+async function hasEnclosingCdpnJson(
+  dirRealpath: string,
+  rootRealpath: string,
+): Promise<boolean> {
+  let current = path.resolve(dirRealpath);
+  while (current !== rootRealpath && isWithinRoot(current, rootRealpath)) {
+    const candidate = path.join(current, PROJECT_CONFIG_FILENAME);
+    try {
+      const stat = await fs.lstat(candidate);
+      if (!stat.isSymbolicLink() && stat.isFile()) {
+        const real = await fs.realpath(candidate);
+        if (isWithinRoot(real, rootRealpath)) {
+          return true;
+        }
+      }
+    } catch {
+      // Check parent directory
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return false;
+}
+
 async function resolveSafePath(
   rawPathname: string,
   rootDir: string,
@@ -163,7 +189,8 @@ async function resolveSafePath(
   try {
     lstat = await fs.lstat(resolvedPath);
   } catch {
-    if (!decodedPath.endsWith('/') && segments.length > 0) {
+    const canResolvePenBlocks = !isCollectionRoot || segments.length >= 2;
+    if (canResolvePenBlocks && !decodedPath.endsWith('/') && segments.length > 0) {
       const requestedFilename = segments.at(-1)!;
       const lowerFilename = requestedFilename.toLowerCase();
       if (lowerFilename.endsWith('.html') && !lowerFilename.endsWith(PEN_HTML_SUFFIX)) {
@@ -174,6 +201,12 @@ async function resolveSafePath(
             if (!parentStat.isSymbolicLink() && parentStat.isDirectory()) {
               const realParentDir = await fs.realpath(parentDir);
               if (isWithinRoot(realParentDir, rootRealpath)) {
+                if (
+                  isCollectionRoot &&
+                  !(await hasEnclosingCdpnJson(realParentDir, rootRealpath))
+                ) {
+                  return { status: 404, message: 'Not Found' };
+                }
                 const unsupportedPage = await resolveUnsupportedBlocksPage({
                   dirRealpath: realParentDir,
                   rootRealpath,
@@ -210,11 +243,6 @@ async function resolveSafePath(
   }
 
   if (lstat.isDirectory()) {
-    if (!decodedPath.endsWith('/')) {
-      const normalizedRedirect = `/${segments.map(encodeURIComponent).join('/')}/`;
-      return { status: 301, redirect: normalizedRedirect };
-    }
-
     let realDirPath: string;
     try {
       realDirPath = await fs.realpath(resolvedPath);
@@ -225,17 +253,34 @@ async function resolveSafePath(
       return { status: 403, message: 'Forbidden' };
     }
 
-    const unsupportedPage = await resolveUnsupportedBlocksPage({
-      dirRealpath: realDirPath,
-      rootRealpath,
-      isRootServe: isCollectionRoot,
-    });
-    if (unsupportedPage) {
-      return {
-        status: 501,
-        errorHtml: unsupportedPage.html,
-        csp: unsupportedPage.csp,
-      };
+    // In collection mode, never serve subdirectories that do not have an enclosing `.cdpn.json`
+    if (
+      isCollectionRoot &&
+      segments.length > 0 &&
+      !(await hasEnclosingCdpnJson(realDirPath, rootRealpath))
+    ) {
+      return { status: 404, message: 'Not Found' };
+    }
+
+    if (!decodedPath.endsWith('/')) {
+      const normalizedRedirect = `/${segments.map(encodeURIComponent).join('/')}/`;
+      return { status: 301, redirect: normalizedRedirect };
+    }
+
+    const canResolvePenBlocks = !isCollectionRoot || segments.length > 0;
+    if (canResolvePenBlocks) {
+      const unsupportedPage = await resolveUnsupportedBlocksPage({
+        dirRealpath: realDirPath,
+        rootRealpath,
+        isRootServe: isCollectionRoot,
+      });
+      if (unsupportedPage) {
+        return {
+          status: 501,
+          errorHtml: unsupportedPage.html,
+          csp: unsupportedPage.csp,
+        };
+      }
     }
 
     const indexPath = path.join(resolvedPath, 'index.html');
@@ -250,17 +295,19 @@ async function resolveSafePath(
       }
       return { status: 200, filePath: realIndexPath, size: indexStat.size };
     } catch {
-      try {
-        const virtualHtml = await resolveVirtualClassicHtml({
-          dirRealpath: realDirPath,
-          requestedFilename: 'index.html',
-          rootRealpath,
-        });
-        if (virtualHtml !== null) {
-          return { status: 200, virtualHtml, contentType: MIME_TYPES['.html']! };
+      if (canResolvePenBlocks) {
+        try {
+          const virtualHtml = await resolveVirtualClassicHtml({
+            dirRealpath: realDirPath,
+            requestedFilename: 'index.html',
+            rootRealpath,
+          });
+          if (virtualHtml !== null) {
+            return { status: 200, virtualHtml, contentType: MIME_TYPES['.html']! };
+          }
+        } catch {
+          // Fall through to 404
         }
-      } catch {
-        // Fall through to 404
       }
       return { status: 404, message: 'Not Found' };
     }
@@ -275,8 +322,21 @@ async function resolveSafePath(
     return { status: 403, message: 'Forbidden' };
   }
 
+  // In collection mode, files inside subdirectories are only served when enclosed by a `.cdpn.json` demo
+  if (
+    isCollectionRoot &&
+    segments.length >= 2 &&
+    !(await hasEnclosingCdpnJson(path.dirname(realFilePath), rootRealpath))
+  ) {
+    return { status: 404, message: 'Not Found' };
+  }
+
   const lowerFilePath = realFilePath.toLowerCase();
-  if (lowerFilePath.endsWith('.html') && !lowerFilePath.endsWith(PEN_HTML_SUFFIX)) {
+  if (
+    (!isCollectionRoot || segments.length >= 2) &&
+    lowerFilePath.endsWith('.html') &&
+    !lowerFilePath.endsWith(PEN_HTML_SUFFIX)
+  ) {
     const unsupportedPage = await resolveUnsupportedBlocksPage({
       dirRealpath: path.dirname(realFilePath),
       rootRealpath,
@@ -319,8 +379,8 @@ export interface RunningDevServer {
 }
 
 /**
- * Starts the local localhost-only (`127.0.0.1`) HTTP server for either a single Pen,
- * a standalone HTML demo, or a multi-Pen collection directory with in-memory `demos.json`.
+ * Starts the local localhost-only (`127.0.0.1`) HTTP server for either a single Pen
+ * (`.cdpn.json`) or a multi-Pen collection directory with in-memory `demos.json`.
  */
 export async function startDevServer(
   options: StartDevServerOptions = {},
@@ -343,11 +403,12 @@ export async function startDevServer(
 
   const port = parseServePort(options.port, Boolean(options.allowEphemeralPort));
   const inspection = await inspectTargetDirectory(resolvedTarget);
+  const mode = classifyDirectoryMode(inspection);
 
   let manifestWatcher: InMemoryManifestWatcher | null = null;
   let initialDemoCount = 0;
 
-  if (!inspection.hasCdpnJson && !inspection.hasCodepenDir && !inspection.hasPenConfig) {
+  if (mode === 'collection') {
     manifestWatcher = await createInMemoryManifestWatcher({
       rootDir: inspection.rootRealpath,
       onUpdate({ demoCount }) {
@@ -358,13 +419,6 @@ export async function startDevServer(
       },
     });
     initialDemoCount = countDemos(manifestWatcher.getManifest());
-  }
-
-  const mode = classifyDirectoryMode(inspection, initialDemoCount);
-
-  if (mode !== 'collection' && manifestWatcher) {
-    manifestWatcher.close();
-    manifestWatcher = null;
   }
 
   let activeShell: ResolvedShell | null = null;
@@ -510,7 +564,7 @@ export async function startDevServer(
 
     try {
       let content: Buffer;
-      if (ext === '.html') {
+      if (ext === '.html' && (!isCollectionRoot || path.dirname(result.filePath) !== inspection.rootRealpath)) {
         const blockResult = await resolveServedHtmlWithBlocks({
           filePath: result.filePath,
           rootRealpath: inspection.rootRealpath,

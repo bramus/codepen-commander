@@ -3,7 +3,7 @@ import path from 'node:path';
 import { PROJECT_CONFIG_FILENAME, readProjectConfigFile } from '../config/project.js';
 import { CODEPEN_DIR, PEN_CONFIG_FILENAME, isWithinRoot, readPenBlocks, type PenBlockContext } from './blocks.js';
 
-export type DirectoryMode = 'pen' | 'collection' | 'standalone';
+export type DirectoryMode = 'pen' | 'collection';
 
 export type CdpnJsonState = 'linked-v2' | 'linked-classic' | 'unlinked' | 'invalid' | 'none';
 
@@ -44,8 +44,7 @@ async function statRegularDir(dirPath: string, rootRealpath: string): Promise<bo
 
 /**
  * Inspects a directory directly (does not walk upward) to classify whether it is a
- * CodePen Pen folder (`.cdpn.json` and/or `.codepen/`), a standalone HTML demo, or
- * a multi-Pen collection directory.
+ * CodePen Pen folder (`.cdpn.json`) or a multi-Pen collection directory.
  */
 export async function inspectTargetDirectory(targetDir: string): Promise<DirectoryInspection> {
   const resolved = path.resolve(targetDir);
@@ -95,19 +94,9 @@ export async function inspectTargetDirectory(targetDir: string): Promise<Directo
 
 /**
  * Resolves the effective operating mode for `serve` and `build`:
- * - `'pen'`: directory has `.cdpn.json` and/or `.codepen/`
- * - `'standalone'`: no `.cdpn.json` or `.codepen/`, HAS `index.html`, and 0 discovered sub-demos
- * - `'collection'`: no `.cdpn.json` or `.codepen/`, and either no `index.html` or >= 1 sub-demos
+ * - `'pen'`: directory directly contains a `.cdpn.json` file
+ * - `'collection'`: directory does not contain `.cdpn.json` (serves/builds `.cdpn.json` subdirectories)
  */
-export function classifyDirectoryMode(
-  inspection: DirectoryInspection,
-  subDemoCount: number,
-): DirectoryMode {
-  if (inspection.hasCdpnJson || inspection.hasCodepenDir || inspection.hasPenConfig) {
-    return 'pen';
-  }
-  if (inspection.hasIndexHtml && subDemoCount === 0) {
-    return 'standalone';
-  }
-  return 'collection';
+export function classifyDirectoryMode(inspection: DirectoryInspection): DirectoryMode {
+  return inspection.hasCdpnJson ? 'pen' : 'collection';
 }

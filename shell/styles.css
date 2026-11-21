@@ -447,6 +447,30 @@
     }
   }
 
+  .shell-warning {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.85rem 1.1rem;
+    background-color: light-dark(oklch(96% 0.04 85), oklch(24% 0.04 80));
+    border: 1px solid light-dark(oklch(82% 0.1 80), oklch(42% 0.09 80));
+    border-radius: var(--radius-card);
+    corner-shape: squircle;
+    color: light-dark(oklch(34% 0.08 75), oklch(88% 0.06 85));
+    font-size: 0.875rem;
+
+    & code {
+      background-color: light-dark(oklch(90% 0.05 85), oklch(30% 0.05 80));
+      color: inherit;
+    }
+  }
+
+  .shell-warning-icon {
+    flex-shrink: 0;
+    inline-size: 1.05rem;
+    block-size: 1.05rem;
+  }
+
   .site-footer {
     padding-block-start: 1.25rem;
     border-block-start: 1px solid var(--border-subtle);
