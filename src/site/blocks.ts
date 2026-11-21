@@ -820,12 +820,17 @@ const UNSUPPORTED_BLOCK_PAGE_STYLE = `
   body {
     min-block-size: 100dvb;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     place-items: center;
     padding: clamp(1.5rem, 5vw, 3rem) clamp(1.25rem, 4vw, 2rem);
     background-color: var(--surface-page);
     color: var(--text-primary);
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     line-height: 1.55;
+  }
+
+  main {
+    inline-size: min(100%, 38rem);
   }
 
   h1 {
@@ -857,7 +862,7 @@ const UNSUPPORTED_BLOCK_PAGE_STYLE = `
 
 @layer components {
   .error-card {
-    inline-size: min(100%, 38rem);
+    inline-size: 100%;
     display: grid;
     gap: 1.15rem;
     padding: clamp(1.5rem, 4vw, 2.25rem);
@@ -871,6 +876,7 @@ const UNSUPPORTED_BLOCK_PAGE_STYLE = `
     display: grid;
     gap: 0.45rem;
     justify-items: start;
+    min-inline-size: 0;
   }
 
   .demo-path {
@@ -878,11 +884,14 @@ const UNSUPPORTED_BLOCK_PAGE_STYLE = `
     background: none;
     color: var(--text-subtle);
     font-size: 0.8rem;
+    max-inline-size: 100%;
+    overflow-wrap: anywhere;
   }
 
   .error-body {
     display: grid;
     gap: 1.25rem;
+    min-inline-size: 0;
     color: var(--text-muted);
     font-size: 0.95rem;
   }

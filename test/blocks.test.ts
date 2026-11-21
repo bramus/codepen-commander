@@ -199,6 +199,8 @@ describe('CodePen Blocks engine (classic, packages, unsupported)', () => {
 
       assert.equal(page.csp, UNSUPPORTED_BLOCK_PAGE_CSP);
       assert.ok(page.csp.includes("script-src 'none'"));
+      assert.ok(page.html.includes('grid-template-columns: minmax(0, 1fr);'));
+      assert.ok(page.html.includes('main {\n    inline-size: min(100%, 38rem);'));
       assert.ok(page.html.includes('Unsupported CodePen Blocks'));
       assert.ok(page.html.includes('markdown-1'));
       assert.ok(page.html.includes('sass-1'));
