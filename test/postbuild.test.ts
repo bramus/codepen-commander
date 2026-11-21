@@ -60,16 +60,25 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       [],
       'dist/ should not contain .ts or .d.ts files',
     );
-    const allowedNonJs = new Set(['package.json', 'README.md', 'LICENSE']);
+    const allowedNonJs = new Set([
+      'package.json',
+      'README.md',
+      'LICENSE',
+      path.join('shell', 'index.html'),
+      path.join('shell', 'styles.css'),
+    ]);
+    assert.ok((await fs.stat(path.join(distDir, 'shell', 'index.html'))).isFile());
+    assert.ok((await fs.stat(path.join(distDir, 'shell', 'styles.css'))).isFile());
+    assert.ok((await fs.stat(path.join(distDir, 'shell', 'scripts.js'))).isFile());
     assert.deepEqual(
       distFiles.filter((f) => !f.endsWith('.js') && !allowedNonJs.has(f)),
       [],
-      'dist/ should only contain .js files plus package.json, README.md, and LICENSE',
+      'dist/ should only contain .js files plus package.json, README.md, LICENSE, and shell/ assets',
     );
 
-    // Verify npm publish from ./dist produces no bin auto-correction warnings
-    const { stderr } = await execFileAsync('npm', ['publish', '--dry-run'], { cwd: distDir });
-    assert.equal(stderr.includes('auto-corrected'), false, `Unexpected npm publish warning: ${stderr}`);
+    // Verify npm packaging from ./dist succeeds cleanly and produces no bin auto-correction warnings
+    const { stderr } = await execFileAsync('npm', ['pack', '--dry-run'], { cwd: distDir });
+    assert.equal(stderr.includes('auto-corrected'), false, `Unexpected npm pack warning: ${stderr}`);
     assert.equal(stderr.includes('was invalid and removed'), false, `npm removed bin entry: ${stderr}`);
   });
 
@@ -95,6 +104,9 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       'rollback',
       'info',
       'settings',
+      'serve',
+      'build',
+      'shell',
     ]) {
       assert.ok(stdout.includes(cmd), `Expected CLI help to list command "${cmd}"`);
     }
@@ -109,6 +121,41 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     assert.equal(newHelp.includes('--scaffold'), false);
     assert.equal(newHelp.includes('--files'), false);
     assert.equal(newHelp.includes('--from'), false);
+
+    // Verify `cdpn serve`, `cdpn build`, and `cdpn shell` expose expected options & subcommands
+    const { stdout: serveHelp } = await execFileAsync(process.execPath, [
+      path.join(distDir, 'cli.js'),
+      'serve',
+      '--help',
+    ]);
+    assert.ok(serveHelp.includes('--port'));
+    assert.ok(serveHelp.includes('--open'));
+    assert.ok(serveHelp.includes('--shell'));
+    assert.ok(serveHelp.includes('--title'));
+    assert.ok(serveHelp.includes('--subtitle'));
+    assert.ok(serveHelp.includes('--footer'));
+
+    const { stdout: buildHelp } = await execFileAsync(process.execPath, [
+      path.join(distDir, 'cli.js'),
+      'build',
+      '--help',
+    ]);
+    assert.ok(buildHelp.includes('--out'));
+    assert.ok(buildHelp.includes('--yes'));
+    assert.ok(buildHelp.includes('--force'));
+    assert.ok(buildHelp.includes('--watch'));
+    assert.ok(buildHelp.includes('--shell'));
+    assert.ok(buildHelp.includes('--title'));
+    assert.ok(buildHelp.includes('--json'));
+
+    const { stdout: shellHelp } = await execFileAsync(process.execPath, [
+      path.join(distDir, 'cli.js'),
+      'shell',
+      '--help',
+    ]);
+    for (const sub of ['show', 'export', 'set', 'reset']) {
+      assert.ok(shellHelp.includes(sub), `Expected shell help to list subcommand "${sub}"`);
+    }
 
     // `cdpn clone` without mandatory <url> must fail
     await assert.rejects(
@@ -192,7 +239,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     }
     assert.ok(authHelp.includes('~/.cdpn'), 'Expected auth help to reference ~/.cdpn');
 
-    // Verify --json is exposed on all applicable commands and excluded from interactive/browser-only commands
+    // Verify --json is exposed on all applicable commands and excluded from interactive/server/browser-only commands
     const commandsWithJson: string[][] = [
       ['auth', 'status'],
       ['auth', 'list'],
@@ -217,6 +264,12 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       ['rollback'],
       ['info'],
       ['settings'],
+      ['build'],
+      ['shell'],
+      ['shell', 'show'],
+      ['shell', 'export'],
+      ['shell', 'set'],
+      ['shell', 'reset'],
     ];
 
     for (const args of commandsWithJson) {
@@ -231,7 +284,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       );
     }
 
-    const commandsWithoutJson: string[][] = [['open'], ['auth', 'login']];
+    const commandsWithoutJson: string[][] = [['open'], ['auth', 'login'], ['serve']];
     for (const args of commandsWithoutJson) {
       const { stdout: cmdHelp } = await execFileAsync(process.execPath, [
         path.join(distDir, 'cli.js'),
@@ -246,12 +299,21 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     }
   });
 
-  it('validates browser URLs strictly (HTTPS only, no control chars)', () => {
+  it('validates browser URLs strictly (HTTPS only by default, localhost HTTP only when opted in)', () => {
     assert.equal(
       validateBrowserUrl('https://codepen.io/settings/api'),
       'https://codepen.io/settings/api',
     );
     assert.throws(() => validateBrowserUrl('http://codepen.io/settings/api'), /non-HTTPS/i);
+    assert.throws(() => validateBrowserUrl('http://127.0.0.1:3000'), /non-HTTPS/i);
+    assert.equal(
+      validateBrowserUrl('http://127.0.0.1:3000', { allowLocalhostHttp: true }),
+      'http://127.0.0.1:3000/',
+    );
+    assert.throws(
+      () => validateBrowserUrl('http://codepen.io/settings/api', { allowLocalhostHttp: true }),
+      /non-HTTPS/i,
+    );
     assert.throws(() => validateBrowserUrl('javascript:alert(1)'), /non-HTTPS/i);
     assert.throws(() => validateBrowserUrl('file:///etc/passwd'), /non-HTTPS/i);
     assert.throws(() => validateBrowserUrl('https://codepen.io/\nfoo'), /control characters/i);

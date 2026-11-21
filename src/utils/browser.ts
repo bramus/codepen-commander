@@ -1,9 +1,18 @@
 import { execFile } from 'node:child_process';
 
+export interface BrowserUrlOptions {
+  allowLocalhostHttp?: boolean;
+}
+
+function isLocalhostHost(hostname: string): boolean {
+  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]';
+}
+
 /**
- * Validates that a URL is a clean HTTPS URL with no control characters.
+ * Validates that a URL is a clean HTTPS URL (or localhost HTTP when explicitly allowed)
+ * with no control characters.
  */
-export function validateBrowserUrl(rawUrl: string): string {
+export function validateBrowserUrl(rawUrl: string, options: BrowserUrlOptions = {}): string {
   if (/[\x00-\x1f\x7f]/.test(rawUrl)) {
     throw new Error('URL contains invalid control characters.');
   }
@@ -15,7 +24,12 @@ export function validateBrowserUrl(rawUrl: string): string {
     throw new Error(`Invalid URL: ${rawUrl}`);
   }
 
-  if (parsed.protocol !== 'https:') {
+  const allowedLocalHttp =
+    Boolean(options.allowLocalhostHttp) &&
+    parsed.protocol === 'http:' &&
+    isLocalhostHost(parsed.hostname);
+
+  if (parsed.protocol !== 'https:' && !allowedLocalHttp) {
     throw new Error(`Refusing to open non-HTTPS URL in browser: ${parsed.protocol}`);
   }
 
@@ -23,11 +37,12 @@ export function validateBrowserUrl(rawUrl: string): string {
 }
 
 /**
- * Opens an HTTPS URL in the user's default browser without invoking a shell.
+ * Opens an HTTPS URL (or localhost HTTP URL when `allowLocalhostHttp` is true) in the user's
+ * default browser without invoking a shell.
  * Returns `true` if the launcher succeeded, or `false` if unavailable (e.g. headless/SSH).
  */
-export async function openBrowser(rawUrl: string): Promise<boolean> {
-  const safeUrl = validateBrowserUrl(rawUrl);
+export async function openBrowser(rawUrl: string, options: BrowserUrlOptions = {}): Promise<boolean> {
+  const safeUrl = validateBrowserUrl(rawUrl, options);
 
   let command: string;
   let args: string[];

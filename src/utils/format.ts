@@ -1,31 +1,57 @@
 import type { Build, BuildDiagnostic } from '../types.js';
 
-function colorsEnabled(): boolean {
-  if (process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== '') {
-    return false;
-  }
-  if (process.env.FORCE_COLOR !== undefined && process.env.FORCE_COLOR !== '0') {
-    return true;
-  }
-  return Boolean(process.stdout.isTTY);
+export interface Formatter {
+  bold: (s: string) => string;
+  dim: (s: string) => string;
+  red: (s: string) => string;
+  green: (s: string) => string;
+  yellow: (s: string) => string;
+  blue: (s: string) => string;
+  magenta: (s: string) => string;
+  cyan: (s: string) => string;
+  gray: (s: string) => string;
+  boldGreen: (s: string) => string;
+  boldYellow: (s: string) => string;
+  boldCyan: (s: string) => string;
+  boldMagenta: (s: string) => string;
+  boldRed: (s: string) => string;
 }
 
-function wrap(code: string, text: string): string {
-  if (!colorsEnabled()) return text;
-  return `\x1b[${code}m${text}\x1b[0m`;
+export function createFormatter(output: { isTTY?: boolean } = process.stdout): Formatter {
+  const colorsEnabled = (): boolean => {
+    if (process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== '') {
+      return false;
+    }
+    if (process.env.FORCE_COLOR !== undefined && process.env.FORCE_COLOR !== '0') {
+      return true;
+    }
+    return Boolean(output.isTTY);
+  };
+
+  const wrap = (code: string, text: string): string => {
+    if (!colorsEnabled()) return text;
+    return `\x1b[${code}m${text}\x1b[0m`;
+  };
+
+  return {
+    bold: (s: string) => wrap('1', s),
+    dim: (s: string) => wrap('2', s),
+    red: (s: string) => wrap('31', s),
+    green: (s: string) => wrap('32', s),
+    yellow: (s: string) => wrap('33', s),
+    blue: (s: string) => wrap('34', s),
+    magenta: (s: string) => wrap('35', s),
+    cyan: (s: string) => wrap('36', s),
+    gray: (s: string) => wrap('90', s),
+    boldGreen: (s: string) => wrap('1;32', s),
+    boldYellow: (s: string) => wrap('1;33', s),
+    boldCyan: (s: string) => wrap('1;36', s),
+    boldMagenta: (s: string) => wrap('1;35', s),
+    boldRed: (s: string) => wrap('1;31', s),
+  };
 }
 
-export const fmt = {
-  bold: (s: string) => wrap('1', s),
-  dim: (s: string) => wrap('2', s),
-  red: (s: string) => wrap('31', s),
-  green: (s: string) => wrap('32', s),
-  yellow: (s: string) => wrap('33', s),
-  blue: (s: string) => wrap('34', s),
-  magenta: (s: string) => wrap('35', s),
-  cyan: (s: string) => wrap('36', s),
-  gray: (s: string) => wrap('90', s),
-};
+export const fmt: Formatter = createFormatter(process.stdout);
 
 export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, '');

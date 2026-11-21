@@ -4,9 +4,12 @@ import { PassThrough } from 'node:stream';
 import { describe, it } from 'node:test';
 import { stripAnsi } from '../src/utils/format.js';
 import {
+  PromptCancelledError,
+  promptConfirmWithIO,
   type PromptSelectInputStream,
   type PromptSelectOutputStream,
   promptSelectWithIO,
+  promptValidatedTextWithIO,
   type SelectOption,
 } from '../src/utils/prompts.js';
 
@@ -97,7 +100,8 @@ describe('arrow-key promptSelect', () => {
       const initialPlain = stripAnsi(initialRaw);
 
       assert.ok(initialRaw.includes('\x1b[?25l'), 'Should hide cursor while selecting');
-      assert.ok(initialRaw.includes('\x1b[36m'), 'Highlighted option should use cyan color');
+      assert.ok(initialRaw.includes('\x1b[1;36m'), 'Highlighted option should use bold cyan color');
+      assert.ok(initialPlain.includes('◆ Pen visibility:'), initialPlain);
       assert.ok(initialPlain.includes('  → Public — visible to everyone (default)'), initialPlain);
       assert.ok(initialPlain.includes('    Private — visible only to you / your team'), initialPlain);
       assert.equal(initialPlain.includes('Choose [1-'), false, 'Should not render old numeric prompt');
@@ -120,9 +124,9 @@ describe('arrow-key promptSelect', () => {
       const finalRaw = tty.getLastChunk();
       const finalPlain = stripAnsi(finalRaw);
       assert.ok(finalRaw.includes('\x1b[5A\r\x1b[J'), 'Should erase full menu before collapsing');
-      assert.ok(finalRaw.includes('\x1b[32m'), 'Confirmed choice should change to green color');
+      assert.ok(finalRaw.includes('\x1b[1;32m'), 'Confirmed choice should change to bold green color');
       assert.ok(finalRaw.includes('\x1b[?25h'), 'Should restore cursor visibility on confirm');
-      assert.ok(finalPlain.includes('Pen visibility:\n'), finalPlain);
+      assert.ok(finalPlain.includes('◆ Pen visibility:\n'), finalPlain);
       assert.ok(finalPlain.includes('  → Private — visible only to you / your team'), finalPlain);
       assert.equal(finalPlain.includes('Public'), false, 'Unselected options should be collapsed');
       assert.equal(finalPlain.includes('Protected'), false, 'Unselected options should be collapsed');
@@ -315,5 +319,71 @@ describe('arrow-key promptSelect', () => {
     await new Promise((r) => setImmediate(r));
     dumbTty.input.write('\n');
     assert.equal(await dumbPromise, 'Private');
+  });
+
+  it('supports arrow-key Yes/No promptConfirm with y/n shortcuts and non-TTY fallback', async () => {
+    const tty = createMockTty({ isTTY: true, columns: 80, rows: 24 });
+    const promise = promptConfirmWithIO('Overwrite existing build?', false, {
+      input: tty.input,
+      output: tty.output,
+      term: 'xterm-256color',
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.ok(stripAnsi(tty.getLastChunk()).includes('  → No'));
+
+    // Press 'y' shortcut to highlight Yes, then Enter to confirm
+    tty.input.write('y');
+    await new Promise((r) => setImmediate(r));
+    assert.ok(stripAnsi(tty.getLastChunk()).includes('  → Yes'));
+    tty.input.write('\r');
+    assert.equal(await promise, true);
+
+    // Non-TTY fallback accepts 'n' shortcut
+    const nonTty = createMockTty({ isTTY: false });
+    const fallbackPromise = promptConfirmWithIO('Generate .gitignore?', true, {
+      input: nonTty.input,
+      output: nonTty.output,
+    });
+    await new Promise((r) => setImmediate(r));
+    nonTty.input.write('n\n');
+    assert.equal(await fallbackPromise, false);
+  });
+
+  it('supports validated text prompt with inline error retry and green in-place confirmation', async () => {
+    await withForceColor(async () => {
+      const tty = createMockTty({ isTTY: true, columns: 80, rows: 24 });
+      const promise = promptValidatedTextWithIO<string>('Output directory', {
+        defaultValue: 'build',
+        io: { input: tty.input, output: tty.output, term: 'xterm-256color' },
+        validate(raw) {
+          const trimmed = raw.trim() || 'build';
+          if (trimmed === '.') {
+            return { ok: false, error: 'Cannot build into current directory.' };
+          }
+          return { ok: true, value: trimmed, displayValue: trimmed };
+        },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      tty.input.write('.\n');
+      await new Promise((r) => setImmediate(r));
+      assert.ok(stripAnsi(tty.getRawOutput()).includes('Cannot build into current directory.'));
+
+      tty.input.write('dist\n');
+      const value = await promise;
+      assert.equal(value, 'dist');
+      assert.ok(tty.getRawOutput().includes('\x1b[1;32m'));
+    });
+
+    // Rejects with PromptCancelledError on Escape in interactive select
+    const cancelTty = createMockTty({ isTTY: true, columns: 80, rows: 24 });
+    const cancelPromise = promptSelectWithIO('Cancel test:', VISIBILITY_OPTIONS, 0, {
+      input: cancelTty.input,
+      output: cancelTty.output,
+      term: 'xterm-256color',
+    });
+    await new Promise((r) => setImmediate(r));
+    cancelTty.input.write('\x1b');
+    await assert.rejects(() => cancelPromise, (err: unknown) => err instanceof PromptCancelledError);
   });
 });

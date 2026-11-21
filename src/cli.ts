@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { Command, CommanderError } from 'commander';
 import { isCodePenApiError } from './api/errors.js';
 import { registerAuthCommands } from './commands/auth.js';
+import { registerBuildCommand } from './commands/build.js';
 import { registerCloneCommand } from './commands/clone.js';
 import { registerDeleteCommand } from './commands/delete.js';
 import { registerDeployCommands } from './commands/deploy.js';
@@ -18,10 +19,13 @@ import { registerOpenCommand } from './commands/open.js';
 import { registerPrivacyCommand } from './commands/privacy.js';
 import { registerPullCommand } from './commands/pull.js';
 import { registerPushCommand } from './commands/push.js';
+import { registerServeCommand } from './commands/serve.js';
+import { registerShellCommands } from './commands/shell.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerVersionCommands } from './commands/versions.js';
 import { fmt } from './utils/format.js';
 import { errorToJsonEnvelope, wantsJsonOutput } from './utils/json.js';
+import { isPromptCancelledError } from './utils/prompts.js';
 
 function readPackageVersion(): string {
   const __filename = fileURLToPath(import.meta.url);
@@ -67,6 +71,9 @@ export function createProgram(): Command {
   registerListCommand(program);
   registerVersionCommands(program);
   registerMetaCommands(program);
+  registerServeCommand(program);
+  registerBuildCommand(program);
+  registerShellCommands(program);
 
   return program;
 }
@@ -102,6 +109,11 @@ async function main(): Promise<void> {
       const envelope = errorToJsonEnvelope(error);
       console.log(JSON.stringify(envelope, null, 2));
       process.exitCode = 1;
+      return;
+    }
+
+    if (isPromptCancelledError(error)) {
+      process.exitCode = 130;
       return;
     }
 

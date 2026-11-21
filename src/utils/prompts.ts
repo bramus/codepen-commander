@@ -1,40 +1,28 @@
 import readline from 'node:readline';
 import readlinePromises from 'node:readline/promises';
 import { stdin as defaultInput, stdout as defaultOutput } from 'node:process';
-import { fmt, stripAnsi } from './format.js';
+import { createFormatter, stripAnsi } from './format.js';
+
+export class PromptCancelledError extends Error {
+  constructor() {
+    super('Prompt canceled by user.');
+    this.name = 'PromptCancelledError';
+  }
+}
+
+export function isPromptCancelledError(error: unknown): error is PromptCancelledError {
+  return error instanceof PromptCancelledError;
+}
 
 export function isInteractive(): boolean {
   return Boolean(defaultInput.isTTY && defaultOutput.isTTY);
-}
-
-export async function promptText(question: string, defaultValue?: string): Promise<string> {
-  const rl = readlinePromises.createInterface({ input: defaultInput, output: defaultOutput });
-  try {
-    const suffix = defaultValue ? ` ${fmt.dim(`(${defaultValue})`)}` : '';
-    const answer = await rl.question(`${question}${suffix}: `);
-    const trimmed = answer.trim();
-    return trimmed || defaultValue || '';
-  } finally {
-    rl.close();
-  }
-}
-
-export async function promptConfirm(question: string, defaultYes = false): Promise<boolean> {
-  const rl = readlinePromises.createInterface({ input: defaultInput, output: defaultOutput });
-  try {
-    const hint = defaultYes ? 'Y/n' : 'y/N';
-    const answer = (await rl.question(`${question} ${fmt.dim(`[${hint}]`)} `)).trim().toLowerCase();
-    if (!answer) return defaultYes;
-    return answer === 'y' || answer === 'yes';
-  } finally {
-    rl.close();
-  }
 }
 
 export interface SelectOption<T extends string = string> {
   value: T;
   label: string;
   description?: string;
+  shortcut?: string;
 }
 
 export interface PromptSelectInputStream extends NodeJS.ReadableStream {
@@ -55,6 +43,23 @@ export interface PromptSelectIO {
   term?: string;
 }
 
+export type TextValidationResult<T = string> =
+  | { ok: true; value: T; displayValue?: string }
+  | { ok: false; error: string };
+
+function canUseInteractiveTty(
+  input: PromptSelectInputStream,
+  output: PromptSelectOutputStream,
+  term: string | undefined,
+): boolean {
+  return (
+    Boolean(input.isTTY) &&
+    Boolean(output.isTTY) &&
+    typeof input.setRawMode === 'function' &&
+    term !== 'dumb'
+  );
+}
+
 function countTerminalRows(lines: string[], columns: number): number {
   const safeCols = Math.max(1, columns);
   let total = 0;
@@ -67,6 +72,160 @@ function countTerminalRows(lines: string[], columns: number): number {
   return total;
 }
 
+function formatQuestionHeader(
+  question: string,
+  defaultValue: string | undefined,
+  f: ReturnType<typeof createFormatter>,
+): string {
+  const hint = defaultValue ? ` ${f.dim(`(${defaultValue})`)}` : '';
+  return `${f.cyan('◆')} ${f.bold(question)}${hint}`;
+}
+
+async function readInteractiveLine(
+  promptText: string,
+  input: PromptSelectInputStream,
+  output: PromptSelectOutputStream,
+  f: ReturnType<typeof createFormatter>,
+): Promise<string> {
+  const rl = readlinePromises.createInterface({ input, output });
+  const abortController = new AbortController();
+
+  const onSigint = () => {
+    abortController.abort();
+    rl.close();
+  };
+  const onClose = () => {
+    abortController.abort();
+  };
+
+  rl.on('SIGINT', onSigint);
+  rl.once('close', onClose);
+
+  try {
+    return await rl.question(promptText, { signal: abortController.signal });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    const name = (err as Error | undefined)?.name;
+    if (
+      abortController.signal.aborted ||
+      name === 'AbortError' ||
+      code === 'ABORT_ERR' ||
+      code === 'ERR_USE_AFTER_CLOSE'
+    ) {
+      output.write(`\r\x1b[K  ${f.red('×')} ${f.dim('Canceled')}\n`);
+      throw new PromptCancelledError();
+    }
+    throw err;
+  } finally {
+    rl.off('SIGINT', onSigint);
+    rl.off('close', onClose);
+    rl.close();
+  }
+}
+
+export async function promptValidatedTextWithIO<T = string>(
+  question: string,
+  options: {
+    defaultValue?: string;
+    validate: (raw: string) => TextValidationResult<T> | Promise<TextValidationResult<T>>;
+    io?: PromptSelectIO;
+  },
+): Promise<T> {
+  const input = options.io?.input ?? defaultInput;
+  const output = options.io?.output ?? defaultOutput;
+  const term = options.io?.term ?? process.env.TERM;
+  const f = createFormatter(output);
+  const interactive = canUseInteractiveTty(input, output, term);
+
+  output.write(`${formatQuestionHeader(question, options.defaultValue, f)}\n`);
+
+  if (interactive) {
+    const promptPrefix = `  ${f.boldCyan('→')} `;
+    const getColumns = () => Math.max(20, output.columns || 80);
+
+    for (;;) {
+      const raw = await readInteractiveLine(promptPrefix, input, output, f);
+      const result = await options.validate(raw);
+      if (!result.ok) {
+        output.write(`  ${f.yellow(result.error)}\n`);
+        continue;
+      }
+
+      const displayText = result.displayValue ?? String(result.value);
+      const enteredRows = countTerminalRows([`  → ${raw}`], getColumns());
+      output.write(
+        `\x1b[${enteredRows}A\r\x1b[J  ${f.boldGreen('→')} ${f.boldGreen(displayText)}\n`,
+      );
+      return result.value;
+    }
+  }
+
+  const rl = readlinePromises.createInterface({ input, output });
+  try {
+    for (;;) {
+      const raw = await rl.question(`  ${f.boldCyan('→')} `);
+      const result = await options.validate(raw);
+      if (!result.ok) {
+        output.write(`  ${f.yellow(result.error)}\n`);
+        continue;
+      }
+      const displayText = result.displayValue ?? String(result.value);
+      output.write(`  ${f.boldGreen('→')} ${f.boldGreen(displayText)}\n`);
+      return result.value;
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === 'ERR_USE_AFTER_CLOSE') {
+      throw new PromptCancelledError();
+    }
+    throw err;
+  } finally {
+    rl.close();
+  }
+}
+
+export async function promptTextWithIO(
+  question: string,
+  defaultValue?: string,
+  io: PromptSelectIO = {},
+): Promise<string> {
+  return promptValidatedTextWithIO<string>(question, {
+    defaultValue,
+    io,
+    validate(raw) {
+      const trimmed = raw.trim();
+      const value = trimmed || defaultValue || '';
+      return { ok: true, value, displayValue: value || '(empty)' };
+    },
+  });
+}
+
+export async function promptText(question: string, defaultValue?: string): Promise<string> {
+  return promptTextWithIO(question, defaultValue);
+}
+
+export async function promptConfirmWithIO(
+  question: string,
+  defaultYes = false,
+  io: PromptSelectIO = {},
+): Promise<boolean> {
+  const options: SelectOption<'yes' | 'no'>[] = defaultYes
+    ? [
+        { value: 'yes', label: 'Yes', shortcut: 'y' },
+        { value: 'no', label: 'No', shortcut: 'n' },
+      ]
+    : [
+        { value: 'no', label: 'No', shortcut: 'n' },
+        { value: 'yes', label: 'Yes', shortcut: 'y' },
+      ];
+  const choice = await promptSelectWithIO(question, options, 0, io);
+  return choice === 'yes';
+}
+
+export async function promptConfirm(question: string, defaultYes = false): Promise<boolean> {
+  return promptConfirmWithIO(question, defaultYes);
+}
+
 async function promptSelectFallback<T extends string>(
   question: string,
   options: SelectOption<T>[],
@@ -74,10 +233,11 @@ async function promptSelectFallback<T extends string>(
   input: PromptSelectInputStream,
   output: PromptSelectOutputStream,
 ): Promise<T> {
-  output.write(`${question}\n`);
+  const f = createFormatter(output);
+  output.write(`${f.cyan('◆')} ${f.bold(question)}\n`);
   options.forEach((opt, idx) => {
-    const num = fmt.cyan(`${idx + 1})`);
-    const desc = opt.description ? ` ${fmt.dim(`— ${opt.description}`)}` : '';
+    const num = f.cyan(`${idx + 1})`);
+    const desc = opt.description ? ` ${f.dim(`— ${opt.description}`)}` : '';
     output.write(`  ${num} ${opt.label}${desc}\n`);
   });
 
@@ -85,25 +245,37 @@ async function promptSelectFallback<T extends string>(
   try {
     for (;;) {
       const answer = (
-        await rl.question(`Choose [1-${options.length}] ${fmt.dim(`(default ${defaultIndex + 1})`)}: `)
+        await rl.question(
+          `  ${f.dim(`Choose [1-${options.length}] (default ${defaultIndex + 1}):`)} `,
+        )
       ).trim();
 
+      let matched: SelectOption<T> | undefined;
       if (!answer) {
-        return options[defaultIndex]!.value;
+        matched = options[defaultIndex];
+      } else {
+        const num = Number.parseInt(answer, 10);
+        if (!Number.isNaN(num) && num >= 1 && num <= options.length && String(num) === answer) {
+          matched = options[num - 1];
+        } else {
+          const lower = answer.toLowerCase();
+          matched = options.find(
+            (opt) =>
+              opt.value.toLowerCase() === lower ||
+              opt.label.toLowerCase() === lower ||
+              (opt.shortcut !== undefined && opt.shortcut.toLowerCase() === lower),
+          );
+        }
       }
 
-      const num = Number.parseInt(answer, 10);
-      if (!Number.isNaN(num) && num >= 1 && num <= options.length && String(num) === answer) {
-        return options[num - 1]!.value;
-      }
-
-      const byValue = options.find((opt) => opt.value.toLowerCase() === answer.toLowerCase());
-      if (byValue) {
-        return byValue.value;
+      if (matched) {
+        const desc = matched.description ? ` ${f.dim(`— ${matched.description}`)}` : '';
+        output.write(`  ${f.boldGreen('→')} ${f.boldGreen(matched.label)}${desc}\n`);
+        return matched.value;
       }
 
       output.write(
-        `${fmt.yellow(`Please enter a number between 1 and ${options.length} (or an option name).`)}\n`,
+        `  ${f.yellow(`Please enter a number between 1 and ${options.length} (or an option name).`)}\n`,
       );
     }
   } finally {
@@ -118,6 +290,7 @@ async function promptSelectInteractive<T extends string>(
   input: PromptSelectInputStream,
   output: PromptSelectOutputStream,
 ): Promise<T> {
+  const f = createFormatter(output);
   readline.emitKeypressEvents(input);
 
   let selectedIndex = defaultIndex;
@@ -158,10 +331,12 @@ async function promptSelectInteractive<T extends string>(
     const maxVisible = getMaxVisible();
     syncWindow(maxVisible);
 
-    const lines: string[] = [`${fmt.bold(question)} ${fmt.dim('(↑/↓, Enter)')}`];
+    const lines: string[] = [
+      `${f.cyan('◆')} ${f.bold(question)} ${f.dim('(↑/↓, Enter)')}`,
+    ];
 
     if (windowStart > 0) {
-      lines.push(`    ${fmt.dim(`↑ ${windowStart} more`)}`);
+      lines.push(`    ${f.dim(`↑ ${windowStart} more`)}`);
     }
 
     const windowEnd = Math.min(options.length, windowStart + maxVisible);
@@ -169,17 +344,17 @@ async function promptSelectInteractive<T extends string>(
       const opt = options[i]!;
       const isSelected = i === selectedIndex;
       if (isSelected) {
-        const desc = opt.description ? ` ${fmt.cyan(`— ${opt.description}`)}` : '';
-        lines.push(`  ${fmt.bold(fmt.cyan('→'))} ${fmt.bold(fmt.cyan(opt.label))}${desc}`);
+        const desc = opt.description ? ` ${f.cyan(`— ${opt.description}`)}` : '';
+        lines.push(`  ${f.boldCyan('→')} ${f.boldCyan(opt.label)}${desc}`);
       } else {
-        const desc = opt.description ? ` ${fmt.dim(`— ${opt.description}`)}` : '';
+        const desc = opt.description ? ` ${f.dim(`— ${opt.description}`)}` : '';
         lines.push(`    ${opt.label}${desc}`);
       }
     }
 
     const hiddenBelow = options.length - windowEnd;
     if (hiddenBelow > 0) {
-      lines.push(`    ${fmt.dim(`↓ ${hiddenBelow} more`)}`);
+      lines.push(`    ${f.dim(`↓ ${hiddenBelow} more`)}`);
     }
 
     const prefix = `${hideCursor ? '\x1b[?25l' : ''}${erasePrevious()}`;
@@ -215,8 +390,11 @@ async function promptSelectInteractive<T extends string>(
       if (settled) return;
       settled = true;
       cleanup();
-      renderFinal([fmt.bold(question), `  ${fmt.red('×')} ${fmt.dim('Canceled')}`]);
-      reject(new Error('Prompt canceled by user.'));
+      renderFinal([
+        `${f.cyan('◆')} ${f.bold(question)}`,
+        `  ${f.red('×')} ${f.dim('Canceled')}`,
+      ]);
+      reject(new PromptCancelledError());
     };
 
     const confirm = () => {
@@ -224,10 +402,10 @@ async function promptSelectInteractive<T extends string>(
       settled = true;
       cleanup();
       const chosen = options[selectedIndex]!;
-      const desc = chosen.description ? ` ${fmt.dim(`— ${chosen.description}`)}` : '';
+      const desc = chosen.description ? ` ${f.dim(`— ${chosen.description}`)}` : '';
       renderFinal([
-        fmt.bold(question),
-        `  ${fmt.bold(fmt.green('→'))} ${fmt.bold(fmt.green(chosen.label))}${desc}`,
+        `${f.cyan('◆')} ${f.bold(question)}`,
+        `  ${f.boldGreen('→')} ${f.boldGreen(chosen.label)}${desc}`,
       ]);
       resolve(chosen.value);
     };
@@ -286,10 +464,22 @@ async function promptSelectInteractive<T extends string>(
         return;
       }
 
-      if (str && /^[1-9]$/.test(str) && !key?.ctrl && !key?.meta) {
-        const idx = Number.parseInt(str, 10) - 1;
-        if (idx >= 0 && idx < options.length && idx !== selectedIndex) {
-          selectedIndex = idx;
+      if (str && !key?.ctrl && !key?.meta) {
+        if (/^[1-9]$/.test(str)) {
+          const idx = Number.parseInt(str, 10) - 1;
+          if (idx >= 0 && idx < options.length && idx !== selectedIndex) {
+            selectedIndex = idx;
+            renderActive(false);
+          }
+          return;
+        }
+
+        const lower = str.toLowerCase();
+        const shortcutIdx = options.findIndex(
+          (opt) => opt.shortcut !== undefined && opt.shortcut.toLowerCase() === lower,
+        );
+        if (shortcutIdx !== -1 && shortcutIdx !== selectedIndex) {
+          selectedIndex = shortcutIdx;
           renderActive(false);
         }
       }
@@ -319,13 +509,7 @@ export async function promptSelectWithIO<T extends string>(
   const output = io.output ?? defaultOutput;
   const term = io.term ?? process.env.TERM;
 
-  const canUseInteractive =
-    Boolean(input.isTTY) &&
-    Boolean(output.isTTY) &&
-    typeof input.setRawMode === 'function' &&
-    term !== 'dumb';
-
-  if (canUseInteractive) {
+  if (canUseInteractiveTty(input, output, term)) {
     return promptSelectInteractive(question, options, clampedDefault, input, output);
   }
 
@@ -344,17 +528,20 @@ export async function promptSelect<T extends string>(
  * Prompts for a secret (such as an API key) without echoing the raw characters to the terminal.
  */
 export async function promptSecret(question: string): Promise<string> {
+  const f = createFormatter(defaultOutput);
+
   if (!defaultInput.isTTY) {
+    defaultOutput.write(`${f.cyan('◆')} ${f.bold(question)}\n`);
     const rl = readlinePromises.createInterface({ input: defaultInput, output: defaultOutput });
     try {
-      return (await rl.question(`${question}: `)).trim();
+      return (await rl.question(`  ${f.boldCyan('→')} `)).trim();
     } finally {
       rl.close();
     }
   }
 
   return new Promise<string>((resolve, reject) => {
-    defaultOutput.write(`${question}: `);
+    defaultOutput.write(`${f.cyan('◆')} ${f.bold(question)}\n  ${f.boldCyan('→')} `);
     let value = '';
     const wasRaw = defaultInput.isRaw;
 
@@ -372,15 +559,16 @@ export async function promptSecret(question: string): Promise<string> {
       for (const ch of chunk) {
         if (ch === '\r' || ch === '\n') {
           cleanup();
-          defaultOutput.write('\n');
+          const masked = value.trim() ? '•'.repeat(Math.min(value.trim().length, 16)) : '(empty)';
+          defaultOutput.write(`\r\x1b[K  ${f.boldGreen('→')} ${f.dim(masked)}\n`);
           resolve(value.trim());
           return;
         }
         if (ch === '\u0003') {
           // Ctrl+C
           cleanup();
-          defaultOutput.write('\n');
-          reject(new Error('Prompt canceled by user.'));
+          defaultOutput.write(`\r\x1b[K  ${f.red('×')} ${f.dim('Canceled')}\n`);
+          reject(new PromptCancelledError());
           return;
         }
         if (ch === '\u007f' || ch === '\b') {

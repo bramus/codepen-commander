@@ -4,6 +4,7 @@ import { isCodePenApiError } from '../api/errors.js';
 import {
   API_KEY_ENV_VAR,
   API_KEY_FILENAME,
+  clearAllProfilesFromFile,
   CODEPEN_API_SETTINGS_URL,
   DEFAULT_PROFILE_NAME,
   getKeyType,
@@ -12,7 +13,6 @@ import {
   isValidProfileName,
   maskApiKey,
   readAuthStore,
-  removeApiKeyFile,
   removeProfileFromFile,
   saveProfileToFile,
   setDefaultProfile,
@@ -644,37 +644,47 @@ export function registerAuthCommands(program: Command): void {
           }
           console.log(fmt.dim(`No ~/${API_KEY_FILENAME} file found.`));
         } else if (options.all) {
-          await removeApiKeyFile();
+          const cleared = await clearAllProfilesFromFile();
+          const msg = cleared.fileDeleted
+            ? `Removed ~/${API_KEY_FILENAME} (all profiles).`
+            : `Removed all profiles from ~/${API_KEY_FILENAME} (kept global config).`;
           if (options.json) {
-            printJsonResponse(200, `Removed ~/${API_KEY_FILENAME} (all profiles).`, {
+            printJsonResponse(200, msg, {
               removed: true,
               removed_profiles: profileNames,
               remaining_profiles: [],
               default_profile: null,
-              file_deleted: true,
+              file_deleted: cleared.fileDeleted,
               env_var_still_set: envVarStillSet,
             });
             return;
           }
-          console.log(`${fmt.green('✓')} Removed ~/${API_KEY_FILENAME} (all profiles).`);
+          console.log(`${fmt.green('✓')} ${msg}`);
         } else {
           let target = explicitTarget;
 
           if (!target) {
             if (profileNames.length === 1) {
-              await removeApiKeyFile();
+              const cleared = await clearAllProfilesFromFile();
+              const msg = cleared.fileDeleted
+                ? `Removed profile ${profileNames[0]!} (~/${API_KEY_FILENAME}).`
+                : `Removed profile ${profileNames[0]!} from ~/${API_KEY_FILENAME} (kept global config).`;
               if (options.json) {
-                printJsonResponse(200, `Removed profile ${profileNames[0]!} (~/${API_KEY_FILENAME}).`, {
+                printJsonResponse(200, msg, {
                   removed: true,
                   removed_profiles: [profileNames[0]!],
                   remaining_profiles: [],
                   default_profile: null,
-                  file_deleted: true,
+                  file_deleted: cleared.fileDeleted,
                   env_var_still_set: envVarStillSet,
                 });
                 return;
               }
-              console.log(`${fmt.green('✓')} Removed profile ${fmt.bold(profileNames[0]!)} (~/${API_KEY_FILENAME}).`);
+              console.log(
+                cleared.fileDeleted
+                  ? `${fmt.green('✓')} Removed profile ${fmt.bold(profileNames[0]!)} (~/${API_KEY_FILENAME}).`
+                  : `${fmt.green('✓')} Removed profile ${fmt.bold(profileNames[0]!)} from ~/${API_KEY_FILENAME} ${fmt.dim('(kept global config)')}.`,
+              );
             } else if (!options.json && isInteractive()) {
               const ALL_SENTINEL = '__ALL__';
               const choice = await promptSelect<string>(
@@ -694,8 +704,12 @@ export function registerAuthCommands(program: Command): void {
               );
 
               if (choice === ALL_SENTINEL) {
-                await removeApiKeyFile();
-                console.log(`${fmt.green('✓')} Removed ~/${API_KEY_FILENAME} (all profiles).`);
+                const cleared = await clearAllProfilesFromFile();
+                console.log(
+                  cleared.fileDeleted
+                    ? `${fmt.green('✓')} Removed ~/${API_KEY_FILENAME} (all profiles).`
+                    : `${fmt.green('✓')} Removed all profiles from ~/${API_KEY_FILENAME} ${fmt.dim('(kept global config)')}.`,
+                );
               } else {
                 target = choice;
               }
@@ -726,18 +740,25 @@ export function registerAuthCommands(program: Command): void {
               }
               console.log(fmt.yellow(`Profile "${target}" was not found in ~/${API_KEY_FILENAME}.`));
             } else if (remaining.length === 0) {
+              const msg = result.fileDeleted
+                ? `Removed profile ${target} and deleted ~/${API_KEY_FILENAME}.`
+                : `Removed profile ${target} from ~/${API_KEY_FILENAME} (kept global config).`;
               if (options.json) {
-                printJsonResponse(200, `Removed profile ${target} and deleted ~/${API_KEY_FILENAME}.`, {
+                printJsonResponse(200, msg, {
                   removed: true,
                   removed_profiles: [target],
                   remaining_profiles: [],
                   default_profile: null,
-                  file_deleted: true,
+                  file_deleted: result.fileDeleted,
                   env_var_still_set: envVarStillSet,
                 });
                 return;
               }
-              console.log(`${fmt.green('✓')} Removed profile ${fmt.bold(target)} and deleted ~/${API_KEY_FILENAME}.`);
+              console.log(
+                result.fileDeleted
+                  ? `${fmt.green('✓')} Removed profile ${fmt.bold(target)} and deleted ~/${API_KEY_FILENAME}.`
+                  : `${fmt.green('✓')} Removed profile ${fmt.bold(target)} from ~/${API_KEY_FILENAME} ${fmt.dim('(kept global config)')}.`,
+              );
             } else {
               if (options.json) {
                 printJsonResponse(200, `Removed profile ${target} from ~/${API_KEY_FILENAME}.`, {

@@ -5,7 +5,10 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { resolveCommandAuth } from '../src/commands/auth-context.js';
 import {
+  clearAllProfilesFromFile,
+  clearConfiguredShellDir,
   findMatchingProfile,
+  getConfiguredShellDir,
   getKeyType,
   getShellExportSnippets,
   isRecognizedKeyFormat,
@@ -19,6 +22,7 @@ import {
   resolveAuth,
   saveApiKeyToFile,
   saveProfileToFile,
+  setConfiguredShellDir,
   setDefaultProfile,
   validateProfileName,
 } from '../src/config/auth.js';
@@ -342,5 +346,46 @@ describe('auth configuration (~/.cdpn & multi-profile)', () => {
     const fishFirst = getShellExportSnippets('cp_user_test12345678', '/usr/local/bin/fish');
     assert.equal(fishFirst[0]?.shell, 'fish');
     assert.ok(fishFirst[0]?.line.startsWith('set -gx CODEPEN_API_KEY'));
+  });
+
+  it('preserves global config.shell in ~/.cdpn across profile login, default, and logout', async () => {
+    const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-global-cfg-'));
+    try {
+      // Setting shell before any profiles exist should NOT treat "config" or "shell" as a profile
+      await setConfiguredShellDir('/tmp/my-shell', { homeDir: tmpHome });
+      assert.equal(await getConfiguredShellDir({ homeDir: tmpHome }), '/tmp/my-shell');
+      assert.equal(await resolveAuth({ env: {}, homeDir: tmpHome }), null);
+
+      // Even a hand-edited top-level {"shell": "..."} must not be misparsed as an API key profile
+      const shorthand = parseAuthStoreContent(JSON.stringify({ shell: '/tmp/top-level-shell' }));
+      assert.deepEqual(Object.keys(shorthand.profiles), []);
+      assert.equal(shorthand.config?.shell, '/tmp/top-level-shell');
+
+      // Saving a profile preserves config.shell and keeps 0600 permissions
+      await saveProfileToFile('bramus', 'cp_user_keepconfig1234', { homeDir: tmpHome });
+      assert.equal(await getConfiguredShellDir({ homeDir: tmpHome }), '/tmp/my-shell');
+      assert.equal((await resolveAuth({ env: {}, homeDir: tmpHome }))?.profile, 'bramus');
+
+      // Removing the last profile preserves ~/.cdpn when config.shell is still set
+      const rmRes = await removeProfileFromFile('bramus', { homeDir: tmpHome });
+      assert.equal(rmRes.removed, true);
+      assert.equal(rmRes.fileDeleted, false);
+      assert.equal(await getConfiguredShellDir({ homeDir: tmpHome }), '/tmp/my-shell');
+
+      // Adding & clearing all profiles also preserves config.shell
+      await saveProfileToFile('team', 'cp_team_keepconfig5678', { homeDir: tmpHome });
+      const clearAllRes = await clearAllProfilesFromFile({ homeDir: tmpHome });
+      assert.equal(clearAllRes.removed, true);
+      assert.equal(clearAllRes.fileDeleted, false);
+      assert.equal(await getConfiguredShellDir({ homeDir: tmpHome }), '/tmp/my-shell');
+
+      // Clearing config.shell when no profiles remain deletes ~/.cdpn cleanly
+      const resetRes = await clearConfiguredShellDir({ homeDir: tmpHome });
+      assert.equal(resetRes.cleared, true);
+      assert.equal(resetRes.fileDeleted, true);
+      assert.equal((await readAuthStore({ homeDir: tmpHome })).exists, false);
+    } finally {
+      await fs.rm(tmpHome, { recursive: true, force: true });
+    }
   });
 });

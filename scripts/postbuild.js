@@ -29,6 +29,17 @@ for (const file of filesToCopy) {
   }
 }
 
+// 2b. Copy built-in demo index shell assets into dist/shell/
+const shellSrcDir = path.join(rootDir, 'shell');
+const shellDestDir = path.join(distDir, 'shell');
+if (fs.existsSync(shellSrcDir)) {
+  fs.mkdirSync(shellDestDir, { recursive: true });
+  for (const entry of fs.readdirSync(shellSrcDir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.') || !entry.isFile()) continue;
+    fs.copyFileSync(path.join(shellSrcDir, entry.name), path.join(shellDestDir, entry.name));
+  }
+}
+
 // 3. Prepare and rewrite package.json for dist/
 const pkgPath = path.join(rootDir, 'package.json');
 if (fs.existsSync(pkgPath)) {

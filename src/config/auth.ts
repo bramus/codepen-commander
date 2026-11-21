@@ -16,9 +16,37 @@ const SINGLE_KEY_FIELDS = ['api_key', 'apiKey', 'key', 'token'] as const;
 export type AuthSource = 'env' | 'file';
 export type ApiKeyType = 'User' | 'Team' | 'Unknown';
 
+export interface GlobalConfig {
+  shell?: string;
+}
+
 export interface AuthStore {
   defaultProfile: string | null;
   profiles: Record<string, string>;
+  config?: GlobalConfig;
+}
+
+const CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
+const RESERVED_STORE_KEYS = new Set(['default', 'defaultProfile', 'default_profile', 'profiles', 'config', 'shell']);
+
+export function normalizeGlobalConfig(raw: unknown): GlobalConfig {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {};
+  }
+  const obj = raw as Record<string, unknown>;
+  const config: GlobalConfig = {};
+  if (typeof obj.shell === 'string') {
+    const trimmed = obj.shell.trim();
+    if (trimmed && !CONTROL_CHAR_PATTERN.test(trimmed)) {
+      config.shell = trimmed;
+    }
+  }
+  return config;
+}
+
+export function hasGlobalConfig(config: GlobalConfig | undefined): boolean {
+  if (!config) return false;
+  return Boolean(config.shell && config.shell.trim());
 }
 
 export interface ReadAuthStoreResult {
@@ -122,12 +150,23 @@ function createEmptyStore(): AuthStore {
   };
 }
 
+function extractGlobalConfigFromRecord(record: Record<string, unknown>): GlobalConfig {
+  const nested = normalizeGlobalConfig(record.config);
+  if (!nested.shell && typeof record.shell === 'string') {
+    const trimmed = record.shell.trim();
+    if (trimmed && !CONTROL_CHAR_PATTERN.test(trimmed)) {
+      nested.shell = trimmed;
+    }
+  }
+  return nested;
+}
+
 /**
- * Parses `~/.cdpn` content into a normalized multi-profile `AuthStore`.
+ * Parses `~/.cdpn` content into a normalized multi-profile `AuthStore` + global `config`.
  *
  * Supported formats:
- * - Multi-profile JSON (canonical format written by `cdpn auth login`):
- *   `{ "default": "bramus", "profiles": { "bramus": "cp_user_...", "username": "cp_team_..." } }`
+ * - Multi-profile JSON (canonical format written by `cdpn auth login` / `cdpn shell set`):
+ *   `{ "default": "bramus", "profiles": { "bramus": "cp_user_..." }, "config": { "shell": "..." } }`
  * - Flat JSON map of profile names to API keys:
  *   `{ "bramus": "cp_user_...", "username": "cp_team_..." }`
  * - Single-key JSON (`{ "api_key": "..." }`, `{ "key": "..." }`, `{ "token": "..." }`)
@@ -147,8 +186,10 @@ export function parseAuthStoreContent(raw: string): AuthStore {
       }
       const record = parsed as Record<string, unknown>;
       const profiles: Record<string, string> = Object.create(null) as Record<string, string>;
+      const config = extractGlobalConfigFromRecord(record);
+      const configField = hasGlobalConfig(config) ? { config } : {};
 
-      // Format 1: { "default": "...", "profiles": { "bramus": "cp_user_...", ... } }
+      // Format 1: { "default": "...", "profiles": { "bramus": "cp_user_...", ... }, "config"?: { ... } }
       if (record.profiles && typeof record.profiles === 'object' && !Array.isArray(record.profiles)) {
         for (const [name, entry] of Object.entries(record.profiles as Record<string, unknown>)) {
           if (!isValidProfileName(name)) continue;
@@ -173,7 +214,7 @@ export function parseAuthStoreContent(raw: string): AuthStore {
             ? rawDefault
             : (profileNames[0] ?? null);
 
-        return { defaultProfile, profiles };
+        return { defaultProfile, profiles, ...configField };
       }
 
       // Format 2: Single-key JSON ({ "api_key": "..." })
@@ -181,14 +222,13 @@ export function parseAuthStoreContent(raw: string): AuthStore {
         const value = record[field];
         if (typeof value === 'string' && value.trim()) {
           profiles[DEFAULT_PROFILE_NAME] = value.trim();
-          return { defaultProfile: DEFAULT_PROFILE_NAME, profiles };
+          return { defaultProfile: DEFAULT_PROFILE_NAME, profiles, ...configField };
         }
       }
 
       // Format 3: Flat map JSON ({ "bramus": "cp_user_...", "username": "cp_team_..." })
-      const metaKeys = new Set(['default', 'defaultProfile', 'default_profile']);
       for (const [name, entry] of Object.entries(record)) {
-        if (metaKeys.has(name) || !isValidProfileName(name)) continue;
+        if (RESERVED_STORE_KEYS.has(name) || !isValidProfileName(name)) continue;
         const key = extractKeyFromValue(entry);
         if (key) {
           profiles[name.trim()] = key;
@@ -202,10 +242,10 @@ export function parseAuthStoreContent(raw: string): AuthStore {
           rawDefault && Object.hasOwn(profiles, rawDefault)
             ? rawDefault
             : (profileNames[0] ?? null);
-        return { defaultProfile, profiles };
+        return { defaultProfile, profiles, ...configField };
       }
 
-      return createEmptyStore();
+      return { defaultProfile: null, profiles, ...configField };
     } catch {
       return createEmptyStore();
     }
@@ -298,7 +338,7 @@ export async function readApiKeyFile(
 }
 
 /**
- * Writes the multi-profile store to `~/.cdpn` with strict owner-only (`0o600`) file permissions.
+ * Writes the multi-profile store and global config to `~/.cdpn` with strict owner-only (`0o600`) file permissions.
  */
 export async function writeAuthStore(
   store: AuthStore,
@@ -320,10 +360,13 @@ export async function writeAuthStore(
     store.defaultProfile && Object.hasOwn(sortedProfiles, store.defaultProfile)
       ? store.defaultProfile
       : (names[0] ?? null);
+  const normalizedConfig = normalizeGlobalConfig(store.config);
+  const includeConfig = hasGlobalConfig(normalizedConfig);
 
-  const payload = {
+  const payload: Record<string, unknown> = {
     ...(resolvedDefault ? { default: resolvedDefault } : {}),
-    profiles: sortedProfiles,
+    ...(names.length > 0 ? { profiles: sortedProfiles } : {}),
+    ...(includeConfig ? { config: normalizedConfig } : {}),
   };
 
   await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, {
@@ -409,7 +452,12 @@ export async function setDefaultProfile(
 export async function removeProfileFromFile(
   profileName: string,
   options: Pick<AuthOptions, 'homeDir'> = {},
-): Promise<{ removed: boolean; remainingProfiles: string[]; newDefault: string | null }> {
+): Promise<{
+  removed: boolean;
+  remainingProfiles: string[];
+  newDefault: string | null;
+  fileDeleted: boolean;
+}> {
   const validProfile = validateProfileName(profileName);
   const { store, exists } = await readAuthStore(options);
 
@@ -418,6 +466,7 @@ export async function removeProfileFromFile(
       removed: false,
       remainingProfiles: Object.keys(store.profiles),
       newDefault: store.defaultProfile,
+      fileDeleted: false,
     };
   }
 
@@ -425,8 +474,13 @@ export async function removeProfileFromFile(
   const remaining = Object.keys(store.profiles).sort((a, b) => a.localeCompare(b));
 
   if (remaining.length === 0) {
+    if (hasGlobalConfig(store.config)) {
+      store.defaultProfile = null;
+      await writeAuthStore(store, options);
+      return { removed: true, remainingProfiles: [], newDefault: null, fileDeleted: false };
+    }
     await removeApiKeyFile(options);
-    return { removed: true, remainingProfiles: [], newDefault: null };
+    return { removed: true, remainingProfiles: [], newDefault: null, fileDeleted: true };
   }
 
   if (store.defaultProfile === validProfile) {
@@ -438,7 +492,31 @@ export async function removeProfileFromFile(
     removed: true,
     remainingProfiles: remaining,
     newDefault: store.defaultProfile,
+    fileDeleted: false,
   };
+}
+
+/**
+ * Removes all stored API key profiles from `~/.cdpn`, deleting the file only when no global config remains.
+ */
+export async function clearAllProfilesFromFile(
+  options: Pick<AuthOptions, 'homeDir'> = {},
+): Promise<{ removed: boolean; removedProfiles: string[]; fileDeleted: boolean }> {
+  const { store, exists } = await readAuthStore(options);
+  const profileNames = Object.keys(store.profiles).sort((a, b) => a.localeCompare(b));
+  if (!exists || profileNames.length === 0) {
+    return { removed: false, removedProfiles: [], fileDeleted: false };
+  }
+
+  if (hasGlobalConfig(store.config)) {
+    store.profiles = Object.create(null) as Record<string, string>;
+    store.defaultProfile = null;
+    await writeAuthStore(store, options);
+    return { removed: true, removedProfiles: profileNames, fileDeleted: false };
+  }
+
+  const deleted = await removeApiKeyFile(options);
+  return { removed: true, removedProfiles: profileNames, fileDeleted: deleted };
 }
 
 export async function removeApiKeyFile(options: Pick<AuthOptions, 'homeDir'> = {}): Promise<boolean> {
@@ -452,6 +530,63 @@ export async function removeApiKeyFile(options: Pick<AuthOptions, 'homeDir'> = {
     }
     throw error;
   }
+}
+
+export async function readGlobalConfig(
+  options: Pick<AuthOptions, 'homeDir'> = {},
+): Promise<{ config: GlobalConfig; filePath: string; exists: boolean }> {
+  const { store, filePath, exists } = await readAuthStore(options);
+  return {
+    config: normalizeGlobalConfig(store.config),
+    filePath,
+    exists,
+  };
+}
+
+export async function getConfiguredShellDir(
+  options: Pick<AuthOptions, 'homeDir'> = {},
+): Promise<string | null> {
+  const { config } = await readGlobalConfig(options);
+  return config.shell ?? null;
+}
+
+export async function setConfiguredShellDir(
+  shellDir: string,
+  options: Pick<AuthOptions, 'homeDir'> = {},
+): Promise<{ filePath: string; shellDir: string }> {
+  const trimmed = shellDir.trim();
+  if (!trimmed || CONTROL_CHAR_PATTERN.test(trimmed)) {
+    throw new CliError(400, 'Shell directory path cannot be empty or contain control characters.');
+  }
+
+  const { store } = await readAuthStore(options);
+  const nextConfig = normalizeGlobalConfig(store.config);
+  nextConfig.shell = trimmed;
+  store.config = nextConfig;
+  const filePath = await writeAuthStore(store, options);
+  return { filePath, shellDir: trimmed };
+}
+
+export async function clearConfiguredShellDir(
+  options: Pick<AuthOptions, 'homeDir'> = {},
+): Promise<{ filePath: string; cleared: boolean; fileDeleted: boolean }> {
+  const { store, filePath, exists } = await readAuthStore(options);
+  const currentConfig = normalizeGlobalConfig(store.config);
+  if (!exists || !currentConfig.shell) {
+    return { filePath, cleared: false, fileDeleted: false };
+  }
+
+  delete currentConfig.shell;
+  store.config = hasGlobalConfig(currentConfig) ? currentConfig : undefined;
+
+  const hasProfiles = Object.keys(store.profiles).length > 0;
+  if (!hasProfiles && !hasGlobalConfig(store.config)) {
+    const deleted = await removeApiKeyFile(options);
+    return { filePath, cleared: true, fileDeleted: deleted };
+  }
+
+  await writeAuthStore(store, options);
+  return { filePath, cleared: true, fileDeleted: false };
 }
 
 /**

@@ -5,6 +5,7 @@ Sync local folders with [CodePen 2.0](https://codepen.io) Pens using the [CodePe
 - Clone Pens (text & binary files) to a local folder and pull remote updates
 - Track diffs between local files and the online saved head
 - Push additions, edits, and deletions as a single version — waiting for builds and syncing compiler patches back locally
+- Serve and build local Pens (with CodePen `classic` & `packages` Blocks support) or whole directories of Pens with an automatic, customizable index shell
 - Deploy, undeploy, manage custom domains, browse versions & roll back, inspect/edit metadata & settings
 
 ## Installation
@@ -125,9 +126,36 @@ cdpn fork https://codepen.io/username/pen/abcde my-fork      # Forks directly in
 
 > **Note:** CodePen API v2 keys can only access and fork Pens owned by the key's account (other users' Pens return `404`, even when public). When you run `cdpn fork` or `cdpn clone` on another user's Pen URL interactively, `cdpn` offers to open the Pen in your browser so you can fork it on `codepen.io` and paste your forked URL back to clone immediately.
 
+## Local Serving, Static Builds & Custom Shells
+
+`cdpn` can preview and statically build both individual Pens and multi-Pen directories locally—supporting CodePen 2.0 `classic` (`.pen.html` + `.codepen/classic.config.json`) and `packages` (`package.json` importmaps via `esm.sh`) blocks on the fly:
+
+```bash
+# Serve a single Pen or a directory of Pens on http://127.0.0.1:3000
+cdpn serve
+cdpn serve my-demos --port 8080 --open
+
+# Build a Pen (prompts for destination, defaults to ./build, updates .cdpnignore & offers .gitignore)
+cdpn build
+cdpn build --out dist --yes --watch
+
+# Customize the demo index shell used for multi-Pen directories
+cdpn shell show                         # Show active shell (built-in or custom ~/.cdpn path)
+cdpn shell export ./my-shell --set      # Export built-in shell files to edit & set as default in ~/.cdpn
+cdpn shell set ./my-shell               # Point ~/.cdpn to a custom shell directory
+cdpn shell reset                        # Revert back to the built-in shell
+
+# Override shell or index metadata per invocation
+cdpn serve --shell ./my-shell --title "CSS Demos" --subtitle "Handcrafted experiments"
+cdpn build --out dist --shell ./my-shell --title "CSS Demos"
+```
+
+- **Pen folder** (`.cdpn.json` and/or `.codepen/`): serves or builds the Pen directly (if `.codepen/` is missing, `cdpn serve` serves it as plain static files with a helpful tip). When building a Pen into a subfolder of itself, `cdpn build` automatically adds that subfolder to `.cdpnignore` and offers to create/update `.gitignore`.
+- **Directory of Pens** (neither `.cdpn.json` nor `.codepen/`): recursively discovers subdirectories containing `.cdpn.json`, `.codepen/`, or `index.html` and generates an in-memory `demos.json` (on `serve`) or static `demos.json` (on `build`) with the index shell—preserving an existing root `index.html` if present.
+
 ## Commands
 
-All commands accept the global `--profile <name>` flag to override the active profile. Every data/state command also accepts `--json` (everything except interactive-only `cdpn auth login` and browser-opening `cdpn open`).
+All commands accept the global `--profile <name>` flag to override the active profile. Every data/state command also accepts `--json` (everything except interactive-only `cdpn auth login`, browser-opening `cdpn open`, and long-running `cdpn serve`).
 
 | Command | Description |
 | --- | --- |
@@ -135,7 +163,7 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn auth login [profile] [--default] [--no-open]` | Open CodePen API settings, verify key, and save a profile to `~/.cdpn` or print shell export lines |
 | `cdpn auth list [--json]` | List stored profiles in `~/.cdpn` (alias: `cdpn auth ls`) |
 | `cdpn auth default [profile] [--json]` | Set the default profile in `~/.cdpn` |
-| `cdpn auth logout [profile] [--all] [--json]` | Remove a specific profile or delete `~/.cdpn` completely |
+| `cdpn auth logout [profile] [--all] [--json]` | Remove a specific profile or clear all profiles from `~/.cdpn` (preserves global config if set) |
 | `cdpn new [folder] [--template <id\|url\|title>] [--as-template] [--json]` | Scaffold a brand-new 2.0 Pen from a CodePen Template (or CodePen default starter) into a new or empty folder |
 | `cdpn fork <url> [folder] [--title ...] [--access ...] [--json]` | Fork one of your own 2.0 Pens into a local folder (for other users' Pens, offers to open in browser to fork and clone back) |
 | `cdpn clone <url> [folder] [--force] [--json]` | Clone a CodePen Pen into a local folder (auto-matches stored profile by URL owner; offers to convert Classic Pens or clone them unlinked; offers browser fork-and-clone fallback for unowned Pens) |
@@ -155,6 +183,12 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn delete [--keep-info] [--yes] [--json]` | Delete the online Pen on CodePen (moves to Deleted Items for 3 days) and remove `.cdpn.json` — or keep only its `info` section with `--keep-info` for a later first push — while keeping local files untouched (aliases: `cdpn del`, `cdpn rm`) |
 | `cdpn info [--title ...] [--tags ...] [--access ...] [--template true\|false] [--json]` | View or update Pen metadata |
 | `cdpn settings [--auto-deploy ...] [--indent-with ...] [--json]` | View or update Pen editor & deployment settings |
+| `cdpn serve [dir] [-p <port>] [-o] [--shell <dir>] [--title ...] [--subtitle ...] [--footer ...]` | Serve a local Pen or directory of Pens on `127.0.0.1` with live in-memory `demos.json` and `classic`/`packages` Blocks support |
+| `cdpn build [dir] [-o <dir>] [-y\|-f] [-w] [--shell <dir>] [--title ...] [--subtitle ...] [--footer ...] [--json]` | Build a local Pen or directory of Pens into a static deployable folder (auto-updates `.cdpnignore` and offers `.gitignore` when building inside a Pen) |
+| `cdpn shell [show] [--json]` | Show the active demo index shell (custom `~/.cdpn` path or built-in) |
+| `cdpn shell export [dir] [--set] [-y\|-f] [--json]` | Copy the built-in shell files into a local directory for customization (aliases: `eject`, `init`) |
+| `cdpn shell set <dir> [--json]` | Set a custom default shell directory in `~/.cdpn` |
+| `cdpn shell reset [--json]` | Reset the global shell in `~/.cdpn` back to the built-in shell (aliases: `unset`, `clear`) |
 
 ## JSON Output (`--json`)
 
