@@ -655,7 +655,11 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
       await fs.mkdir(path.dirname(destPath), { recursive: true });
       if (relPosix === 'index.html') {
         const templateHtml = await fs.readFile(srcPath, 'utf8');
-        await fs.writeFile(destPath, renderShellIndexHtml(templateHtml, siteMeta), 'utf8');
+        await fs.writeFile(
+          destPath,
+          renderShellIndexHtml(templateHtml, siteMeta, { includeMissingDemoWarning: false }),
+          'utf8',
+        );
       } else {
         await fs.copyFile(srcPath, destPath);
       }
@@ -670,7 +674,11 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
         if (!existsSync(builtinPath)) continue;
         if (filename === 'index.html') {
           const templateHtml = await fs.readFile(builtinPath, 'utf8');
-          await fs.writeFile(destPath, renderShellIndexHtml(templateHtml, siteMeta), 'utf8');
+          await fs.writeFile(
+            destPath,
+            renderShellIndexHtml(templateHtml, siteMeta, { includeMissingDemoWarning: false }),
+            'utf8',
+          );
         } else {
           await fs.copyFile(builtinPath, destPath);
         }

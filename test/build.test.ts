@@ -256,7 +256,8 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
       await assert.rejects(() => fs.stat(path.join(srcDir, 'dist', 'README.md')));
       await assert.rejects(() => fs.stat(path.join(srcDir, 'dist', 'package.json')));
 
-      // Building again into a DIFFERENT folder ("build") must NOT discover the previous "dist" build as a demo!
+      // Building again into a DIFFERENT folder ("build") with the built-in shell must NOT discover
+      // the previous "dist" build as a demo, and must omit the local-dev "Missing a demo" warning box
       const out2 = await runBuildCommand({
         cwd: srcDir,
         out: 'build',
@@ -266,6 +267,36 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
       assert.equal(out2.result?.demoCount, 2);
       await assert.rejects(() => fs.stat(path.join(srcDir, 'build', 'dist')));
       await assert.rejects(() => fs.stat(path.join(srcDir, 'build', 'unmarked-folder')));
+
+      const builtinBuiltIndex = await fs.readFile(path.join(srcDir, 'build', 'index.html'), 'utf8');
+      assert.ok(builtinBuiltIndex.includes('id="demo-card-template"'));
+      assert.ok(builtinBuiltIndex.includes('id="empty-state-template"'));
+      assert.equal(builtinBuiltIndex.includes('missing-demo-warning-template'), false);
+      assert.equal(builtinBuiltIndex.includes('shell-warning'), false);
+      assert.equal(builtinBuiltIndex.includes('Missing a demo?'), false);
+
+      // Exported custom shell (which includes the warning template) also omits it in `cdpn build`
+      const exportedShellDir = path.join(tmpRoot, 'exported-shell');
+      const { exportBuiltinShell } = await import('../src/site/shell.js');
+      await exportBuiltinShell(exportedShellDir);
+      const exportedRaw = await fs.readFile(path.join(exportedShellDir, 'index.html'), 'utf8');
+      assert.ok(exportedRaw.includes('missing-demo-warning-template'));
+
+      const out3 = await runBuildCommand({
+        cwd: srcDir,
+        out: 'build-exported',
+        shell: exportedShellDir,
+        homeDir: tmpHome,
+        interactive: false,
+      });
+      assert.equal(out3.built, true);
+      const exportedBuiltIndex = await fs.readFile(
+        path.join(srcDir, 'build-exported', 'index.html'),
+        'utf8',
+      );
+      assert.equal(exportedBuiltIndex.includes('missing-demo-warning-template'), false);
+      assert.equal(exportedBuiltIndex.includes('shell-warning'), false);
+      assert.equal(exportedBuiltIndex.includes('Missing a demo?'), false);
     } finally {
       await fs.rm(tmpRoot, { recursive: true, force: true });
       await fs.rm(tmpHome, { recursive: true, force: true });

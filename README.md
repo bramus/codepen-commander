@@ -171,7 +171,7 @@ cdpn build --out dist --shell ./my-shell --title "CSS Demos"
 ```
 
 - **Pen folder** (contains `.cdpn.json`): serves or builds the Pen directly (if `.codepen/` is missing, `cdpn serve` serves it as plain static files with a helpful tip). When building a Pen into a subfolder of itself, `cdpn build` automatically adds that subfolder to `.cdpnignore` and offers to create/update `.gitignore`.
-- **Directory of Pens** (no `.cdpn.json` at the root): recursively discovers subdirectories containing `.cdpn.json` and generates an in-memory `demos.json` (on `serve`) or static `demos.json` (on `build`) with the index shell—preserving an existing root `index.html` if present. Subdirectories without a `.cdpn.json` file are not indexed or served; the shell displays a hint to run `cdpn init` in any missing demo folder to mark it as a CodePen demo.
+- **Directory of Pens** (no `.cdpn.json` at the root): recursively discovers subdirectories containing `.cdpn.json` and generates an in-memory `demos.json` (on `serve`) or static `demos.json` (on `build`) with the index shell—preserving an existing root `index.html` if present. Subdirectories without a `.cdpn.json` file are not indexed or served; during `cdpn serve`, the shell displays a hint to run `cdpn init` in any missing demo folder to mark it as a CodePen demo (omitted from static `cdpn build` output).
 
 ## Commands
 

@@ -501,7 +501,10 @@ export async function startDevServer(
           let content: Buffer;
           if (shellAsset.isIndexHtml) {
             const templateHtml = await fs.readFile(shellAsset.filePath, 'utf8');
-            content = Buffer.from(renderShellIndexHtml(templateHtml, siteMeta), 'utf8');
+            content = Buffer.from(
+              renderShellIndexHtml(templateHtml, siteMeta, { includeMissingDemoWarning: true }),
+              'utf8',
+            );
           } else {
             content = await fs.readFile(shellAsset.filePath);
           }

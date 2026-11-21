@@ -255,7 +255,11 @@ async function loadDemos() {
     }
 
     if (sections.length === 0) {
-      directoryEl.replaceChildren(emptyStateTemplate.content.cloneNode(true));
+      const emptyNodes = [emptyStateTemplate.content.cloneNode(true)];
+      if (missingDemoWarningTemplate) {
+        emptyNodes.push(missingDemoWarningTemplate.content.cloneNode(true));
+      }
+      directoryEl.replaceChildren(...emptyNodes);
       return;
     }
 

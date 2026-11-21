@@ -340,11 +340,161 @@ export function resolveSiteMetadata(
   };
 }
 
-export function renderShellIndexHtml(templateHtml: string, site: SiteMetadata): string {
-  return templateHtml
+const MISSING_DEMO_WARNING_TEMPLATE_ID = 'missing-demo-warning-template';
+
+export interface RenderShellHtmlOptions {
+  /** Include the local-dev "Missing a demo? Run cdpn init" warning template (default: true). */
+  includeMissingDemoWarning?: boolean;
+}
+
+/**
+ * Removes `<template id="...">...</template>` blocks matching `templateId` without regex
+ * backtracking, trimming any surrounding indentation/blank line cleanly.
+ */
+function stripTemplateById(html: string, templateId: string): string {
+  const lower = html.toLowerCase();
+  const targetId = templateId.toLowerCase();
+  const idDouble = `id="${targetId}"`;
+  const idSingle = `id='${targetId}'`;
+  const idUnquoted = `id=${targetId}`;
+
+  let result = '';
+  let cursor = 0;
+
+  while (cursor < html.length) {
+    const openIdx = lower.indexOf('<template', cursor);
+    if (openIdx === -1) {
+      result += html.slice(cursor);
+      break;
+    }
+
+    const afterTagName = lower[openIdx + '<template'.length];
+    if (
+      afterTagName !== undefined &&
+      afterTagName !== '>' &&
+      afterTagName !== '/' &&
+      !/\s/.test(afterTagName)
+    ) {
+      result += html.slice(cursor, openIdx + '<template'.length);
+      cursor = openIdx + '<template'.length;
+      continue;
+    }
+
+    const openEndIdx = lower.indexOf('>', openIdx);
+    if (openEndIdx === -1) {
+      result += html.slice(cursor);
+      break;
+    }
+
+    const openTagLower = lower.slice(openIdx, openEndIdx + 1);
+    const hasUnquotedId = (() => {
+      let idx = openTagLower.indexOf(idUnquoted);
+      while (idx !== -1) {
+        const before = openTagLower[idx - 1];
+        const after = openTagLower[idx + idUnquoted.length];
+        if (
+          before !== undefined &&
+          /\s/.test(before) &&
+          (after === undefined || after === '>' || after === '/' || /\s/.test(after))
+        ) {
+          return true;
+        }
+        idx = openTagLower.indexOf(idUnquoted, idx + idUnquoted.length);
+      }
+      return false;
+    })();
+
+    const matchesId =
+      openTagLower.includes(idDouble) || openTagLower.includes(idSingle) || hasUnquotedId;
+
+    if (!matchesId) {
+      result += html.slice(cursor, openEndIdx + 1);
+      cursor = openEndIdx + 1;
+      continue;
+    }
+
+    let depth = 1;
+    let searchPos = openEndIdx + 1;
+    let closeEndIdx = -1;
+
+    while (depth > 0 && searchPos < lower.length) {
+      const nextOpen = lower.indexOf('<template', searchPos);
+      const nextClose = lower.indexOf('</template', searchPos);
+      if (nextClose === -1) {
+        break;
+      }
+      if (nextOpen !== -1 && nextOpen < nextClose) {
+        const ch = lower[nextOpen + '<template'.length];
+        if (ch === '>' || ch === '/' || (ch !== undefined && /\s/.test(ch))) {
+          depth++;
+        }
+        searchPos = nextOpen + '<template'.length;
+      } else {
+        const closeTagEnd = lower.indexOf('>', nextClose);
+        if (closeTagEnd === -1) {
+          break;
+        }
+        depth--;
+        if (depth === 0) {
+          closeEndIdx = closeTagEnd + 1;
+        }
+        searchPos = closeTagEnd + 1;
+      }
+    }
+
+    if (closeEndIdx === -1) {
+      result += html.slice(cursor);
+      break;
+    }
+
+    let trimStart = openIdx;
+    while (trimStart > cursor && (html[trimStart - 1] === ' ' || html[trimStart - 1] === '\t')) {
+      trimStart--;
+    }
+
+    let trimEnd = closeEndIdx;
+    while (trimEnd < html.length && (html[trimEnd] === ' ' || html[trimEnd] === '\t')) {
+      trimEnd++;
+    }
+    if (html[trimEnd] === '\r' && html[trimEnd + 1] === '\n') {
+      trimEnd += 2;
+    } else if (html[trimEnd] === '\n') {
+      trimEnd += 1;
+    }
+
+    if (trimStart >= cursor + 2 && html[trimStart - 1] === '\n' && html[trimStart - 2] === '\n') {
+      trimStart -= 1;
+    } else if (
+      trimStart >= cursor + 4 &&
+      html[trimStart - 1] === '\n' &&
+      html[trimStart - 2] === '\r' &&
+      html[trimStart - 3] === '\n' &&
+      html[trimStart - 4] === '\r'
+    ) {
+      trimStart -= 2;
+    }
+
+    result += html.slice(cursor, trimStart);
+    cursor = trimEnd;
+  }
+
+  return result;
+}
+
+export function renderShellIndexHtml(
+  templateHtml: string,
+  site: SiteMetadata,
+  options: RenderShellHtmlOptions = {},
+): string {
+  const rendered = templateHtml
     .replaceAll('{{SITE_TITLE}}', escapeHtml(site.title))
     .replaceAll('{{SITE_SUBTITLE}}', escapeHtml(site.subtitle))
     .replaceAll('{{SITE_FOOTER}}', renderFooterHtml(site.footer));
+
+  if (options.includeMissingDemoWarning === false) {
+    return stripTemplateById(rendered, MISSING_DEMO_WARNING_TEMPLATE_ID);
+  }
+  return rendered;
 }
 
 /**
