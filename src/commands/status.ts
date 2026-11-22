@@ -24,13 +24,19 @@ import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import { isInteractive, type SelectOption } from '../utils/prompts/index.js';
 import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
 import { runBatchStatus, type BatchStatusResult } from '../workflows/batch-pens.js';
-import { discoverPenDirectories } from '../workflows/discover-pens.js';
+import {
+  offerBatchAllFallback,
+  resolveBatchCommandTarget,
+} from '../workflows/batch-target.js';
+import type { DiscoveredPen } from '../workflows/discover-pens.js';
 import {
   fetchLinkedPenOrHandleMissing,
   type MissingPenPrompts,
 } from '../workflows/missing-pen.js';
 
 export interface RunStatusCommandOptions {
+  /** Optional target directory path or `"all"` to walk subdirectories in batch mode. */
+  target?: string;
   json?: boolean;
   cwd?: string;
   explicitProfile?: string;
@@ -65,33 +71,67 @@ export async function runStatusCommand(
   const output = options.output ?? defaultOutput;
   const cwd = path.resolve(options.cwd ?? process.cwd());
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
-  const nearest = await findNearestConfig(cwd);
+  const combinedPrompts: MissingPenPrompts = {
+    confirm: options.prompts?.confirm,
+    select: options.prompts?.select ?? (options.selectProfile as MissingPenPrompts['select']),
+  };
+
+  const executeBatch = async (
+    rootDir: string,
+    discovered: DiscoveredPen[],
+  ): Promise<StatusCommandResult> => {
+    const batch = await runBatchStatus({
+      rootDir,
+      discovered,
+      json: options.json,
+      interactive,
+      explicitProfile: options.explicitProfile,
+      baseUrl: options.baseUrl,
+      env: options.env,
+      homeDir: options.homeDir,
+      output,
+      prompts: combinedPrompts,
+    });
+    return {
+      remoteMoved: batch.remoteMoved,
+      upToDate: batch.upToDate,
+      batch,
+      ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
+    };
+  };
+
+  const resolvedTarget = await resolveBatchCommandTarget({
+    commandName: 'status',
+    cwd,
+    target: options.target,
+    interactive,
+    output,
+    prompts: combinedPrompts,
+  });
+
+  if (resolvedTarget.mode === 'batch') {
+    return executeBatch(resolvedTarget.rootDir, resolvedTarget.discovered);
+  }
+
+  const nearest = await findNearestConfig(resolvedTarget.targetDir);
   if (!nearest) {
-    const discovered = await discoverPenDirectories(cwd);
-    if (discovered.length > 0) {
-      const batch = await runBatchStatus({
-        rootDir: cwd,
-        discovered,
-        json: options.json,
-        interactive,
-        explicitProfile: options.explicitProfile,
-        baseUrl: options.baseUrl,
-        env: options.env,
-        homeDir: options.homeDir,
-        output,
-        prompts: {
-          select: options.prompts?.select ?? (options.selectProfile as MissingPenPrompts['select']),
-        },
-      });
-      return {
-        remoteMoved: batch.remoteMoved,
-        upToDate: batch.upToDate,
-        batch,
-        ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
-      };
+    const fallback = await offerBatchAllFallback({
+      commandName: 'status',
+      targetDir: resolvedTarget.targetDir,
+      fromExplicitDir: resolvedTarget.fromExplicitDir,
+      displayDir: resolvedTarget.displayDir,
+      interactive,
+      output,
+      prompts: combinedPrompts,
+    });
+    if (fallback.action === 'batch') {
+      return executeBatch(resolvedTarget.targetDir, fallback.discovered);
+    }
+    if (fallback.action === 'canceled') {
+      return null;
     }
 
-    const hint = (await isDirectoryNonEmpty(cwd))
+    const hint = (await isDirectoryNonEmpty(resolvedTarget.targetDir))
       ? 'Run `cdpn init` to initialize this folder as a CodePen demo.'
       : 'Run `cdpn clone <url>` to clone a Pen or `cdpn new` to create one.';
     throw new CliError(
@@ -338,12 +378,18 @@ export async function runStatusCommand(
 export function registerStatusCommand(program: Command): void {
   program
     .command('status')
+    .argument(
+      '[target]',
+      'Directory path to inspect, or "all" to check all Pens in subdirectories',
+    )
+    .allowExcessArguments(false)
     .description(
-      'Compare local files and Pen info with the online version on CodePen (or walk subdirectories when run outside a Pen folder)',
+      'Compare local files and Pen info with the online version on CodePen (or pass "all" to walk subdirectories)',
     )
     .option('--json', 'Output status as JSON')
-    .action(async (options: { json?: boolean }, command: Command) => {
+    .action(async (target: string | undefined, options: { json?: boolean }, command: Command) => {
       const result = await runStatusCommand({
+        target,
         json: options.json,
         explicitProfile: getGlobalProfileOption(command),
       });

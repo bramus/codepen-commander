@@ -261,10 +261,64 @@ describe('cdpn status command (batch tree-walk mode)', () => {
           st.pen = { ...st.pen, saved_version: v2 };
         }
 
-        // 1. Human-readable batch status (no errors -> exitCode undefined)
+        // 0. Without "all", non-interactive `cdpn status` refuses to auto-walk and advises `cdpn status all`
+        await assert.rejects(
+          () =>
+            runStatusCommand({
+              cwd: col,
+              baseUrl: server.baseUrl,
+              interactive: false,
+              env: {},
+              homeDir: tmpHome,
+              output: createBufferedOutput(),
+            }),
+          (err: unknown) =>
+            err instanceof CliError &&
+            err.statusCode === 404 &&
+            /cdpn status all/i.test(err.message),
+        );
+
+        // 0b. Explicit directory target `cdpn status 02-local` inspects only that single Pen
+        const singleDirStatus = await runStatusCommand({
+          cwd: col,
+          target: '02-local',
+          baseUrl: server.baseUrl,
+          interactive: false,
+          env: {},
+          homeDir: tmpHome,
+          output: createBufferedOutput(),
+        });
+        assert.ok(singleDirStatus);
+        assert.equal(singleDirStatus.batch, undefined);
+        assert.equal(singleDirStatus.pen?.id, 'pen_st_local');
+        assert.equal(singleDirStatus.upToDate, false);
+
+        // 0c. Interactive `cdpn status` without "all" offers `cdpn status all` (defaults to No)
+        const declinePrompts: Array<{ q: string; def?: boolean }> = [];
+        const declined = await runStatusCommand({
+          cwd: col,
+          baseUrl: server.baseUrl,
+          interactive: true,
+          env: {},
+          homeDir: tmpHome,
+          output: createBufferedOutput(),
+          prompts: {
+            confirm: async (q, def) => {
+              declinePrompts.push({ q, def });
+              return false;
+            },
+          },
+        });
+        assert.equal(declined, null);
+        assert.equal(declinePrompts.length, 1);
+        assert.equal(declinePrompts[0]!.def, false);
+        assert.match(declinePrompts[0]!.q, /cdpn status all/);
+
+        // 1. Human-readable `cdpn status all` (no errors -> exitCode undefined)
         const out = createBufferedOutput();
         const res = await runStatusCommand({
           cwd: col,
+          target: 'all',
           baseUrl: server.baseUrl,
           interactive: false,
           env: {},
@@ -315,6 +369,7 @@ describe('cdpn status command (batch tree-walk mode)', () => {
         const jsonOut = createBufferedOutput();
         const jsonRes = await runStatusCommand({
           cwd: col,
+          target: 'all',
           json: true,
           baseUrl: server.baseUrl,
           interactive: false,
@@ -351,6 +406,7 @@ describe('cdpn status command (batch tree-walk mode)', () => {
         const cleanJsonOut = createBufferedOutput();
         const cleanRes = await runStatusCommand({
           cwd: cleanCol,
+          target: 'all',
           json: true,
           baseUrl: server.baseUrl,
           interactive: false,

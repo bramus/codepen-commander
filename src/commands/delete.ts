@@ -32,7 +32,11 @@ import {
 } from '../utils/prompts/index.js';
 import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
 import { runBatchDelete, type BatchExecutionResult } from '../workflows/batch-pens.js';
-import { discoverPenDirectories } from '../workflows/discover-pens.js';
+import {
+  offerBatchAllFallback,
+  resolveBatchCommandTarget,
+} from '../workflows/batch-target.js';
+import type { DiscoveredPen } from '../workflows/discover-pens.js';
 import {
   findProjectPenInTrash,
   isRemotePenNotFoundError,
@@ -51,6 +55,8 @@ export interface DeleteCliOptions {
 }
 
 export interface RunDeleteCommandOptions {
+  /** Optional target directory path or `"all"` to walk subdirectories in batch mode. */
+  target?: string;
   /** Skip confirmation prompt (required in non-interactive mode). */
   yes?: boolean;
   /** Preview what would be deleted without modifying CodePen or local files. */
@@ -61,7 +67,7 @@ export interface RunDeleteCommandOptions {
   fullCleanup?: boolean;
   /** Output structured JSON response instead of human-readable logs. */
   json?: boolean;
-  /** Working directory (must contain `.cdpn.json` directly, or child Pen folders for batch mode; defaults to `process.cwd()`). */
+  /** Working directory (defaults to `process.cwd()`). */
   cwd?: string;
   /** Explicit `--profile <name>` flag value. */
   explicitProfile?: string;
@@ -107,12 +113,11 @@ export interface DeleteCommandResult {
 type LocalAction = 'keep-linked' | 'unlink-info' | 'cleanup' | 'full-cleanup';
 
 /**
- * Deletes the online Pen linked to `.cdpn.json` directly inside `options.cwd`
- * (moves it to CodePen Deleted Items, restorable for 3 days).
+ * Deletes the online Pen linked to `.cdpn.json` directly inside `options.cwd` (or an explicit
+ * directory `[target]`), moving it to CodePen Deleted Items (restorable for 3 days).
  *
- * When invoked outside any Pen folder (with no `.cdpn.json` in `cwd` or any parent),
- * walks subdirectories to discover all Pens and deletes them in batch after an upfront
- * two-step confirmation (unless `--yes` or `--dry-run` is passed).
+ * Pass `[target]` = `"all"` to walk subdirectories and delete all discovered Pens in batch after
+ * an upfront two-step confirmation (unless `--yes` or `--dry-run` is passed).
  *
  * Local file behavior:
  * - Default: keeps `.cdpn.json` (still linked) and `.codepen/` untouched so that
@@ -139,48 +144,82 @@ export async function runDeleteCommand(
     throw new CliError(400, 'Cannot combine --cleanup and --full-cleanup.');
   }
 
-  // Outside a Pen directory: preserve parent-dir refusal, otherwise enter batch tree-walk mode if child Pens exist
-  if (!(await hasProjectConfigInDir(cwd))) {
-    const parentDir = path.dirname(cwd);
-    const hasParentProject = parentDir !== cwd && Boolean(await findProject(parentDir));
+  const executeBatch = async (
+    rootDir: string,
+    discovered: DiscoveredPen[],
+  ): Promise<DeleteCommandResult | null> => {
+    const batch = await runBatchDelete({
+      rootDir,
+      discovered,
+      yes: options.yes,
+      dryRun,
+      cleanup,
+      fullCleanup,
+      json: options.json,
+      interactive,
+      explicitProfile: options.explicitProfile,
+      baseUrl: options.baseUrl,
+      env: options.env,
+      homeDir: options.homeDir,
+      output,
+      prompts: options.prompts,
+    });
+    if (!batch) {
+      return null;
+    }
+    return {
+      pen: null,
+      configRemoved: false,
+      codepenDirRemoved: false,
+      configKeptLinked: false,
+      infoRetained: false,
+      dryRun,
+      batch,
+      ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
+    };
+  };
+
+  const resolvedTarget = await resolveBatchCommandTarget({
+    commandName: 'delete',
+    cwd,
+    target: options.target,
+    interactive,
+    output,
+    prompts: options.prompts,
+  });
+
+  if (resolvedTarget.mode === 'batch') {
+    return executeBatch(resolvedTarget.rootDir, resolvedTarget.discovered);
+  }
+
+  const targetDir = resolvedTarget.targetDir;
+
+  // Outside a Pen directory: preserve parent-dir refusal, then offer `cdpn delete all` if child Pens exist
+  if (!(await hasProjectConfigInDir(targetDir))) {
+    const parentDir = path.dirname(targetDir);
+    const hasParentProject = parentDir !== targetDir && Boolean(await findProject(parentDir));
     if (!hasParentProject) {
-      const discovered = await discoverPenDirectories(cwd);
-      if (discovered.length > 0) {
-        const batch = await runBatchDelete({
-          rootDir: cwd,
-          discovered,
-          yes: options.yes,
-          dryRun,
-          cleanup,
-          fullCleanup,
-          json: options.json,
-          interactive,
-          explicitProfile: options.explicitProfile,
-          baseUrl: options.baseUrl,
-          env: options.env,
-          homeDir: options.homeDir,
-          output,
-          prompts: options.prompts,
-        });
-        if (!batch) {
-          return null;
-        }
-        return {
-          pen: null,
-          configRemoved: false,
-          codepenDirRemoved: false,
-          configKeptLinked: false,
-          infoRetained: false,
-          dryRun,
-          batch,
-          ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
-        };
+      const fallback = await offerBatchAllFallback({
+        commandName: 'delete',
+        targetDir,
+        fromExplicitDir: resolvedTarget.fromExplicitDir,
+        displayDir: resolvedTarget.displayDir,
+        dryRun,
+        interactive,
+        output,
+        prompts: options.prompts,
+      });
+      if (fallback.action === 'batch') {
+        return executeBatch(targetDir, fallback.discovered);
+      }
+      if (fallback.action === 'canceled') {
+        return null;
       }
     }
   }
 
-  // Strictly require `.cdpn.json` directly inside the current folder
-  const project = await requireProjectInDir(cwd);
+  // Strictly require `.cdpn.json` directly inside the target folder
+  const project = await requireProjectInDir(targetDir);
 
   const auth = await resolveCommandAuth({
     explicitProfile: options.explicitProfile,
@@ -757,9 +796,13 @@ export function registerDeleteCommand(program: Command): void {
   program
     .command('delete')
     .aliases(['del', 'rm'])
+    .argument(
+      '[target]',
+      'Directory path to delete, or "all" to delete all Pens in subdirectories',
+    )
     .allowExcessArguments(false)
     .description(
-      `Delete the online Pen on CodePen (or walk subdirectories when run outside a Pen folder; keeps ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ unless --cleanup or --full-cleanup is passed)`,
+      `Delete the online Pen on CodePen (pass "all" to walk subdirectories; keeps ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ unless --cleanup or --full-cleanup is passed)`,
     )
     .option(
       '--cleanup',
@@ -772,8 +815,9 @@ export function registerDeleteCommand(program: Command): void {
     .option('--dry-run', 'Preview what would be deleted without modifying CodePen or local files')
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Output deletion result as JSON')
-    .action(async (options: DeleteCliOptions, command: Command) => {
+    .action(async (target: string | undefined, options: DeleteCliOptions, command: Command) => {
       const result = await runDeleteCommand({
+        target,
         yes: options.yes,
         dryRun: options.dryRun,
         cleanup: options.cleanup,

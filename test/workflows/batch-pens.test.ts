@@ -347,6 +347,7 @@ describe('batch tree-walk push, pull, and sync', () => {
           () =>
             runPushCommand({
               cwd: col,
+              target: 'all',
               title: 'Invalid Shared Title',
               baseUrl: server.baseUrl,
               interactive: false,
@@ -362,6 +363,7 @@ describe('batch tree-walk push, pull, and sync', () => {
         const dryOut = createBufferedOutput();
         const dryRes = await runPushCommand({
           cwd: col,
+          target: 'all',
           dryRun: true,
           baseUrl: server.baseUrl,
           interactive: false,
@@ -398,6 +400,7 @@ describe('batch tree-walk push, pull, and sync', () => {
         const jsonOut = createBufferedOutput();
         const realRes = await runPushCommand({
           cwd: col,
+          target: 'all',
           json: true,
           baseUrl: server.baseUrl,
           interactive: false,
@@ -431,6 +434,7 @@ describe('batch tree-walk push, pull, and sync', () => {
         // 3. Batch push --force overwrites remote-ahead and conflict Pens cleanly (exitCode undefined)
         const forceRes = await runPushCommand({
           cwd: col,
+          target: 'all',
           force: true,
           baseUrl: server.baseUrl,
           interactive: false,
@@ -523,10 +527,11 @@ describe('batch tree-walk push, pull, and sync', () => {
         assert.equal(spEnv.contents.dry_run, true);
         assert.deepEqual(spEnv.contents.written_paths, ['/index.html']);
 
-        // 2. Batch pull --dry-run from collection root
+        // 2. Batch pull all --dry-run from collection root
         const pullDryOut = createBufferedOutput();
         const pullDry = await runPullCommand({
           cwd: col,
+          target: 'all',
           dryRun: true,
           baseUrl: server.baseUrl,
           interactive: false,
@@ -545,9 +550,10 @@ describe('batch tree-walk push, pull, and sync', () => {
           '<h1>v1</h1>\n',
         );
 
-        // 3. Batch sync --dry-run previews push + pull + create + conflict with zero mutations
+        // 3. Batch sync all --dry-run previews push + pull + create + conflict with zero mutations
         const syncDry = await runSyncCommand({
           cwd: col,
+          target: 'all',
           dryRun: true,
           baseUrl: server.baseUrl,
           interactive: false,
@@ -570,10 +576,11 @@ describe('batch tree-walk push, pull, and sync', () => {
           errors: 0,
         });
 
-        // 4. Real batch sync executes push + pull + create and reports conflict (exitCode 1)
+        // 4. Real batch sync all executes push + pull + create and reports conflict (exitCode 1)
         const syncOut = createBufferedOutput();
         const syncReal = await runSyncCommand({
           cwd: col,
+          target: 'all',
           baseUrl: server.baseUrl,
           interactive: false,
           env: {},
@@ -597,9 +604,10 @@ describe('batch tree-walk push, pull, and sync', () => {
         assert.equal((await readProjectConfigFile(unlinkedDir)).linked, true);
         assert.match(stripAnsi(syncOut.stdout()), /Summary \(sync\):/);
 
-        // 5. Batch pull --force resolves remaining conflict from remote
+        // 5. Batch pull all --force resolves remaining conflict from remote
         const pullForce = await runPullCommand({
           cwd: col,
+          target: 'all',
           force: true,
           baseUrl: server.baseUrl,
           interactive: false,
@@ -679,11 +687,12 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
         assert.equal(sdEnv.contents.deleted, false);
         assert.equal(sdEnv.contents.would_delete, true);
 
-        // 2. Non-interactive batch delete without --yes rejects with 400 and zero DELETE calls
+        // 2. Non-interactive batch delete all without --yes rejects with 400 and zero DELETE calls
         await assert.rejects(
           () =>
             runDeleteCommand({
               cwd: col,
+              target: 'all',
               baseUrl: server.baseUrl,
               interactive: false,
               env: {},
@@ -695,11 +704,12 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
         assert.equal(p1.deleted, false);
         assert.equal(p2.deleted, false);
 
-        // 3. Batch delete --dry-run skips confirmation, makes zero DELETE calls, reports counts
+        // 3. Batch delete all --dry-run skips confirmation, makes zero DELETE calls, reports counts
         const reqBeforeBatchDry = server.requests.length;
         const dryOut = createBufferedOutput();
         const dryRes = await runDeleteCommand({
           cwd: col,
+          target: 'all',
           dryRun: true,
           baseUrl: server.baseUrl,
           interactive: false,
@@ -718,6 +728,7 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
         const prompts1: Array<{ q: string; def?: boolean }> = [];
         const abort1 = await runDeleteCommand({
           cwd: col,
+          target: 'all',
           baseUrl: server.baseUrl,
           interactive: true,
           env: {},
@@ -740,6 +751,7 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
         const prompts2: Array<{ q: string; def?: boolean }> = [];
         const abort2 = await runDeleteCommand({
           cwd: col,
+          target: 'all',
           baseUrl: server.baseUrl,
           interactive: true,
           env: {},
@@ -764,6 +776,7 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
         const delOut = createBufferedOutput();
         const delDefault = await runDeleteCommand({
           cwd: col,
+          target: 'all',
           baseUrl: server.baseUrl,
           interactive: true,
           env: {},
@@ -788,10 +801,11 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
         assert.ok((await fs.stat(path.join(dir1, CODEPEN_DIR))).isDirectory());
         assert.match(stripAnsi(delOut.stdout()), /Deleted:\s+2/);
 
-        // 7. Batch delete --cleanup --yes -> removes .codepen/ and keeps unlinked info-only .cdpn.json
+        // 7. Batch delete all --cleanup --yes -> removes .codepen/ and keeps unlinked info-only .cdpn.json
         await resetFixtures();
         const delCleanup = await runDeleteCommand({
           cwd: col,
+          target: 'all',
           cleanup: true,
           yes: true,
           baseUrl: server.baseUrl,
@@ -807,11 +821,12 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
         await assert.rejects(() => fs.stat(path.join(dir2, CODEPEN_DIR)), /ENOENT/);
         assert.equal(await fs.readFile(path.join(dir1, 'index.html'), 'utf8'), '<h1>1</h1>\n');
 
-        // 8. Batch delete --full-cleanup --yes --json -> removes both .codepen/ and .cdpn.json
+        // 8. Batch delete all --full-cleanup --yes --json -> removes both .codepen/ and .cdpn.json
         await resetFixtures();
         const fullOut = createBufferedOutput();
         const delFull = await runDeleteCommand({
           cwd: col,
+          target: 'all',
           fullCleanup: true,
           yes: true,
           json: true,
@@ -841,7 +856,7 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
     }
   });
 
-  it('enforces two-step confirmation ("Are you really sure?") for batch unlink and supports --dry-run (batch & single-Pen)', async () => {
+  it('enforces two-step confirmation ("Are you really sure?") for batch unlink all and supports --dry-run (batch & single-Pen)', async () => {
     await withTempDir(async (tmpRoot) => {
       const col = path.join(tmpRoot, 'demos');
       const dir1 = path.join(col, 'pen-a');
@@ -873,21 +888,23 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
       assert.equal(suEnv.contents.dry_run, true);
       assert.equal(suEnv.contents.would_unlink, true);
 
-      // 2. Non-interactive batch unlink without --yes rejects with 400
+      // 2. Non-interactive batch unlink all without --yes rejects with 400
       await assert.rejects(
         () =>
           runUnlinkCommand({
             cwd: col,
+            target: 'all',
             interactive: false,
             output: createSilentOutput(),
           }),
         (err: unknown) => err instanceof CliError && err.statusCode === 400,
       );
 
-      // 3. Batch unlink --dry-run skips confirmation, leaves files untouched, reports counts
+      // 3. Batch unlink all --dry-run skips confirmation, leaves files untouched, reports counts
       const dryOut = createBufferedOutput();
       const dryRes = await runUnlinkCommand({
         cwd: col,
+        target: 'all',
         dryRun: true,
         interactive: false,
         output: dryOut,
@@ -904,6 +921,7 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
       const prompts1: string[] = [];
       const abort1 = await runUnlinkCommand({
         cwd: col,
+        target: 'all',
         interactive: true,
         output: createSilentOutput(),
         prompts: {
@@ -921,6 +939,7 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
       const prompts2: string[] = [];
       const abort2 = await runUnlinkCommand({
         cwd: col,
+        target: 'all',
         interactive: true,
         output: createSilentOutput(),
         prompts: {
@@ -941,6 +960,7 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
       const unlinkOut = createBufferedOutput();
       const unlinked = await runUnlinkCommand({
         cwd: col,
+        target: 'all',
         interactive: true,
         output: unlinkOut,
         prompts: {
@@ -985,5 +1005,295 @@ describe('batch tree-walk delete and unlink (upfront double confirmation & --dry
       );
       assert.equal((await readProjectConfig(dir1)).pen_id, p1.pen.id);
     });
+  });
+});
+
+describe('batch target gating (all keyword, directory targeting, ./all disambiguation, and fallback prompt)', () => {
+  it('gates tree walking behind "all", supports `cdpn pull <dir>`, disambiguates a directory named "all", and offers `cdpn pull all` interactively in non-Pen directories', async () => {
+    const pens = new Map<string, RemotePenState>();
+    const penAllDir = createPenState('pen_named_all', 'All Dir Pen', { '/index.html': '<h1>v1</h1>\n' });
+    const penOther = createPenState('pen_other', 'Other Pen', { '/index.html': '<h1>v1</h1>\n' });
+    pens.set(penAllDir.pen.id, penAllDir);
+    pens.set(penOther.pen.id, penOther);
+
+    const server = await startMultiPenMockServer(pens);
+    try {
+      await withTempDir(async (tmpRoot) => {
+        const tmpHome = path.join(tmpRoot, 'home');
+        const col = path.join(tmpRoot, 'demos');
+        await fs.mkdir(tmpHome, { recursive: true });
+        await saveProfileToFile('bramus', KEY_BRAMUS, { homeDir: tmpHome, setAsDefault: true });
+
+        const allDir = path.join(col, 'all');
+        const otherDir = path.join(col, 'other');
+
+        const resetBothBehind = async () => {
+          await fs.rm(col, { recursive: true, force: true });
+          const v1Files = [makePenFile('/index.html', '<h1>v1</h1>\n', { content_hash: sha256('<h1>v1</h1>\n') })];
+          const v1All = makeVersion({ id: 'ver_1', pen_id: penAllDir.pen.id, files: v1Files });
+          const v1Other = makeVersion({ id: 'ver_1', pen_id: penOther.pen.id, files: v1Files });
+          penAllDir.files = v1Files;
+          penAllDir.pen = { ...penAllDir.pen, saved_version: v1All };
+          penOther.files = v1Files;
+          penOther.pen = { ...penOther.pen, saved_version: v1Other };
+
+          await materializeLinkedPen(allDir, penAllDir);
+          await materializeLinkedPen(otherDir, penOther);
+
+          // Advance both remotely to v2
+          for (const st of [penAllDir, penOther]) {
+            const content = `<h1>remote ${st.pen.id}</h1>\n`;
+            const files = [makePenFile('/index.html', content, { content_hash: sha256(content) })];
+            const v2 = makeVersion({
+              id: 'ver_2',
+              pen_id: st.pen.id,
+              build: makeBuild({ version_id: 'ver_2' }),
+              files,
+            });
+            st.files = files;
+            st.versions.set('ver_2', v2);
+            st.pen = { ...st.pen, saved_version: v2 };
+          }
+        };
+
+        await resetBothBehind();
+
+        // 1. Non-interactive `cdpn pull` (no "all") refuses to auto-walk and suggests `cdpn pull all`
+        await assert.rejects(
+          () =>
+            runPullCommand({
+              cwd: col,
+              baseUrl: server.baseUrl,
+              interactive: false,
+              env: {},
+              homeDir: tmpHome,
+              output: createSilentOutput(),
+            }),
+          (err: unknown) =>
+            err instanceof CliError &&
+            err.statusCode === 404 &&
+            /cdpn pull all/i.test(err.message),
+        );
+        assert.equal(await fs.readFile(path.join(allDir, 'index.html'), 'utf8'), '<h1>v1</h1>\n');
+        assert.equal(await fs.readFile(path.join(otherDir, 'index.html'), 'utf8'), '<h1>v1</h1>\n');
+
+        // 2. Non-interactive `cdpn push`, `sync`, `delete`, `unlink` without "all" also refuse to auto-walk
+        for (const [cmd, runner] of [
+          ['push', () => runPushCommand({ cwd: col, baseUrl: server.baseUrl, interactive: false, env: {}, homeDir: tmpHome, output: createSilentOutput() })],
+          ['sync', () => runSyncCommand({ cwd: col, baseUrl: server.baseUrl, interactive: false, env: {}, homeDir: tmpHome, output: createSilentOutput() })],
+          ['delete', () => runDeleteCommand({ cwd: col, yes: true, baseUrl: server.baseUrl, interactive: false, env: {}, homeDir: tmpHome, output: createSilentOutput() })],
+          ['unlink', () => runUnlinkCommand({ cwd: col, yes: true, interactive: false, output: createSilentOutput() })],
+        ] as const) {
+          await assert.rejects(
+            runner,
+            (err: unknown) =>
+              err instanceof CliError &&
+              err.statusCode === 404 &&
+              new RegExp(`cdpn ${cmd} all`, 'i').test(err.message),
+          );
+        }
+
+        // 3. `cdpn pull other` pulls ONLY the "other" directory, leaving "all" untouched
+        const pullOne = await runPullCommand({
+          cwd: col,
+          target: 'other',
+          baseUrl: server.baseUrl,
+          interactive: false,
+          env: {},
+          homeDir: tmpHome,
+          output: createSilentOutput(),
+        });
+        assert.equal(pullOne?.batch, undefined);
+        assert.equal(pullOne?.pen?.id, 'pen_other');
+        assert.equal(
+          await fs.readFile(path.join(otherDir, 'index.html'), 'utf8'),
+          '<h1>remote pen_other</h1>\n',
+        );
+        assert.equal(await fs.readFile(path.join(allDir, 'index.html'), 'utf8'), '<h1>v1</h1>\n');
+
+        // 4. `cdpn pull ./all` unambiguously targets the ./all directory without prompting
+        await resetBothBehind();
+        const pullDotAll = await runPullCommand({
+          cwd: col,
+          target: './all',
+          baseUrl: server.baseUrl,
+          interactive: false,
+          env: {},
+          homeDir: tmpHome,
+          output: createSilentOutput(),
+        });
+        assert.equal(pullDotAll?.batch, undefined);
+        assert.equal(pullDotAll?.pen?.id, 'pen_named_all');
+        assert.equal(
+          await fs.readFile(path.join(allDir, 'index.html'), 'utf8'),
+          '<h1>remote pen_named_all</h1>\n',
+        );
+        assert.equal(await fs.readFile(path.join(otherDir, 'index.html'), 'utf8'), '<h1>v1</h1>\n');
+
+        // 5. `cdpn pull all` when directory "all" exists:
+        //    a) Non-interactive rejects with 409 ambiguity error advising "./all"
+        await resetBothBehind();
+        await assert.rejects(
+          () =>
+            runPullCommand({
+              cwd: col,
+              target: 'all',
+              baseUrl: server.baseUrl,
+              interactive: false,
+              env: {},
+              homeDir: tmpHome,
+              output: createSilentOutput(),
+            }),
+          (err: unknown) =>
+            err instanceof CliError &&
+            err.statusCode === 409 &&
+            /Ambiguous target "all"/i.test(err.message) &&
+            /\.\/all/.test(err.message),
+        );
+
+        //    b) Interactive choice -> selecting "directory" pulls ONLY ./all
+        let seenValues: string[] = [];
+        const choseDir = await runPullCommand({
+          cwd: col,
+          target: 'all',
+          baseUrl: server.baseUrl,
+          interactive: true,
+          env: {},
+          homeDir: tmpHome,
+          output: createSilentOutput(),
+          prompts: {
+            select: async (_q, opts) => {
+              seenValues = opts.map((o) => o.value);
+              return 'directory' as never;
+            },
+          },
+        });
+        assert.deepEqual(seenValues, ['directory', 'batch']);
+        assert.equal(choseDir?.batch, undefined);
+        assert.equal(choseDir?.pen?.id, 'pen_named_all');
+        assert.equal(
+          await fs.readFile(path.join(allDir, 'index.html'), 'utf8'),
+          '<h1>remote pen_named_all</h1>\n',
+        );
+        assert.equal(await fs.readFile(path.join(otherDir, 'index.html'), 'utf8'), '<h1>v1</h1>\n');
+
+        //    c) Interactive choice -> selecting "batch" pulls ALL Pens (both ./all and other)
+        await resetBothBehind();
+        const choseBatch = await runPullCommand({
+          cwd: col,
+          target: 'all',
+          baseUrl: server.baseUrl,
+          interactive: true,
+          env: {},
+          homeDir: tmpHome,
+          output: createSilentOutput(),
+          prompts: {
+            select: async () => 'batch' as never,
+          },
+        });
+        assert.equal(choseBatch?.batch?.counts.pulled, 2);
+        assert.equal(
+          await fs.readFile(path.join(allDir, 'index.html'), 'utf8'),
+          '<h1>remote pen_named_all</h1>\n',
+        );
+        assert.equal(
+          await fs.readFile(path.join(otherDir, 'index.html'), 'utf8'),
+          '<h1>remote pen_other</h1>\n',
+        );
+
+        // 6. Interactive `cdpn pull` (without "all") in a non-Pen dir offers `cdpn pull all` (yes/No)
+        await resetBothBehind();
+        const declinePrompts: Array<{ q: string; def?: boolean }> = [];
+        const declined = await runPullCommand({
+          cwd: col,
+          baseUrl: server.baseUrl,
+          interactive: true,
+          env: {},
+          homeDir: tmpHome,
+          output: createSilentOutput(),
+          prompts: {
+            confirm: async (q, def) => {
+              declinePrompts.push({ q, def });
+              return false;
+            },
+          },
+        });
+        assert.equal(declined, null);
+        assert.equal(declinePrompts.length, 1);
+        assert.equal(declinePrompts[0]!.def, false);
+        assert.match(declinePrompts[0]!.q, /Run `cdpn pull all`/);
+        assert.equal(await fs.readFile(path.join(otherDir, 'index.html'), 'utf8'), '<h1>v1</h1>\n');
+
+        // Accepting the offer walks the subtree and pulls all Pens!
+        const accepted = await runPullCommand({
+          cwd: col,
+          baseUrl: server.baseUrl,
+          interactive: true,
+          env: {},
+          homeDir: tmpHome,
+          output: createSilentOutput(),
+          prompts: {
+            confirm: async () => true,
+          },
+        });
+        assert.equal(accepted?.batch?.counts.pulled, 2);
+        assert.equal(
+          await fs.readFile(path.join(allDir, 'index.html'), 'utf8'),
+          '<h1>remote pen_named_all</h1>\n',
+        );
+        assert.equal(
+          await fs.readFile(path.join(otherDir, 'index.html'), 'utf8'),
+          '<h1>remote pen_other</h1>\n',
+        );
+
+        // 7. `cdpn pull all` inside a single Pen folder (no child Pens) gives helpful 404 hint
+        await assert.rejects(
+          () =>
+            runPullCommand({
+              cwd: otherDir,
+              target: 'all',
+              baseUrl: server.baseUrl,
+              interactive: false,
+              env: {},
+              homeDir: tmpHome,
+              output: createSilentOutput(),
+            }),
+          (err: unknown) =>
+            err instanceof CliError &&
+            err.statusCode === 404 &&
+            /without "all"/i.test(err.message),
+        );
+
+        // 8. Nonexistent directory or file target throws clean 404 / 400
+        await assert.rejects(
+          () =>
+            runPullCommand({
+              cwd: col,
+              target: 'does-not-exist',
+              baseUrl: server.baseUrl,
+              interactive: false,
+              env: {},
+              homeDir: tmpHome,
+              output: createSilentOutput(),
+            }),
+          (err: unknown) => err instanceof CliError && err.statusCode === 404,
+        );
+        await assert.rejects(
+          () =>
+            runPullCommand({
+              cwd: otherDir,
+              target: 'index.html',
+              baseUrl: server.baseUrl,
+              interactive: false,
+              env: {},
+              homeDir: tmpHome,
+              output: createSilentOutput(),
+            }),
+          (err: unknown) => err instanceof CliError && err.statusCode === 400,
+        );
+      }, 'cdpn-batch-gating-');
+    } finally {
+      await server.close();
+    }
   });
 });

@@ -13,8 +13,12 @@ import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import { isInteractive, type SelectOption } from '../utils/prompts/index.js';
 import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
 import { runBatchPush, type BatchExecutionResult } from '../workflows/batch-pens.js';
+import {
+  offerBatchAllFallback,
+  resolveBatchCommandTarget,
+} from '../workflows/batch-target.js';
 import { createPenFromDirectory } from '../workflows/create-pen.js';
-import { discoverPenDirectories } from '../workflows/discover-pens.js';
+import type { DiscoveredPen } from '../workflows/discover-pens.js';
 import { fetchLinkedPenOrHandleMissing } from '../workflows/missing-pen.js';
 import { executePush, type PushExecutionResult, type PushOptions } from '../workflows/push-pen.js';
 
@@ -33,6 +37,8 @@ export interface PushCliOptions {
 }
 
 export interface RunPushCommandOptions extends PushCliOptions {
+  /** Optional target directory path or `"all"` to walk subdirectories in batch mode. */
+  target?: string;
   cwd?: string;
   explicitProfile?: string;
   baseUrl?: string;
@@ -78,45 +84,77 @@ export async function runPushCommand(
   assertValidVersionLabel(options.label);
   const resolvedAccess = resolveAccessOrVisibility(options.access, options.visibility);
 
-  const nearest = await findNearestConfig(cwd);
+  const executeBatch = async (
+    rootDir: string,
+    discovered: DiscoveredPen[],
+  ): Promise<RunPushCommandResult> => {
+    if (options.title?.trim()) {
+      throw new CliError(
+        400,
+        '--title cannot be used when pushing multiple Pens in a directory tree.',
+      );
+    }
 
-  // Outside any Pen folder: if subdirectories contain Pens (.cdpn.json), walk the tree in batch mode
+    const batch = await runBatchPush({
+      rootDir,
+      discovered,
+      label: options.label,
+      force: options.force,
+      dryRun: options.dryRun,
+      wait: options.wait,
+      access: resolvedAccess,
+      password: options.password,
+      json: jsonMode,
+      interactive,
+      explicitProfile: options.explicitProfile,
+      baseUrl: options.baseUrl,
+      env: options.env,
+      homeDir: options.homeDir,
+      output,
+      prompts: options.prompts,
+    });
+
+    return {
+      pushed: !batch.dryRun && (batch.counts.pushed > 0 || batch.counts.created > 0),
+      created: !batch.dryRun && batch.counts.created > 0,
+      dryRun: batch.dryRun,
+      batch,
+      ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
+    };
+  };
+
+  const resolvedTarget = await resolveBatchCommandTarget({
+    commandName: 'push',
+    cwd,
+    target: options.target,
+    interactive,
+    output,
+    prompts: options.prompts,
+  });
+
+  if (resolvedTarget.mode === 'batch') {
+    return executeBatch(resolvedTarget.rootDir, resolvedTarget.discovered);
+  }
+
+  const targetCwd = resolvedTarget.targetDir;
+  const nearest = await findNearestConfig(targetCwd);
+
   if (!nearest) {
-    const discovered = await discoverPenDirectories(cwd);
-    if (discovered.length > 0) {
-      if (options.title?.trim()) {
-        throw new CliError(
-          400,
-          '--title cannot be used when pushing multiple Pens in a directory tree.',
-        );
-      }
-
-      const batch = await runBatchPush({
-        rootDir: cwd,
-        discovered,
-        label: options.label,
-        force: options.force,
-        dryRun: options.dryRun,
-        wait: options.wait,
-        access: resolvedAccess,
-        password: options.password,
-        json: jsonMode,
-        interactive,
-        explicitProfile: options.explicitProfile,
-        baseUrl: options.baseUrl,
-        env: options.env,
-        homeDir: options.homeDir,
-        output,
-        prompts: options.prompts,
-      });
-
-      return {
-        pushed: !batch.dryRun && (batch.counts.pushed > 0 || batch.counts.created > 0),
-        created: !batch.dryRun && batch.counts.created > 0,
-        dryRun: batch.dryRun,
-        batch,
-        ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
-      };
+    const fallback = await offerBatchAllFallback({
+      commandName: 'push',
+      targetDir: targetCwd,
+      fromExplicitDir: resolvedTarget.fromExplicitDir,
+      displayDir: resolvedTarget.displayDir,
+      dryRun: options.dryRun,
+      interactive,
+      output,
+      prompts: options.prompts,
+    });
+    if (fallback.action === 'batch') {
+      return executeBatch(targetCwd, fallback.discovered);
+    }
+    if (fallback.action === 'canceled') {
+      return { pushed: false, created: false, dryRun: Boolean(options.dryRun), aborted: true };
     }
   }
 
@@ -131,7 +169,7 @@ export async function runPushCommand(
       );
     }
 
-    const targetDir = nearest ? nearest.rootDir : cwd;
+    const targetDir = nearest ? nearest.rootDir : targetCwd;
     const folderDisplay = path.relative(cwd, targetDir) || '.';
 
     if (!jsonMode) {
@@ -325,8 +363,10 @@ export async function runPushCommand(
 export function registerPushCommand(program: Command): void {
   program
     .command('push')
+    .argument('[target]', 'Directory path to push, or "all" to push all Pens in subdirectories')
+    .allowExcessArguments(false)
     .description(
-      'Push local file and Pen info changes to CodePen (or walk subdirectories when run outside a Pen folder, or push an unlinked folder as a new Pen)',
+      'Push local file and Pen info changes to CodePen (pass "all" to walk subdirectories, or push an unlinked folder as a new Pen)',
     )
     .option('-m, --label <label>', 'Label for the saved version (max 80 chars)')
     .option(
@@ -343,9 +383,10 @@ export function registerPushCommand(program: Command): void {
     .option('--visibility <level>', 'Alias for --access')
     .option('--password <password>', 'Password for a new Protected Pen (min 8 chars)')
     .option('--json', 'Output push result as JSON')
-    .action(async (options: PushCliOptions, command: Command) => {
+    .action(async (target: string | undefined, options: PushCliOptions, command: Command) => {
       const result = await runPushCommand({
         ...options,
+        target,
         explicitProfile: getGlobalProfileOption(command),
       });
       if (result.exitCode !== undefined) {

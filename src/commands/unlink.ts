@@ -11,9 +11,13 @@ import { CliError } from '../errors.js';
 import { fmt } from '../utils/format.js';
 import { printJsonResponse } from '../utils/json.js';
 import { defaultOutput, type CommandOutput } from '../utils/output.js';
-import { isInteractive, promptConfirm } from '../utils/prompts/index.js';
+import { isInteractive, promptConfirm, type SelectOption } from '../utils/prompts/index.js';
 import { runBatchUnlink, type BatchExecutionResult } from '../workflows/batch-pens.js';
-import { discoverPenDirectories } from '../workflows/discover-pens.js';
+import {
+  offerBatchAllFallback,
+  resolveBatchCommandTarget,
+} from '../workflows/batch-target.js';
+import type { DiscoveredPen } from '../workflows/discover-pens.js';
 import { unlinkLinkedProject } from '../workflows/missing-pen.js';
 
 export interface UnlinkCliOptions {
@@ -23,13 +27,15 @@ export interface UnlinkCliOptions {
 }
 
 export interface RunUnlinkCommandOptions {
+  /** Optional target directory path or `"all"` to walk subdirectories in batch mode. */
+  target?: string;
   /** Skip confirmation prompt (required in non-interactive mode). */
   yes?: boolean;
   /** Preview what would be unlinked without modifying local files. */
   dryRun?: boolean;
   /** Output structured JSON response instead of human-readable logs. */
   json?: boolean;
-  /** Working directory (must contain a linked `.cdpn.json` directly, or child Pen folders for batch mode; defaults to `process.cwd()`). */
+  /** Working directory (defaults to `process.cwd()`). */
   cwd?: string;
   /** Injectable interactivity flag (for testing). */
   interactive?: boolean;
@@ -38,6 +44,11 @@ export interface RunUnlinkCommandOptions {
   /** Injectable prompts (for testing). */
   prompts?: {
     confirm?: (question: string, defaultYes?: boolean) => Promise<boolean>;
+    select?: <T extends string>(
+      question: string,
+      options: SelectOption<T>[],
+      defaultIndex?: number,
+    ) => Promise<T>;
   };
 }
 
@@ -55,14 +66,12 @@ export interface UnlinkCommandResult {
 }
 
 /**
- * Locally unlinks the current folder from its remote CodePen Pen by clearing all
- * remote link fields (`url`, `pen_id`, `profile`, `last_synced_version_id`,
- * `last_synced_info_hash`, `editor`, `files`) from `.cdpn.json` while keeping
- * `info`, `.codepen/`, and all local source files untouched.
+ * Locally unlinks the current folder (or explicit directory `[target]`) from its remote CodePen Pen
+ * by clearing all remote link fields from `.cdpn.json` while keeping `info`, `.codepen/`, and all
+ * local source files untouched.
  *
- * When invoked outside any Pen folder (with no `.cdpn.json` in `cwd` or any parent),
- * walks subdirectories to discover all Pens and unlinks them in batch after an upfront
- * two-step confirmation (unless `--yes` or `--dry-run` is passed).
+ * Pass `[target]` = `"all"` to walk subdirectories and unlink all discovered Pens in batch after
+ * an upfront two-step confirmation (unless `--yes` or `--dry-run` is passed).
  *
  * Does NOT modify or delete online Pens on CodePen.
  * Returns `null` if the user cancels at a confirmation prompt.
@@ -76,39 +85,73 @@ export async function runUnlinkCommand(
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
 
-  // Outside a Pen directory: check parent safety, then offer tree-walk batch mode if child Pens exist
-  if (!(await hasProjectConfigInDir(cwd))) {
-    const parentDir = path.dirname(cwd);
-    const hasParentProject = parentDir !== cwd && Boolean(await findProject(parentDir));
+  const executeBatch = async (
+    rootDir: string,
+    discovered: DiscoveredPen[],
+  ): Promise<UnlinkCommandResult | null> => {
+    const batch = await runBatchUnlink({
+      rootDir,
+      discovered,
+      yes: options.yes,
+      dryRun,
+      json: options.json,
+      interactive,
+      output,
+      prompts: options.prompts,
+    });
+    if (!batch) {
+      return null;
+    }
+    return {
+      unlinked: !dryRun && batch.counts.unlinked > 0,
+      dryRun,
+      rootDir,
+      batch,
+      ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
+    };
+  };
+
+  const resolvedTarget = await resolveBatchCommandTarget({
+    commandName: 'unlink',
+    cwd,
+    target: options.target,
+    interactive,
+    output,
+    prompts: options.prompts,
+  });
+
+  if (resolvedTarget.mode === 'batch') {
+    return executeBatch(resolvedTarget.rootDir, resolvedTarget.discovered);
+  }
+
+  const targetDir = resolvedTarget.targetDir;
+
+  // Outside a Pen directory: preserve parent safety, then offer `cdpn unlink all` if child Pens exist
+  if (!(await hasProjectConfigInDir(targetDir))) {
+    const parentDir = path.dirname(targetDir);
+    const hasParentProject = parentDir !== targetDir && Boolean(await findProject(parentDir));
     if (!hasParentProject) {
-      const discovered = await discoverPenDirectories(cwd);
-      if (discovered.length > 0) {
-        const batch = await runBatchUnlink({
-          rootDir: cwd,
-          discovered,
-          yes: options.yes,
-          dryRun,
-          json: options.json,
-          interactive,
-          output,
-          prompts: options.prompts,
-        });
-        if (!batch) {
-          return null;
-        }
-        return {
-          unlinked: !dryRun && batch.counts.unlinked > 0,
-          dryRun,
-          rootDir: cwd,
-          batch,
-          ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
-        };
+      const fallback = await offerBatchAllFallback({
+        commandName: 'unlink',
+        targetDir,
+        fromExplicitDir: resolvedTarget.fromExplicitDir,
+        displayDir: resolvedTarget.displayDir,
+        dryRun,
+        interactive,
+        output,
+        prompts: options.prompts,
+      });
+      if (fallback.action === 'batch') {
+        return executeBatch(targetDir, fallback.discovered);
+      }
+      if (fallback.action === 'canceled') {
+        return null;
       }
     }
   }
 
-  // Strictly require a linked `.cdpn.json` directly inside the current folder
-  const project = await requireProjectInDir(cwd);
+  // Strictly require a linked `.cdpn.json` directly inside the target folder
+  const project = await requireProjectInDir(targetDir);
   const displayTitle = project.config.info?.title?.trim() || 'Untitled';
   const previousPenId = project.config.pen_id;
   const previousUrl = project.config.url;
@@ -233,15 +276,20 @@ export async function runUnlinkCommand(
 export function registerUnlinkCommand(program: Command): void {
   program
     .command('unlink')
+    .argument(
+      '[target]',
+      'Directory path to unlink, or "all" to unlink all Pens in subdirectories',
+    )
     .allowExcessArguments(false)
     .description(
-      `Unlink this local folder from its online Pen (or walk subdirectories when run outside a Pen folder; keeps online Pens, ${CODEPEN_DIR}/, and Pen info)`,
+      `Unlink a local folder from its online Pen (pass "all" to walk subdirectories; keeps online Pens, ${CODEPEN_DIR}/, and Pen info)`,
     )
     .option('--dry-run', 'Preview what would be unlinked without modifying local files')
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Output unlink result as JSON')
-    .action(async (options: UnlinkCliOptions) => {
+    .action(async (target: string | undefined, options: UnlinkCliOptions) => {
       const result = await runUnlinkCommand({
+        target,
         yes: options.yes,
         dryRun: options.dryRun,
         json: options.json,

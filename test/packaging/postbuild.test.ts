@@ -194,7 +194,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       /missing required argument 'url'/i,
     );
 
-    // `cdpn pull` takes no positional arguments (rejects passing a URL)
+    // `cdpn pull [target]` rejects URLs (directs to `cdpn clone`) and excess arguments
     await assert.rejects(
       () =>
         execFileAsync(process.execPath, [
@@ -202,10 +202,14 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
           'pull',
           'https://codepen.io/username/pen/abcde',
         ]),
+      /not a URL/i,
+    );
+    await assert.rejects(
+      () => execFileAsync(process.execPath, [path.join(distDir, 'cli.js'), 'pull', 'a', 'b']),
       /too many arguments/i,
     );
 
-    // `cdpn delete` takes no positional arguments (rejects passing a URL) and supports `del` / `rm` aliases
+    // `cdpn delete [target]` rejects URLs and excess arguments, and supports `del` / `rm` aliases
     await assert.rejects(
       () =>
         execFileAsync(process.execPath, [
@@ -213,6 +217,10 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
           'delete',
           'https://codepen.io/username/pen/abcde',
         ]),
+      /not a URL/i,
+    );
+    await assert.rejects(
+      () => execFileAsync(process.execPath, [path.join(distDir, 'cli.js'), 'delete', 'a', 'b']),
       /too many arguments/i,
     );
     for (const alias of ['delete', 'del', 'rm']) {
@@ -247,7 +255,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     assert.ok(restoreHelp.includes('Usage: cdpn restore'));
     assert.ok(restoreHelp.includes('--json'));
 
-    // `cdpn unlink` takes no positional arguments and exposes --yes and --json
+    // `cdpn unlink [target]` rejects URLs and excess arguments, and exposes --yes and --json
     await assert.rejects(
       () =>
         execFileAsync(process.execPath, [
@@ -255,6 +263,10 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
           'unlink',
           'https://codepen.io/username/pen/abcde',
         ]),
+      /not a URL/i,
+    );
+    await assert.rejects(
+      () => execFileAsync(process.execPath, [path.join(distDir, 'cli.js'), 'unlink', 'a', 'b']),
       /too many arguments/i,
     );
     const { stdout: unlinkHelp } = await execFileAsync(process.execPath, [
@@ -375,20 +387,26 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       );
     }
 
-    // Verify --dry-run is exposed on all 5 tree-walking commands (push|pull|sync|delete|unlink)
-    for (const cmd of ['push', 'pull', 'sync', 'delete', 'unlink']) {
+    // Verify --dry-run is exposed on push|pull|sync|delete|unlink and [target] on all 6 batch-capable commands
+    for (const cmd of ['status', 'push', 'pull', 'sync', 'delete', 'unlink']) {
       const { stdout: cmdHelp } = await execFileAsync(process.execPath, [
         path.join(distDir, 'cli.js'),
         cmd,
         '--help',
       ]);
       assert.ok(
-        cmdHelp.includes('--dry-run'),
-        `Expected "cdpn ${cmd} --help" to include --dry-run`,
+        cmdHelp.includes('[target]'),
+        `Expected "cdpn ${cmd} --help" to include [target]`,
       );
+      if (cmd !== 'status') {
+        assert.ok(
+          cmdHelp.includes('--dry-run'),
+          `Expected "cdpn ${cmd} --help" to include --dry-run`,
+        );
+      }
     }
 
-    // `cdpn sync` rejects excess positional arguments
+    // `cdpn sync [target]` rejects URLs and excess positional arguments
     await assert.rejects(
       () =>
         execFileAsync(process.execPath, [
@@ -396,6 +414,10 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
           'sync',
           'https://codepen.io/username/pen/abcde',
         ]),
+      /not a URL/i,
+    );
+    await assert.rejects(
+      () => execFileAsync(process.execPath, [path.join(distDir, 'cli.js'), 'sync', 'a', 'b']),
       /too many arguments/i,
     );
 

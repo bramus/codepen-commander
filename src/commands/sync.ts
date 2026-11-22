@@ -20,8 +20,12 @@ import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import { isInteractive, type SelectOption } from '../utils/prompts/index.js';
 import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
 import { runBatchSync, type BatchExecutionResult } from '../workflows/batch-pens.js';
+import {
+  offerBatchAllFallback,
+  resolveBatchCommandTarget,
+} from '../workflows/batch-target.js';
 import { createPenFromDirectory } from '../workflows/create-pen.js';
-import { discoverPenDirectories } from '../workflows/discover-pens.js';
+import type { DiscoveredPen } from '../workflows/discover-pens.js';
 import { fetchLinkedPenOrHandleMissing } from '../workflows/missing-pen.js';
 import { executeSync, type PenSyncState } from '../workflows/sync-pen.js';
 
@@ -37,6 +41,8 @@ export interface SyncCliOptions {
 }
 
 export interface RunSyncCommandOptions extends SyncCliOptions {
+  /** Optional target directory path or `"all"` to walk subdirectories in batch mode. */
+  target?: string;
   cwd?: string;
   explicitProfile?: string;
   baseUrl?: string;
@@ -76,11 +82,11 @@ export interface SyncCommandResult {
 
 /**
  * Bidirectional sync command:
- * - Inside a Pen folder (linked or unlinked info-only `.cdpn.json`): creates unlinked Pens,
+ * - Inside a Pen folder (or explicit `[target]` directory): creates unlinked Pens,
  *   pushes when local is ahead, pulls when remote is ahead, leaves up-to-date Pens untouched,
  *   and refuses with `409 Conflict` when both sides have diverged.
- * - Outside a Pen folder: walks subdirectories to discover all Pens (`.cdpn.json`) and syncs
- *   them in batch, printing a summary report.
+ * - With `[target]` set to `"all"`: walks subdirectories to discover all Pens (`.cdpn.json`)
+ *   and syncs them in batch, printing a summary report.
  */
 export async function runSyncCommand(
   options: RunSyncCommandOptions = {},
@@ -94,20 +100,12 @@ export async function runSyncCommand(
   assertValidVersionLabel(options.label);
   const resolvedAccess = resolveAccessOrVisibility(options.access, options.visibility);
 
-  const nearest = await findNearestConfig(cwd);
-
-  if (!nearest) {
-    const discovered = await discoverPenDirectories(cwd);
-    if (discovered.length === 0) {
-      throw new CliError(
-        404,
-        `No ${PROJECT_CONFIG_FILENAME} found in this directory, any parent directory, or any subdirectory.\n` +
-          'Run `cdpn clone <url>` to clone a Pen, `cdpn init` to initialize this folder, or `cdpn new` to create one.',
-      );
-    }
-
+  const executeBatch = async (
+    rootDir: string,
+    discovered: DiscoveredPen[],
+  ): Promise<SyncCommandResult> => {
     const batch = await runBatchSync({
-      rootDir: cwd,
+      rootDir,
       discovered,
       label: options.label,
       force: options.force,
@@ -131,6 +129,46 @@ export async function runSyncCommand(
       batch,
       ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
     };
+  };
+
+  const resolvedTarget = await resolveBatchCommandTarget({
+    commandName: 'sync',
+    cwd,
+    target: options.target,
+    interactive,
+    output,
+    prompts: options.prompts,
+  });
+
+  if (resolvedTarget.mode === 'batch') {
+    return executeBatch(resolvedTarget.rootDir, resolvedTarget.discovered);
+  }
+
+  const nearest = await findNearestConfig(resolvedTarget.targetDir);
+
+  if (!nearest) {
+    const fallback = await offerBatchAllFallback({
+      commandName: 'sync',
+      targetDir: resolvedTarget.targetDir,
+      fromExplicitDir: resolvedTarget.fromExplicitDir,
+      displayDir: resolvedTarget.displayDir,
+      dryRun,
+      interactive,
+      output,
+      prompts: options.prompts,
+    });
+    if (fallback.action === 'batch') {
+      return executeBatch(resolvedTarget.targetDir, fallback.discovered);
+    }
+    if (fallback.action === 'canceled') {
+      return { mode: 'single', dryRun, aborted: true };
+    }
+
+    throw new CliError(
+      404,
+      `No ${PROJECT_CONFIG_FILENAME} found in this directory or any parent directory.\n` +
+        'Run `cdpn clone <url>` to clone a Pen, `cdpn init` to initialize this folder, or `cdpn new` to create one.',
+    );
   }
 
   // Single-Pen unlinked info-only `.cdpn.json` -> create new Pen (or preview in --dry-run)
@@ -408,9 +446,10 @@ export async function runSyncCommand(
 export function registerSyncCommand(program: Command): void {
   program
     .command('sync')
+    .argument('[target]', 'Directory path to sync, or "all" to sync all Pens in subdirectories')
     .allowExcessArguments(false)
     .description(
-      'Bidirectionally sync a Pen with CodePen (or walk subdirectories when run outside a Pen folder)',
+      'Bidirectionally sync a Pen with CodePen (or pass "all" to walk subdirectories)',
     )
     .option('-m, --label <label>', 'Label for the saved version when pushing (max 80 chars)')
     .option(
@@ -423,9 +462,10 @@ export function registerSyncCommand(program: Command): void {
     .option('--visibility <level>', 'Alias for --access')
     .option('--password <password>', 'Password for a new Protected Pen (min 8 chars)')
     .option('--json', 'Output sync result as JSON')
-    .action(async (options: SyncCliOptions, command: Command) => {
+    .action(async (target: string | undefined, options: SyncCliOptions, command: Command) => {
       const result = await runSyncCommand({
         ...options,
+        target,
         explicitProfile: getGlobalProfileOption(command),
       });
       if (result.exitCode !== undefined) {

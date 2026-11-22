@@ -62,6 +62,7 @@ src/
 ├── workflows/                      # L4: cross-command multi-step orchestration (acyclic)
 │   ├── auth-context.ts             # Command auth & interactive profile selection
 │   ├── batch-pens.ts               # Multi-Pen tree-walk batch runners, double-confirm & summaries
+│   ├── batch-target.ts             # `[target]` (`all` vs directory) resolution, `./all` disambiguation & fallback offer
 │   ├── classic-convert.ts          # Interactive Classic → V2 Pen conversion prompt loop
 │   ├── clone-pen.ts                # Clone workflow (accepts optional `forkUnowned` callback — no cycle!)
 │   ├── create-pen.ts               # First-time local directory → new Pen creation
