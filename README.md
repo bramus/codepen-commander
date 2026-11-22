@@ -1,6 +1,6 @@
 # `cdpn` — CodePen Commander
 
-Sync local folders with [CodePen 2.0](https://codepen.io) Pens using the [CodePen API v2](https://blog.codepen.io/docs/api/api-v2/).
+Sync, serve, and build local [CodePen 2.0](https://codepen.io) Pens — powered by the [CodePen API v2](https://blog.codepen.io/docs/api/api-v2/).
 
 - Clone Pens (text & binary files) to a local folder and pull remote updates
 - Track diffs between local files and the online saved head
