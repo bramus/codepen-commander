@@ -1,6 +1,6 @@
 {
   "name": "codepen-commander",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Sync local folders with CodePen 2.0 Pens via the CodePen API v2",
   "license": "MIT",
   "type": "module",
