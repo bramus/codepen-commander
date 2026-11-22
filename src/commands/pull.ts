@@ -1,47 +1,37 @@
+import path from 'node:path';
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
 import type { Pen } from '../api/types.js';
 import type { ResolvedAuth } from '../config/auth.js';
 import {
-  buildSyncedFileMap,
-  requireProject,
-  writeProjectConfig,
+  createUnlinkedProjectError,
+  findNearestConfig,
   type ProjectLocation,
 } from '../config/project.js';
 import { PROJECT_CONFIG_FILENAME } from '../constants.js';
 import { CliError } from '../errors.js';
-import { detectLocalChangesFromBaseline } from '../sync/diff.js';
-import { scanLocalFiles } from '../sync/fs.js';
-import {
-  analyzeInfoSync,
-  buildPenInfoConfigFields,
-  hasAnyPenInfoFields,
-  isLocalInfoDirty,
-} from '../sync/info.js';
-import { syncRemoteFilesToDisk } from '../sync/materialize.js';
-import { fmt, shortId } from '../utils/format.js';
 import { printJsonResponse } from '../utils/json.js';
 import { defaultOutput, type CommandOutput } from '../utils/output.js';
-import {
-  isInteractive,
-  promptConfirm,
-  promptSelect,
-  type SelectOption,
-} from '../utils/prompts/index.js';
+import { isInteractive, promptSelect, type SelectOption } from '../utils/prompts/index.js';
 import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
-import { fetchLinkedPenOrHandleMissing } from '../workflows/missing-pen.js';
+import { runBatchPull, type BatchExecutionResult } from '../workflows/batch-pens.js';
+import { discoverPenDirectories } from '../workflows/discover-pens.js';
+import { executePull } from '../workflows/pull-pen.js';
 
 export interface PullCliOptions {
   force?: boolean;
+  dryRun?: boolean;
   json?: boolean;
 }
 
 export interface RunPullCommandOptions {
   /** Overwrite local changes without prompting. */
   force?: boolean;
+  /** Preview remote changes without modifying local files. */
+  dryRun?: boolean;
   /** Output pull result as JSON. */
   json?: boolean;
-  /** Working directory inside an existing clone (defaults to `process.cwd()`). */
+  /** Working directory inside an existing clone or collection root (defaults to `process.cwd()`). */
   cwd?: string;
   /** Explicit `--profile <name>` flag value. */
   explicitProfile?: string;
@@ -67,35 +57,82 @@ export interface RunPullCommandOptions {
 }
 
 export interface PullCommandResult {
-  pen: Pen;
+  pen?: Pen;
   writtenPaths: string[];
   deletedPaths: string[];
-  auth: ResolvedAuth;
-  project: ProjectLocation;
+  auth?: ResolvedAuth;
+  project?: ProjectLocation;
+  dryRun?: boolean;
+  batch?: BatchExecutionResult;
+  exitCode?: number;
 }
 
 /**
  * Pulls the latest remote files and Pen metadata from CodePen into an existing cloned folder
- * containing `.cdpn.json`.
+ * containing `.cdpn.json`, or walks subdirectories in batch mode when run outside a Pen folder.
  * Returns `null` if the user cancels interactively when uncommitted local changes are present.
  */
 export async function runPullCommand(
   options: RunPullCommandOptions = {},
 ): Promise<PullCommandResult | null> {
   const output = options.output ?? defaultOutput;
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = path.resolve(options.cwd ?? process.cwd());
   const jsonMode = Boolean(options.json);
+  const dryRun = Boolean(options.dryRun);
   const interactive = (options.interactive ?? isInteractive()) && !jsonMode;
   const force = Boolean(options.force);
-  const confirmImpl = options.prompts?.confirm ?? promptConfirm;
   const selectImpl = options.prompts?.select ?? promptSelect;
 
-  const project = await requireProject(cwd);
+  const nearest = await findNearestConfig(cwd);
+
+  if (!nearest) {
+    const discovered = await discoverPenDirectories(cwd);
+    if (discovered.length === 0) {
+      throw new CliError(
+        404,
+        `No ${PROJECT_CONFIG_FILENAME} found in this directory or any parent directory.\nRun \`cdpn clone <url>\` to clone a Pen or \`cdpn new\` to create one.`,
+      );
+    }
+
+    const batch = await runBatchPull({
+      rootDir: cwd,
+      discovered,
+      force,
+      dryRun,
+      json: jsonMode,
+      interactive,
+      explicitProfile: options.explicitProfile,
+      baseUrl: options.baseUrl,
+      env: options.env,
+      homeDir: options.homeDir,
+      output,
+      prompts: options.prompts,
+    });
+
+    return {
+      writtenPaths: [],
+      deletedPaths: [],
+      dryRun,
+      batch,
+      ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
+    };
+  }
+
+  if (!nearest.linked) {
+    throw createUnlinkedProjectError(nearest.rootDir);
+  }
+
+  const project: ProjectLocation = {
+    rootDir: nearest.rootDir,
+    configPath: nearest.configPath,
+    config: nearest.config,
+  };
+
   const auth = await resolveCommandAuth({
     explicitProfile: options.explicitProfile,
     project,
     interactive,
-    persistProfileToProject: !jsonMode,
+    persistProfileToProject: !jsonMode && !dryRun,
     output,
     env: options.env,
     homeDir: options.homeDir,
@@ -103,147 +140,50 @@ export async function runPullCommand(
   });
   const client = new CodePenClient({ apiKey: auth.apiKey, baseUrl: options.baseUrl });
 
-  const { rootDir, config } = project;
-  if (!jsonMode) {
-    output.log(`Pulling latest changes for ${fmt.cyan(config.pen_id)}…`);
-  }
-
-  const localFiles = await scanLocalFiles(rootDir);
-  const localDirty = detectLocalChangesFromBaseline(localFiles, config.files);
-  const dirtyCount =
-    localDirty.added.length + localDirty.modified.length + localDirty.deleted.length;
-  const localInfoDirty = isLocalInfoDirty(config.info, config.last_synced_info_hash);
-
-  if ((dirtyCount > 0 || localInfoDirty) && !force) {
-    if (!jsonMode) {
-      output.log(
-        fmt.yellow('\nWarning: You have uncommitted local changes that will be overwritten:'),
-      );
-      for (const p of localDirty.added) {
-        output.log(`  ${fmt.green('+')} ${p} ${fmt.dim('(will be removed)')}`);
-      }
-      for (const p of localDirty.modified) {
-        output.log(`  ${fmt.yellow('~')} ${p} ${fmt.dim('(will be overwritten)')}`);
-      }
-      for (const p of localDirty.deleted) {
-        output.log(`  ${fmt.red('-')} ${p} ${fmt.dim('(will be restored)')}`);
-      }
-      if (localInfoDirty) {
-        output.log(
-          `  ${fmt.yellow('~')} ${PROJECT_CONFIG_FILENAME} (info) ${fmt.dim('(will be overwritten)')}`,
-        );
-      }
-    }
-
-    if (!interactive) {
-      throw new CliError(
-        409,
-        'Local changes detected. Commit/push them first, or re-run with --force.',
-        {
-          dirty_files: localDirty,
-          ...(localInfoDirty ? { dirty_info: true } : {}),
-        },
-      );
-    }
-
-    const ok = await confirmImpl('\nOverwrite local changes with remote version?', false);
-    if (!ok) {
-      output.log('Aborted.');
-      return null;
-    }
-  }
-
-  const penLookup = await fetchLinkedPenOrHandleMissing({
-    client,
-    project,
-    auth,
-    commandName: 'pull',
+  const pulled = await executePull(client, project, auth, {
+    force,
+    dryRun,
+    silent: jsonMode,
     interactive,
     json: jsonMode,
     output,
     prompts: options.prompts,
   });
-  if (!penLookup.found) {
+
+  if (!pulled) {
     return null;
   }
 
-  const pen = penLookup.pen;
-  const remoteFiles = await client.getPenFiles(config.pen_id);
-
-  const hadInfoBefore = hasAnyPenInfoFields(config.info);
-  const infoAnalysis = analyzeInfoSync(config.info, config.last_synced_info_hash, pen);
-
-  const result = await syncRemoteFilesToDisk({
-    client,
-    rootDir,
-    remoteFiles,
-    existingLocalPaths: localFiles.keys(),
-    pruneRemoved: true,
-  });
-
-  const syncedFiles = buildSyncedFileMap(remoteFiles, result.localSha256ByPath);
-  const profileToPersist = config.profile ?? auth.profile ?? undefined;
-  const nextConfig = {
-    url: config.url || pen.urls.editor,
-    pen_id: pen.id,
-    ...(profileToPersist ? { profile: profileToPersist } : {}),
-    last_synced_version_id: pen.saved_version?.id ?? null,
-    editor: pen.editor,
-    ...buildPenInfoConfigFields(pen),
-    files: syncedFiles,
-  };
-  const configPath = await writeProjectConfig(rootDir, nextConfig);
-
   if (jsonMode) {
+    const profileToReport = pulled.project.config.profile ?? auth.profile ?? null;
     printJsonResponse(
       200,
-      `Synced ${pen.title || 'Untitled'}.`,
+      dryRun
+        ? `Dry run complete — previewed remote changes for ${pulled.pen.title || 'Untitled'}.`
+        : `Synced ${pulled.pen.title || 'Untitled'}.`,
       {
-        pen,
-        profile: profileToPersist ?? null,
-        root_dir: rootDir,
-        config_path: configPath,
-        version_id: pen.saved_version?.id ?? null,
-        written_paths: result.writtenPaths,
-        deleted_paths: result.deletedPaths,
+        pen: pulled.pen,
+        profile: profileToReport,
+        root_dir: pulled.project.rootDir,
+        config_path: pulled.project.configPath,
+        version_id: pulled.pen.saved_version?.id ?? null,
+        dry_run: dryRun,
+        ...(dryRun ? { has_local_changes: pulled.hasLocalChanges } : {}),
+        written_paths: pulled.writtenPaths,
+        deleted_paths: pulled.deletedPaths,
+        ...(dryRun ? { info_changes: pulled.infoChanges } : {}),
       },
       output,
     );
-  } else {
-    output.log(
-      `\n${fmt.green('✓')} Synced ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}`,
-    );
-    if (auth.profile) {
-      output.log(`  Profile: ${fmt.cyan(auth.profile)}`);
-    }
-    output.log(
-      `  Updated: ${result.writtenPaths.length} file(s)` +
-        (result.deletedPaths.length > 0
-          ? `, removed ${result.deletedPaths.length} deleted file(s)`
-          : ''),
-    );
-    if (!hadInfoBefore) {
-      output.log(`  Info:    ${fmt.dim(`added to ${PROJECT_CONFIG_FILENAME}`)}`);
-    } else if (infoAnalysis.changes.length > 0) {
-      output.log(
-        `  Info:    ${fmt.dim(`updated ${infoAnalysis.changes.map((c) => c.field).join(', ')} in ${PROJECT_CONFIG_FILENAME}`)}`,
-      );
-    }
-    if (pen.saved_version) {
-      output.log(`  Version: ${fmt.dim(shortId(pen.saved_version.id))}`);
-    }
   }
 
   return {
-    pen,
-    writtenPaths: result.writtenPaths,
-    deletedPaths: result.deletedPaths,
+    pen: pulled.pen,
+    writtenPaths: pulled.writtenPaths,
+    deletedPaths: pulled.deletedPaths,
     auth,
-    project: {
-      rootDir,
-      configPath,
-      config: nextConfig,
-    },
+    project: pulled.project,
+    dryRun,
   };
 }
 
@@ -252,15 +192,20 @@ export function registerPullCommand(program: Command): void {
     .command('pull')
     .allowExcessArguments(false)
     .description(
-      'Pull latest changes from CodePen into an existing cloned folder (requires .cdpn.json)',
+      'Pull latest changes from CodePen into an existing cloned folder (or walk subdirectories when run outside a Pen folder)',
     )
     .option('-f, --force', 'Overwrite local changes without prompting')
+    .option('--dry-run', 'Preview remote changes without modifying local files')
     .option('--json', 'Output pull result as JSON')
     .action(async (options: PullCliOptions, command: Command) => {
-      await runPullCommand({
+      const result = await runPullCommand({
         force: options.force,
+        dryRun: options.dryRun,
         json: options.json,
         explicitProfile: getGlobalProfileOption(command),
       });
+      if (result?.exitCode !== undefined) {
+        process.exitCode = result.exitCode;
+      }
     });
 }

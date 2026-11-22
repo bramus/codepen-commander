@@ -25,6 +25,7 @@ import { registerServeCommand } from './commands/serve.js';
 import { registerSettingsCommand } from './commands/settings.js';
 import { registerShellCommand } from './commands/shell.js';
 import { registerStatusCommand } from './commands/status.js';
+import { registerSyncCommand } from './commands/sync.js';
 import { registerUndeployCommand } from './commands/undeploy.js';
 import { registerUnlinkCommand } from './commands/unlink.js';
 import { registerVersionsCommand } from './commands/versions.js';
@@ -49,6 +50,7 @@ export function createProgram(): Command {
   registerPullCommand(program);
   registerStatusCommand(program);
   registerPushCommand(program);
+  registerSyncCommand(program);
   registerDeployCommand(program);
   registerUndeployCommand(program);
   registerDomainsCommand(program);

@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type { Command } from 'commander';
 import { CodePenClient } from '../api/client.js';
 import type { Pen } from '../api/types.js';
@@ -22,6 +23,8 @@ import { printJsonResponse } from '../utils/json.js';
 import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import { isInteractive, type SelectOption } from '../utils/prompts/index.js';
 import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
+import { runBatchStatus, type BatchStatusResult } from '../workflows/batch-pens.js';
+import { discoverPenDirectories } from '../workflows/discover-pens.js';
 import {
   fetchLinkedPenOrHandleMissing,
   type MissingPenPrompts,
@@ -45,23 +48,49 @@ export interface RunStatusCommandOptions {
 }
 
 export interface StatusCommandResult {
-  pen: Pen;
-  auth: ResolvedAuth;
-  project: ProjectLocation;
-  diff: SyncDiff;
-  infoAnalysis: InfoSyncAnalysis;
+  pen?: Pen;
+  auth?: ResolvedAuth;
+  project?: ProjectLocation;
+  diff?: SyncDiff;
+  infoAnalysis?: InfoSyncAnalysis;
   remoteMoved: boolean;
   upToDate: boolean;
+  batch?: BatchStatusResult;
+  exitCode?: number;
 }
 
 export async function runStatusCommand(
   options: RunStatusCommandOptions = {},
 ): Promise<StatusCommandResult | null> {
   const output = options.output ?? defaultOutput;
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = path.resolve(options.cwd ?? process.cwd());
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
   const nearest = await findNearestConfig(cwd);
   if (!nearest) {
+    const discovered = await discoverPenDirectories(cwd);
+    if (discovered.length > 0) {
+      const batch = await runBatchStatus({
+        rootDir: cwd,
+        discovered,
+        json: options.json,
+        interactive,
+        explicitProfile: options.explicitProfile,
+        baseUrl: options.baseUrl,
+        env: options.env,
+        homeDir: options.homeDir,
+        output,
+        prompts: {
+          select: options.prompts?.select ?? (options.selectProfile as MissingPenPrompts['select']),
+        },
+      });
+      return {
+        remoteMoved: batch.remoteMoved,
+        upToDate: batch.upToDate,
+        batch,
+        ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
+      };
+    }
+
     const hint = (await isDirectoryNonEmpty(cwd))
       ? 'Run `cdpn init` to initialize this folder as a CodePen demo.'
       : 'Run `cdpn clone <url>` to clone a Pen or `cdpn new` to create one.';
@@ -309,12 +338,17 @@ export async function runStatusCommand(
 export function registerStatusCommand(program: Command): void {
   program
     .command('status')
-    .description('Compare local files and Pen info with the online version on CodePen')
+    .description(
+      'Compare local files and Pen info with the online version on CodePen (or walk subdirectories when run outside a Pen folder)',
+    )
     .option('--json', 'Output status as JSON')
     .action(async (options: { json?: boolean }, command: Command) => {
-      await runStatusCommand({
+      const result = await runStatusCommand({
         json: options.json,
         explicitProfile: getGlobalProfileOption(command),
       });
+      if (result?.exitCode !== undefined) {
+        process.exitCode = result.exitCode;
+      }
     });
 }

@@ -92,6 +92,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       'pull',
       'status',
       'push',
+      'sync',
       'deploy',
       'undeploy',
       'domains',
@@ -99,6 +100,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       'new',
       'privacy',
       'delete',
+      'restore',
       'unlink',
       'open',
       'list',
@@ -323,6 +325,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
       ['pull'],
       ['status'],
       ['push'],
+      ['sync'],
       ['deploy'],
       ['undeploy'],
       ['domains'],
@@ -359,7 +362,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     }
 
     // Verify --visibility alias is exposed consistently alongside --access
-    for (const cmd of ['init', 'new', 'push', 'deploy', 'fork', 'info']) {
+    for (const cmd of ['init', 'new', 'push', 'sync', 'deploy', 'fork', 'info']) {
       const { stdout: cmdHelp } = await execFileAsync(process.execPath, [
         path.join(distDir, 'cli.js'),
         cmd,
@@ -371,6 +374,30 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
         `Expected "cdpn ${cmd} --help" to include --visibility`,
       );
     }
+
+    // Verify --dry-run is exposed on all 5 tree-walking commands (push|pull|sync|delete|unlink)
+    for (const cmd of ['push', 'pull', 'sync', 'delete', 'unlink']) {
+      const { stdout: cmdHelp } = await execFileAsync(process.execPath, [
+        path.join(distDir, 'cli.js'),
+        cmd,
+        '--help',
+      ]);
+      assert.ok(
+        cmdHelp.includes('--dry-run'),
+        `Expected "cdpn ${cmd} --help" to include --dry-run`,
+      );
+    }
+
+    // `cdpn sync` rejects excess positional arguments
+    await assert.rejects(
+      () =>
+        execFileAsync(process.execPath, [
+          path.join(distDir, 'cli.js'),
+          'sync',
+          'https://codepen.io/username/pen/abcde',
+        ]),
+      /too many arguments/i,
+    );
 
     const commandsWithoutJson: string[][] = [['open'], ['auth', 'login'], ['serve']];
     for (const args of commandsWithoutJson) {

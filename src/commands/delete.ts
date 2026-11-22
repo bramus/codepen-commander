@@ -5,6 +5,8 @@ import { CodePenClient } from '../api/client.js';
 import type { Pen, TrashItem } from '../api/types.js';
 import type { ResolvedAuth } from '../config/auth.js';
 import {
+  findProject,
+  hasProjectConfigInDir,
   normalizePartialPenInfo,
   requireProjectInDir,
   writeUnlinkedProjectInfo,
@@ -20,7 +22,6 @@ import {
 import { CliError } from '../errors.js';
 import { analyzeInfoSync, extractPenInfo } from '../sync/info.js';
 import { fmt, formatDate } from '../utils/format.js';
-import { isWithinRoot } from '../utils/fs-safe.js';
 import { printJsonResponse } from '../utils/json.js';
 import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import {
@@ -30,9 +31,12 @@ import {
   type SelectOption,
 } from '../utils/prompts/index.js';
 import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
+import { runBatchDelete, type BatchExecutionResult } from '../workflows/batch-pens.js';
+import { discoverPenDirectories } from '../workflows/discover-pens.js';
 import {
   findProjectPenInTrash,
   isRemotePenNotFoundError,
+  removeCodepenDirSafe,
   unlinkLinkedProject,
 } from '../workflows/missing-pen.js';
 
@@ -40,6 +44,7 @@ export { CODEPEN_DELETED_ITEMS_URL };
 
 export interface DeleteCliOptions {
   yes?: boolean;
+  dryRun?: boolean;
   cleanup?: boolean;
   fullCleanup?: boolean;
   json?: boolean;
@@ -48,13 +53,15 @@ export interface DeleteCliOptions {
 export interface RunDeleteCommandOptions {
   /** Skip confirmation prompt (required in non-interactive mode). */
   yes?: boolean;
+  /** Preview what would be deleted without modifying CodePen or local files. */
+  dryRun?: boolean;
   /** Remove `.codepen/` and strip `.cdpn.json` down to unlinked `info`-only after deleting the online Pen. */
   cleanup?: boolean;
   /** Remove both `.codepen/` and `.cdpn.json` after deleting the online Pen (local source files stay untouched). */
   fullCleanup?: boolean;
   /** Output structured JSON response instead of human-readable logs. */
   json?: boolean;
-  /** Working directory (must contain `.cdpn.json` directly; defaults to `process.cwd()`). */
+  /** Working directory (must contain `.cdpn.json` directly, or child Pen folders for batch mode; defaults to `process.cwd()`). */
   cwd?: string;
   /** Explicit `--profile <name>` flag value. */
   explicitProfile?: string;
@@ -81,47 +88,20 @@ export interface RunDeleteCommandOptions {
 
 export interface DeleteCommandResult {
   pen: Pen | null;
-  project: ProjectLocation;
-  auth: ResolvedAuth;
+  project?: ProjectLocation;
+  auth?: ResolvedAuth;
   configRemoved: boolean;
   codepenDirRemoved: boolean;
   configKeptLinked: boolean;
   infoRetained: boolean;
+  dryRun?: boolean;
   retainedInfo?: PenInfo | CompletePenInfo;
   alreadyDeletedRemotely?: boolean;
   purgedFromTrash?: boolean;
   recoveredFromTrash?: boolean;
   trashItem?: TrashItem | null;
-}
-
-/**
- * Safely removes `<rootDir>/.codepen/` if it is a regular directory strictly within `rootDir`.
- * Never follows symlinks. Returns `true` if `.codepen/` existed and was removed.
- */
-async function removeCodepenDirSafe(rootDir: string): Promise<boolean> {
-  const resolvedRoot = await fs.realpath(rootDir);
-  const codepenDir = path.join(resolvedRoot, CODEPEN_DIR);
-  let stat;
-  try {
-    stat = await fs.lstat(codepenDir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return false;
-    }
-    throw error;
-  }
-
-  if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    return false;
-  }
-
-  const realCodepenDir = await fs.realpath(codepenDir);
-  if (!isWithinRoot(realCodepenDir, resolvedRoot) || realCodepenDir === resolvedRoot) {
-    return false;
-  }
-
-  await fs.rm(realCodepenDir, { recursive: true, force: true });
-  return true;
+  batch?: BatchExecutionResult;
+  exitCode?: number;
 }
 
 type LocalAction = 'keep-linked' | 'unlink-info' | 'cleanup' | 'full-cleanup';
@@ -129,6 +109,10 @@ type LocalAction = 'keep-linked' | 'unlink-info' | 'cleanup' | 'full-cleanup';
 /**
  * Deletes the online Pen linked to `.cdpn.json` directly inside `options.cwd`
  * (moves it to CodePen Deleted Items, restorable for 3 days).
+ *
+ * When invoked outside any Pen folder (with no `.cdpn.json` in `cwd` or any parent),
+ * walks subdirectories to discover all Pens and deletes them in batch after an upfront
+ * two-step confirmation (unless `--yes` or `--dry-run` is passed).
  *
  * Local file behavior:
  * - Default: keeps `.cdpn.json` (still linked) and `.codepen/` untouched so that
@@ -143,7 +127,8 @@ export async function runDeleteCommand(
   options: RunDeleteCommandOptions = {},
 ): Promise<DeleteCommandResult | null> {
   const output = options.output ?? defaultOutput;
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = path.resolve(options.cwd ?? process.cwd());
+  const dryRun = Boolean(options.dryRun);
   const cleanup = Boolean(options.cleanup);
   const fullCleanup = Boolean(options.fullCleanup);
   const interactive = (options.interactive ?? isInteractive()) && !options.json;
@@ -152,6 +137,46 @@ export async function runDeleteCommand(
 
   if (cleanup && fullCleanup) {
     throw new CliError(400, 'Cannot combine --cleanup and --full-cleanup.');
+  }
+
+  // Outside a Pen directory: preserve parent-dir refusal, otherwise enter batch tree-walk mode if child Pens exist
+  if (!(await hasProjectConfigInDir(cwd))) {
+    const parentDir = path.dirname(cwd);
+    const hasParentProject = parentDir !== cwd && Boolean(await findProject(parentDir));
+    if (!hasParentProject) {
+      const discovered = await discoverPenDirectories(cwd);
+      if (discovered.length > 0) {
+        const batch = await runBatchDelete({
+          rootDir: cwd,
+          discovered,
+          yes: options.yes,
+          dryRun,
+          cleanup,
+          fullCleanup,
+          json: options.json,
+          interactive,
+          explicitProfile: options.explicitProfile,
+          baseUrl: options.baseUrl,
+          env: options.env,
+          homeDir: options.homeDir,
+          output,
+          prompts: options.prompts,
+        });
+        if (!batch) {
+          return null;
+        }
+        return {
+          pen: null,
+          configRemoved: false,
+          codepenDirRemoved: false,
+          configKeptLinked: false,
+          infoRetained: false,
+          dryRun,
+          batch,
+          ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
+        };
+      }
+    }
   }
 
   // Strictly require `.cdpn.json` directly inside the current folder
@@ -190,6 +215,60 @@ export async function runDeleteCommand(
         : trashItem
           ? 'keep-linked'
           : 'unlink-info';
+
+    if (dryRun) {
+      const localNote =
+        localAction === 'full-cleanup'
+          ? `would remove ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/`
+          : localAction === 'cleanup'
+            ? `would remove ${CODEPEN_DIR}/ and retain info in ${PROJECT_CONFIG_FILENAME}`
+            : localAction === 'unlink-info'
+              ? `would clear remote link in ${PROJECT_CONFIG_FILENAME} (keeping ${CODEPEN_DIR}/ and info)`
+              : `would keep ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ untouched`;
+      const statusText = trashItem
+        ? 'already in CodePen Deleted Items'
+        : 'no longer exists on CodePen';
+
+      if (options.json) {
+        printJsonResponse(
+          200,
+          `Dry run complete — Pen ${displayTitle} (${project.config.pen_id}) ${statusText}; ${localNote}.`,
+          {
+            pen_id: project.config.pen_id,
+            title: displayTitle,
+            profile: auth.profile,
+            editor_url: project.config.url,
+            deleted: false,
+            dry_run: true,
+            already_deleted_remotely: true,
+            in_trash: Boolean(trashItem),
+            ...(trashItem ? { trash_item: trashItem, restore_url: CODEPEN_DELETED_ITEMS_URL } : {}),
+            planned_local_action: localAction,
+          },
+          output,
+        );
+      } else {
+        output.log(
+          `\n${fmt.yellow('× [WOULD DELETE]')} ${fmt.bold(displayTitle)} ${fmt.dim(`(${project.config.pen_id})`)} — ${statusText} (${localNote})`,
+        );
+        output.log(`\n${fmt.cyan('ℹ')} Dry run complete — no changes were made.`);
+      }
+
+      return {
+        pen: null,
+        project,
+        auth,
+        configRemoved: false,
+        codepenDirRemoved: false,
+        configKeptLinked: false,
+        infoRetained: false,
+        dryRun: true,
+        alreadyDeletedRemotely: true,
+        purgedFromTrash: false,
+        recoveredFromTrash: false,
+        trashItem,
+      };
+    }
 
     if (!options.yes) {
       if (!interactive) {
@@ -467,6 +546,59 @@ export async function runDeleteCommand(
       ? 'cleanup'
       : 'keep-linked';
 
+  if (dryRun) {
+    const localNote =
+      localAction === 'full-cleanup'
+        ? `would remove ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/`
+        : localAction === 'cleanup'
+          ? `would remove ${CODEPEN_DIR}/ and retain info in ${PROJECT_CONFIG_FILENAME}`
+          : `would keep ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ untouched`;
+
+    if (options.json) {
+      printJsonResponse(
+        200,
+        `Dry run complete — would delete ${pen.title || 'Untitled'} (${pen.id}) on CodePen (${localNote}).`,
+        {
+          pen_id: pen.id,
+          title: pen.title,
+          profile: auth.profile,
+          editor_url: pen.urls.editor,
+          deleted: false,
+          dry_run: true,
+          would_delete: true,
+          planned_local_action: localAction,
+        },
+        output,
+      );
+    } else {
+      output.log(
+        `\n${fmt.yellow('× [WOULD DELETE]')} ${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id})`)}`,
+      );
+      if (auth.profile) {
+        output.log(`  Profile: ${fmt.cyan(auth.profile)}`);
+      }
+      output.log(`  Editor:  ${fmt.cyan(pen.urls.editor)}`);
+      if (pen.deployment) {
+        output.log(
+          `  Live:    ${fmt.yellow(pen.deployment.url)} ${fmt.dim('(would also be taken down)')}`,
+        );
+      }
+      output.log(`  Local:   ${fmt.dim(localNote)}`);
+      output.log(`\n${fmt.cyan('ℹ')} Dry run complete — no changes were made.`);
+    }
+
+    return {
+      pen,
+      project,
+      auth,
+      configRemoved: false,
+      codepenDirRemoved: false,
+      configKeptLinked: false,
+      infoRetained: false,
+      dryRun: true,
+    };
+  }
+
   if (!options.yes) {
     if (!interactive) {
       throw new CliError(400, 'Refusing to delete Pen in non-interactive mode without --yes.');
@@ -615,6 +747,7 @@ export async function runDeleteCommand(
     codepenDirRemoved,
     configKeptLinked,
     infoRetained,
+    dryRun: false,
     ...(retainedInfo ? { retainedInfo } : {}),
     ...(alreadyDeletedRemotely ? { alreadyDeletedRemotely: true } : {}),
   };
@@ -626,7 +759,7 @@ export function registerDeleteCommand(program: Command): void {
     .aliases(['del', 'rm'])
     .allowExcessArguments(false)
     .description(
-      `Delete the online Pen on CodePen (moves to Deleted Items; keeps ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ unless --cleanup or --full-cleanup is passed)`,
+      `Delete the online Pen on CodePen (or walk subdirectories when run outside a Pen folder; keeps ${PROJECT_CONFIG_FILENAME} and ${CODEPEN_DIR}/ unless --cleanup or --full-cleanup is passed)`,
     )
     .option(
       '--cleanup',
@@ -636,15 +769,20 @@ export function registerDeleteCommand(program: Command): void {
       '--full-cleanup',
       `Remove both ${CODEPEN_DIR}/ and ${PROJECT_CONFIG_FILENAME} (local source files stay untouched)`,
     )
+    .option('--dry-run', 'Preview what would be deleted without modifying CodePen or local files')
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Output deletion result as JSON')
     .action(async (options: DeleteCliOptions, command: Command) => {
-      await runDeleteCommand({
+      const result = await runDeleteCommand({
         yes: options.yes,
+        dryRun: options.dryRun,
         cleanup: options.cleanup,
         fullCleanup: options.fullCleanup,
         json: options.json,
         explicitProfile: getGlobalProfileOption(command),
       });
+      if (result?.exitCode !== undefined) {
+        process.exitCode = result.exitCode;
+      }
     });
 }

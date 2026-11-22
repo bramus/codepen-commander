@@ -12,7 +12,9 @@ import { printJsonResponse } from '../utils/json.js';
 import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import { isInteractive, type SelectOption } from '../utils/prompts/index.js';
 import { getGlobalProfileOption, resolveCommandAuth } from '../workflows/auth-context.js';
+import { runBatchPush, type BatchExecutionResult } from '../workflows/batch-pens.js';
 import { createPenFromDirectory } from '../workflows/create-pen.js';
+import { discoverPenDirectories } from '../workflows/discover-pens.js';
 import { fetchLinkedPenOrHandleMissing } from '../workflows/missing-pen.js';
 import { executePush, type PushExecutionResult, type PushOptions } from '../workflows/push-pen.js';
 
@@ -60,6 +62,7 @@ export interface RunPushCommandResult {
   changes?: { added: string[]; modified: string[]; deleted: string[] };
   infoChanges?: InfoDiffItem[];
   appliedPatches?: BuildPatch[];
+  batch?: BatchExecutionResult;
   aborted?: boolean;
   exitCode?: number;
 }
@@ -76,6 +79,46 @@ export async function runPushCommand(
   const resolvedAccess = resolveAccessOrVisibility(options.access, options.visibility);
 
   const nearest = await findNearestConfig(cwd);
+
+  // Outside any Pen folder: if subdirectories contain Pens (.cdpn.json), walk the tree in batch mode
+  if (!nearest) {
+    const discovered = await discoverPenDirectories(cwd);
+    if (discovered.length > 0) {
+      if (options.title?.trim()) {
+        throw new CliError(
+          400,
+          '--title cannot be used when pushing multiple Pens in a directory tree.',
+        );
+      }
+
+      const batch = await runBatchPush({
+        rootDir: cwd,
+        discovered,
+        label: options.label,
+        force: options.force,
+        dryRun: options.dryRun,
+        wait: options.wait,
+        access: resolvedAccess,
+        password: options.password,
+        json: jsonMode,
+        interactive,
+        explicitProfile: options.explicitProfile,
+        baseUrl: options.baseUrl,
+        env: options.env,
+        homeDir: options.homeDir,
+        output,
+        prompts: options.prompts,
+      });
+
+      return {
+        pushed: !batch.dryRun && (batch.counts.pushed > 0 || batch.counts.created > 0),
+        created: !batch.dryRun && batch.counts.created > 0,
+        dryRun: batch.dryRun,
+        batch,
+        ...(batch.exitCode !== undefined ? { exitCode: batch.exitCode } : {}),
+      };
+    }
+  }
 
   // First-time push: no linked .cdpn.json found -> push local folder as a brand-new CodePen 2.0 Pen
   if (!nearest || !nearest.linked) {
@@ -283,14 +326,14 @@ export function registerPushCommand(program: Command): void {
   program
     .command('push')
     .description(
-      'Push local file and Pen info changes to CodePen (or push an unlinked demo folder as a new Pen)',
+      'Push local file and Pen info changes to CodePen (or walk subdirectories when run outside a Pen folder, or push an unlinked folder as a new Pen)',
     )
     .option('-m, --label <label>', 'Label for the saved version (max 80 chars)')
     .option(
       '-f, --force',
       'Overwrite remote head if moved (or skip missing index.html prompt on first push)',
     )
-    .option('--dry-run', 'Build proposed changes without saving them to the Pen head')
+    .option('--dry-run', 'Preview changes without saving them to CodePen')
     .option('--no-wait', 'Return as soon as files are saved without waiting for the build')
     .option(
       '-t, --title <title>',

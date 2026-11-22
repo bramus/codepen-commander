@@ -1,3 +1,5 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { CodePenClient } from '../api/client.js';
 import { CodePenApiError, isCodePenApiError } from '../api/errors.js';
 import type { Pen, TrashItem } from '../api/types.js';
@@ -8,10 +10,11 @@ import {
   type PenInfo,
   type ProjectLocation,
 } from '../config/project.js';
-import { CODEPEN_DELETED_ITEMS_URL, PROJECT_CONFIG_FILENAME } from '../constants.js';
+import { CODEPEN_DELETED_ITEMS_URL, CODEPEN_DIR, PROJECT_CONFIG_FILENAME } from '../constants.js';
 import { CliError } from '../errors.js';
 import { extractPenIdFromUrl } from '../utils/codepen-url.js';
 import { fmt, formatDate } from '../utils/format.js';
+import { isWithinRoot } from '../utils/fs-safe.js';
 import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import {
   promptConfirm,
@@ -71,6 +74,36 @@ export async function unlinkLinkedProject(
   }
   const configPath = await writeUnlinkedProjectInfo(project.rootDir, info);
   return { configPath, info };
+}
+
+/**
+ * Safely removes `<rootDir>/.codepen/` if it is a regular directory strictly within `rootDir`.
+ * Never follows symlinks. Returns `true` if `.codepen/` existed and was removed.
+ */
+export async function removeCodepenDirSafe(rootDir: string): Promise<boolean> {
+  const resolvedRoot = await fs.realpath(rootDir);
+  const codepenDir = path.join(resolvedRoot, CODEPEN_DIR);
+  let stat;
+  try {
+    stat = await fs.lstat(codepenDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    return false;
+  }
+
+  const realCodepenDir = await fs.realpath(codepenDir);
+  if (!isWithinRoot(realCodepenDir, resolvedRoot) || realCodepenDir === resolvedRoot) {
+    return false;
+  }
+
+  await fs.rm(realCodepenDir, { recursive: true, force: true });
+  return true;
 }
 
 /**

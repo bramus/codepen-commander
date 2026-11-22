@@ -173,6 +173,34 @@ cdpn build --out dist --shell ./my-shell --title "CSS Demos"
 - **Pen folder** (contains `.cdpn.json`): serves or builds the Pen directly (if `.codepen/` is missing, `cdpn serve` serves it as plain static files with a helpful tip). When building a Pen into a subfolder of itself, `cdpn build` automatically adds that subfolder to `.cdpnignore` and offers to create/update `.gitignore`.
 - **Directory of Pens** (no `.cdpn.json` at the root): recursively discovers subdirectories containing `.cdpn.json` and generates an in-memory `demos.json` (on `serve`) or static `demos.json` (on `build`) with the index shell—preserving an existing root `index.html` if present. Subdirectories without a `.cdpn.json` file are not indexed or served; during `cdpn serve`, the shell displays a hint to run `cdpn init` in any missing demo folder to mark it as a CodePen demo (omitted from static `cdpn build` output).
 
+## Batch Operations Across Multiple Pens
+
+When you run `cdpn status`, `cdpn push`, `cdpn pull`, `cdpn sync`, `cdpn delete`, or `cdpn unlink` **outside** a Pen folder (in a directory with no `.cdpn.json` in `cwd` or any parent), `cdpn` automatically walks subdirectories to discover all Pen folders (`.cdpn.json`), performs the action across every discovered Pen, and prints a summary report with totals:
+
+```bash
+# Inspect sync status across all discovered Pens (up to date, local/remote ahead, unlinked, conflicts, Trash)
+cdpn status
+
+# Preview what would happen across all Pens without making any changes
+cdpn sync --dry-run
+cdpn push --dry-run
+cdpn pull --dry-run
+cdpn delete --dry-run
+cdpn unlink --dry-run
+
+# Sync every discovered Pen bidirectionally (creates unlinked Pens, pushes local-ahead, pulls remote-ahead, flags conflicts)
+cdpn sync
+
+# Destructive batch actions ask for an upfront yes/No confirmation followed by "Are you really sure?"
+cdpn delete                 # Moves all discovered linked Pens to Deleted Items (keeps .cdpn.json & .codepen/)
+cdpn delete --cleanup       # Deletes on CodePen, removes .codepen/, keeps only unlinked info in .cdpn.json
+cdpn delete --full-cleanup  # Deletes on CodePen and removes both .codepen/ and .cdpn.json
+cdpn unlink                 # Unlinks all discovered Pens locally (leaves online Pens untouched)
+```
+
+- Subdirectory walking enforces strict root containment, skips symlinks, hidden folders (`.git`, etc.), `node_modules`, `.cdpnignore`d paths, and built static outputs, and treats each Pen folder as a leaf.
+- For batch `delete` and `unlink`, an upfront **yes/No** confirmation lists every targeted Pen (declining aborts immediately), followed by a second **"Are you really sure?"** confirmation before proceeding with all discovered Pens (pass `--yes` for non-interactive scripts, or `--dry-run` for a safe preview).
+
 ## Commands
 
 All commands accept the global `--profile <name>` flag to override the active profile. Every data/state command also accepts `--json` (everything except interactive-only `cdpn auth login`, browser-opening `cdpn open`, and long-running `cdpn serve`).
@@ -188,9 +216,10 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn new [folder] [-t ...] [-d ...] [--tags ...] [--access\|--visibility ...] [--blocks ...] [--template <id\|url\|title>] [--as-template] [--json]` | Scaffold a brand-new 2.0 Pen from a CodePen Template (or CodePen default starter) into a new or empty folder |
 | `cdpn fork <url> [folder] [--title ...] [--access ...] [--json]` | Fork one of your own 2.0 Pens into a local folder (for other users' Pens, offers to open in browser to fork and clone back) |
 | `cdpn clone <url> [folder] [--force] [--json]` | Clone a CodePen Pen into a local folder (auto-matches stored profile by URL owner; offers to convert Classic Pens or clone them unlinked; offers browser fork-and-clone fallback for unowned Pens) |
-| `cdpn pull [--force] [--json]` | Pull latest remote file and Pen info changes into an existing cloned folder (requires `.cdpn.json`) |
-| `cdpn status [--json]` | Show active profile, file and Pen info diffs, remote head, build & deployment status |
-| `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait] [--json]` | Push local file and `.cdpn.json` Pen info changes (text & binary + deletions), or push an unlinked local demo folder as a new Pen (reuses retained `.cdpn.json` `info` if present; otherwise checks `index.html`, asks account, title, and visibility) |
+| `cdpn pull [--force] [--dry-run] [--json]` | Pull latest remote file and Pen info changes into an existing cloned folder, or walk subdirectories in batch mode when run outside a Pen folder |
+| `cdpn status [--json]` | Show active profile, file and Pen info diffs, remote head, build & deployment status, or walk subdirectories in batch mode when run outside a Pen folder |
+| `cdpn push [-m <label>] [--force] [--dry-run] [--no-wait] [--json]` | Push local file and `.cdpn.json` Pen info changes (text & binary + deletions), walk subdirectories in batch mode when run outside a Pen folder with child Pens, or push an unlinked local demo folder as a new Pen |
+| `cdpn sync [-m <label>] [--force] [--dry-run] [--no-wait] [--access\|--visibility ...] [--json]` | Bidirectionally sync a Pen (create unlinked, push local-ahead, pull remote-ahead, detect conflicts), or walk subdirectories in batch mode when run outside a Pen folder |
 | `cdpn deploy [--no-push] [--version <id>] [--force] [--json]` | Push local changes (creating a Pen first if unlinked) and deploy to CodePen Hosting |
 | `cdpn undeploy [--yes] [--json]` | Take down the live deployment (Pen & versions remain intact) |
 | `cdpn domains [list] [--json]` | Show the default deployed URL, custom domains, verification status, and required DNS records |
@@ -201,9 +230,9 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn versions [--limit <n>] [--json]` | List saved versions with build status, labels, and markers (`head`, `local`, `deployed`) |
 | `cdpn rollback [version-id] [-m <label>] [--yes] [--json]` | Restore an older saved version to head and sync files locally |
 | `cdpn privacy [level] [--password <pw>] [--show] [--json]` | View or update Pen privacy (`Public`, `Private`, `Protected`, `Collaborators`; alias: `cdpn access`; requires `.cdpn.json` in current folder) |
-| `cdpn delete [--cleanup\|--full-cleanup] [--yes] [--json]` | Delete the online Pen on CodePen (moves to Deleted Items for 3 days) while keeping `.cdpn.json` (still linked), `.codepen/`, and local files untouched so you can run `cdpn restore` or `cdpn status` — pass `--cleanup` to remove `.codepen/` and keep only unlinked `info` in `.cdpn.json`, or `--full-cleanup` to remove both `.codepen/` and `.cdpn.json` (aliases: `cdpn del`, `cdpn rm`) |
+| `cdpn delete [--cleanup\|--full-cleanup] [--dry-run] [--yes] [--json]` | Delete the online Pen on CodePen (or walk subdirectories in batch mode with upfront double confirmation; moves to Deleted Items for 3 days, keeps `.cdpn.json` & `.codepen/` by default; `--cleanup` removes `.codepen/` and keeps unlinked `info`; `--full-cleanup` removes both; aliases: `cdpn del`, `cdpn rm`) |
 | `cdpn restore [pen] [--json]` | Restore a deleted Pen from CodePen Deleted Items (Trash) — uses the linked `.cdpn.json` in the current folder, an explicit Pen URL/ID, or an interactive Trash picker outside a Pen folder |
-| `cdpn unlink [--yes] [--json]` | Unlink this local folder from its online Pen by clearing remote link fields in `.cdpn.json` while leaving the online Pen on CodePen, `.codepen/`, Pen `info`, and local source files untouched |
+| `cdpn unlink [--dry-run] [--yes] [--json]` | Unlink this local folder from its online Pen (or walk subdirectories in batch mode with upfront double confirmation; keeps online Pens, `.codepen/`, Pen `info`, and local source files untouched) |
 | `cdpn info [--title ...] [--tags ...] [--access ...] [--template true\|false] [--json]` | View or update Pen metadata |
 | `cdpn settings [--auto-deploy ...] [--indent-with ...] [--json]` | View or update Pen editor & deployment settings |
 | `cdpn serve [dir] [-p <port>] [-o] [--shell <dir>] [--title ...] [--subtitle ...] [--footer ...]` | Serve a local Pen (`.cdpn.json`) or directory of `.cdpn.json` Pens on `127.0.0.1` with live in-memory `demos.json` and `classic`/`packages` Blocks support |

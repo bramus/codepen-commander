@@ -717,7 +717,7 @@ describe('Pen info syncing integration (127.0.0.1 mock API)', () => {
       });
       assert.ok(afterInfoStatus);
       assert.equal(afterInfoStatus.upToDate, true);
-      assert.deepEqual(afterInfoStatus.infoAnalysis.changes, []);
+      assert.deepEqual(afterInfoStatus.infoAnalysis?.changes, []);
 
       // 4. Combined file + info edit, where PATCH fails after PUT /files succeeds:
       //    file version & hashes must be persisted while local info edit is preserved for retry!
@@ -793,8 +793,8 @@ describe('Pen info syncing integration (127.0.0.1 mock API)', () => {
       });
       assert.ok(statusRemote);
       assert.equal(statusRemote.upToDate, false);
-      assert.equal(statusRemote.infoAnalysis.localChanged, false);
-      assert.equal(statusRemote.infoAnalysis.remoteChanged, true);
+      assert.equal(statusRemote.infoAnalysis?.localChanged, false);
+      assert.equal(statusRemote.infoAnalysis?.remoteChanged, true);
 
       // Push with NO file edits does NOT clobber the remote title
       const pushNoop = await executePush(client, (await findProject(dir))!, { silent: true });
@@ -951,8 +951,8 @@ describe('Pen info syncing integration (127.0.0.1 mock API)', () => {
       });
       assert.ok(legacyStatusRes);
       assert.equal(legacyStatusRes.upToDate, true);
-      assert.equal(legacyStatusRes.infoAnalysis.tracked, false);
-      assert.deepEqual(legacyStatusRes.infoAnalysis.changes, []);
+      assert.equal(legacyStatusRes.infoAnalysis?.tracked, false);
+      assert.deepEqual(legacyStatusRes.infoAnalysis?.changes, []);
       assert.match(legacyOut.stdout(), /does not include Pen info yet/i);
 
       // 2. Legacy project + `push --dry-run` -> does NOT modify .cdpn.json or call PATCH

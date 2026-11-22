@@ -61,19 +61,23 @@ src/
 │       └── index.ts                # Block pipeline dispatcher
 ├── workflows/                      # L4: cross-command multi-step orchestration (acyclic)
 │   ├── auth-context.ts             # Command auth & interactive profile selection
+│   ├── batch-pens.ts               # Multi-Pen tree-walk batch runners, double-confirm & summaries
 │   ├── classic-convert.ts          # Interactive Classic → V2 Pen conversion prompt loop
 │   ├── clone-pen.ts                # Clone workflow (accepts optional `forkUnowned` callback — no cycle!)
 │   ├── create-pen.ts               # First-time local directory → new Pen creation
+│   ├── discover-pens.ts            # Symlink-safe recursive `.cdpn.json` Pen tree discovery
 │   ├── fork-pen.ts                 # Fork workflow (imports clone-pen one-way)
-│   ├── missing-pen.ts              # Missing/Trashed remote Pen recovery, purge, or unlink
-│   ├── push-pen.ts                 # Shared `executePush` used by both `push` and `deploy`
+│   ├── missing-pen.ts              # Missing/Trashed remote Pen recovery, purge, unlink, `.codepen/` removal
+│   ├── pull-pen.ts                 # Shared `executePull` (single-Pen, sync, batch, `--dry-run`)
+│   ├── push-pen.ts                 # Shared `executePush` used by `push`, `sync`, `deploy`, and batch
 │   ├── scaffold.ts                 # Shared target-directory & template scaffolding helpers
+│   ├── sync-pen.ts                 # 3-way sync state classification & single-Pen `executeSync`
 │   └── unowned-pen.ts              # Browser-assisted fork fallback for unowned CodePen URLs
-├── commands/                       # L5: strictly 1 file per top-level CLI command (24 commands)
+├── commands/                       # L5: strictly 1 file per top-level CLI command (25 commands)
 │   ├── auth/                       # Nested subcommands (`index.ts`, `status.ts`, `list.ts`, `default.ts`, `login.ts`, `logout.ts`)
 │   └── <command>.ts                # build, clone, delete, deploy, domains, fork, info, init, list,
 │                                   # new, open, privacy, pull, push, restore, rollback, serve,
-│                                   # settings, shell, status, undeploy, unlink, versions
+│                                   # settings, shell, status, sync, undeploy, unlink, versions
 └── cli.ts                          # L6: Commander program assembly, error handling, process.exitCode
 ```
 
@@ -95,7 +99,7 @@ src/
    - Return `{ ..., exitCode?: number }` for non-throwing non-zero exits (e.g., failed build, unauthenticated status) or throw `CliError(httpStatusCode, message, contents?)`.
    - Only `register<Name>Command` adapters and `src/cli.ts` translate `result.exitCode` / caught errors into `process.exitCode`.
 4. **CLI flag & UX consistency**:
-   - Support `--visibility <level>` as an alias for `--access <level>` on every command that sets Pen access (`init`, `new`, `push`, `deploy`, `fork`, `info`).
+   - Support `--visibility <level>` as an alias for `--access <level>` on every command that sets Pen access (`init`, `new`, `push`, `sync`, `deploy`, `fork`, `info`).
    - Use `PEN_ACCESS_CHOICES` from `src/constants.ts` everywhere Pen visibility choices are rendered (`Private` = `"unlisted; anyone with the link can view it"`).
    - Every non-interactive/scriptable command supports `--json`, emitting `{ status: { code, message }, contents }` via `printJsonResponse`. `cdpn auth --json <subcommand>` inherits `--json` for `status`, `list`, `default`, and `logout` (while `auth login` stays interactive-only).
    - Use American single-L spelling (`Canceled`) for internal identifiers (`PromptCanceledError`, `isPromptCanceledError`, `action: 'canceled'`).

@@ -272,7 +272,7 @@ describe('missing / trashed remote Pen handling across commands', () => {
       });
       assert.deepEqual(seenChoices, ['recover', 'purge', 'unlink', 'cancel']);
       assert.ok(recoveredStatus);
-      assert.equal(recoveredStatus.pen.id, PEN_ID);
+      assert.equal(recoveredStatus.pen?.id, PEN_ID);
       assert.equal(penState, 'active');
       assert.ok(requestLog.includes(`POST /v2/pens/${PEN_ID}/restore`));
 
