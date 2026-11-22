@@ -37,6 +37,35 @@ async function isExistingDirectory(dirPath: string): Promise<boolean> {
 }
 
 /**
+ * Performs a single non-recursive `readdir` on `dirPath` (zero subdirectory traversal)
+ * to check whether candidate subdirectories or a direct `index.html` exist.
+ */
+async function inspectDirectChildren(
+  dirPath: string,
+): Promise<{ hasSubdirs: boolean; hasIndexHtml: boolean }> {
+  let entries;
+  try {
+    entries = await fs.readdir(dirPath, { withFileTypes: true });
+  } catch {
+    return { hasSubdirs: false, hasIndexHtml: false };
+  }
+
+  let hasSubdirs = false;
+  let hasIndexHtml = false;
+  for (const entry of entries) {
+    if (entry.name === 'index.html' && entry.isFile()) {
+      hasIndexHtml = true;
+    } else if (!entry.name.startsWith('.') && entry.name !== 'node_modules' && entry.isDirectory()) {
+      hasSubdirs = true;
+    }
+    if (hasSubdirs && hasIndexHtml) {
+      break;
+    }
+  }
+  return { hasSubdirs, hasIndexHtml };
+}
+
+/**
  * Resolves the optional `[target]` positional argument shared by batch-capable commands
  * (`status`, `push`, `pull`, `sync`, `delete`, `unlink`):
  *
@@ -166,11 +195,13 @@ export async function resolveBatchCommandTarget(options: {
  * Called when a batch-capable command is invoked in a directory that is not a Pen
  * (no `.cdpn.json` in `targetDir` or parents) without the `all` keyword.
  *
- * - If no child Pens exist in subdirectories -> returns `{ action: 'none' }` so the caller
- *   preserves its normal non-Pen behavior (`cdpn init` hint, first-time push, 404, etc.).
- * - If child Pens exist:
- *   - Interactively offers to run `cdpn <cmd> all` instead (yes/No, defaulting to No).
- *   - Non-interactively throws a helpful `404` pointing to `cdpn <cmd> all`.
+ * Performs NO recursive tree prescan so commands return immediately even in large directory trees:
+ * - Only inspects direct entries of `targetDir` (single non-recursive `readdir`).
+ * - If no subdirectories exist (or for `push`, if `index.html` exists directly for a first-time push),
+ *   returns `{ action: 'none' }` so the caller preserves its normal non-Pen behavior.
+ * - Non-interactively returns early with `404` advising `cdpn <cmd> all` (zero tree traversal).
+ * - Interactively offers `cdpn <cmd> all` (yes/No, default No); only walks the directory tree
+ *   if the user confirms `Yes`.
  */
 export async function offerBatchAllFallback(options: {
   commandName: BatchMode;
@@ -182,42 +213,47 @@ export async function offerBatchAllFallback(options: {
   output?: CommandOutput;
   prompts?: BatchTargetPrompts;
 }): Promise<BatchFallbackResolution> {
-  const discovered = await discoverPenDirectories(options.targetDir);
-  if (discovered.length === 0) {
+  const { hasSubdirs, hasIndexHtml } = await inspectDirectChildren(options.targetDir);
+
+  if (!hasSubdirs) {
+    return { action: 'none' };
+  }
+
+  // For `cdpn push`, a folder with a direct `index.html` is a standalone local demo for first-time push
+  if (options.commandName === 'push' && hasIndexHtml) {
     return { action: 'none' };
   }
 
   const output = options.output ?? defaultOutput;
   const dryRunSuffix = options.dryRun ? ' --dry-run' : '';
   const whereSuffix = options.fromExplicitDir ? ` inside ${options.displayDir}` : '';
-  const plural = discovered.length === 1 ? 'Pen' : 'Pens';
 
   if (!options.interactive) {
-    throw new CliError(
-      404,
-      `No ${PROJECT_CONFIG_FILENAME} found in ${options.targetDir}.\n` +
-        `Found ${discovered.length} ${plural} in subdirectories — run \`cdpn ${options.commandName} all${dryRunSuffix}\`${whereSuffix} to ${options.commandName} all of them, or \`cdpn ${options.commandName} <directory>\` for a specific Pen.`,
-      {
-        discovered_count: discovered.length,
-        discovered_paths: discovered.map((d) => d.relPath),
-      },
-    );
+    const actionHint =
+      options.commandName === 'status'
+        ? `Run \`cdpn init\` to initialize this folder as a CodePen demo, \`cdpn status all\`${whereSuffix} to check Pens in subdirectories, or \`cdpn status <directory>\` for a specific Pen.`
+        : `Run \`cdpn ${options.commandName} all${dryRunSuffix}\`${whereSuffix} to ${options.commandName} Pens in subdirectories, or \`cdpn ${options.commandName} <directory>\` for a specific Pen.`;
+    throw new CliError(404, `No ${PROJECT_CONFIG_FILENAME} found in ${options.targetDir}.\n${actionHint}`);
   }
 
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
   const dirLabel = options.fromExplicitDir ? `"${options.displayDir}"` : 'this directory';
-  output.log(
-    fmt.dim(
-      `No ${PROJECT_CONFIG_FILENAME} found in ${dirLabel}, but found ${discovered.length} ${plural} in subdirectories.`,
-    ),
-  );
+  output.log(fmt.dim(`No ${PROJECT_CONFIG_FILENAME} found in ${dirLabel}.`));
   const ok = await confirmImpl(
-    `Run \`cdpn ${options.commandName} all${dryRunSuffix}\`${whereSuffix} instead?`,
+    `Run \`cdpn ${options.commandName} all${dryRunSuffix}\`${whereSuffix} across subdirectories instead?`,
     false,
   );
   if (!ok) {
     output.log('Aborted.');
     return { action: 'canceled' };
+  }
+
+  const discovered = await discoverPenDirectories(options.targetDir);
+  if (discovered.length === 0) {
+    throw new CliError(
+      404,
+      `No Pens (${PROJECT_CONFIG_FILENAME}) found in any subdirectory of ${options.targetDir}.`,
+    );
   }
 
   return { action: 'batch', discovered };

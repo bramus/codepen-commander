@@ -1201,16 +1201,17 @@ describe('batch target gating (all keyword, directory targeting, ./all disambigu
           '<h1>remote pen_other</h1>\n',
         );
 
-        // 6. Interactive `cdpn pull` (without "all") in a non-Pen dir offers `cdpn pull all` (yes/No)
+        // 6. Interactive `cdpn pull` (without "all") in a non-Pen dir offers `cdpn pull all` (yes/No) without prescanning
         await resetBothBehind();
         const declinePrompts: Array<{ q: string; def?: boolean }> = [];
+        const declineOut = createBufferedOutput();
         const declined = await runPullCommand({
           cwd: col,
           baseUrl: server.baseUrl,
           interactive: true,
           env: {},
           homeDir: tmpHome,
-          output: createSilentOutput(),
+          output: declineOut,
           prompts: {
             confirm: async (q, def) => {
               declinePrompts.push({ q, def });
@@ -1221,7 +1222,8 @@ describe('batch target gating (all keyword, directory targeting, ./all disambigu
         assert.equal(declined, null);
         assert.equal(declinePrompts.length, 1);
         assert.equal(declinePrompts[0]!.def, false);
-        assert.match(declinePrompts[0]!.q, /Run `cdpn pull all`/);
+        assert.match(declinePrompts[0]!.q, /Run `cdpn pull all` across subdirectories instead\?/);
+        assert.doesNotMatch(stripAnsi(declineOut.stdout()), /found \d+ Pen/i);
         assert.equal(await fs.readFile(path.join(otherDir, 'index.html'), 'utf8'), '<h1>v1</h1>\n');
 
         // Accepting the offer walks the subtree and pulls all Pens!
@@ -1245,6 +1247,45 @@ describe('batch target gating (all keyword, directory targeting, ./all disambigu
           await fs.readFile(path.join(otherDir, 'index.html'), 'utf8'),
           '<h1>remote pen_other</h1>\n',
         );
+
+        // 6b. Accepting the offer in a directory with subdirectories that contain NO Pens throws clean 404
+        const noPensTree = path.join(tmpRoot, 'no-pens-tree');
+        await fs.mkdir(path.join(noPensTree, 'subdir-a'), { recursive: true });
+        await assert.rejects(
+          () =>
+            runPullCommand({
+              cwd: noPensTree,
+              baseUrl: server.baseUrl,
+              interactive: true,
+              env: {},
+              homeDir: tmpHome,
+              output: createSilentOutput(),
+              prompts: {
+                confirm: async () => true,
+              },
+            }),
+          (err: unknown) =>
+            err instanceof CliError &&
+            err.statusCode === 404 &&
+            /No Pens \(\.cdpn\.json\) found in any subdirectory/i.test(err.message),
+        );
+
+        // 6c. Standalone unlinked demo with index.html + asset subdirectories still does first-time `cdpn push` directly
+        const standaloneDemo = path.join(tmpRoot, 'standalone-demo');
+        await fs.mkdir(path.join(standaloneDemo, 'styles'), { recursive: true });
+        await fs.writeFile(path.join(standaloneDemo, 'index.html'), '<title>Standalone</title>\n', 'utf8');
+        await fs.writeFile(path.join(standaloneDemo, 'styles', 'app.css'), 'body{}\n', 'utf8');
+        const createdStandalone = await runPushCommand({
+          cwd: standaloneDemo,
+          baseUrl: server.baseUrl,
+          interactive: false,
+          env: {},
+          homeDir: tmpHome,
+          output: createSilentOutput(),
+        });
+        assert.equal(createdStandalone.batch, undefined);
+        assert.equal(createdStandalone.created, true);
+        assert.equal(createdStandalone.pen?.title, 'Standalone');
 
         // 7. `cdpn pull all` inside a single Pen folder (no child Pens) gives helpful 404 hint
         await assert.rejects(

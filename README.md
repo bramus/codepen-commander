@@ -203,7 +203,7 @@ cdpn unlink all                 # Unlinks all discovered Pens locally (leaves on
 ```
 
 - **Directory named `all`:** if a directory named `all` exists in `cwd`, running `cdpn pull all` interactively asks whether to target `./all` or walk all Pens (and `cdpn pull ./all` always targets the `./all` directory unambiguously).
-- **Helpful fallback:** running `cdpn pull` (or `status`, `push`, `sync`, `delete`, `unlink`) interactively in a non-Pen directory that contains Pens in subdirectories offers to run `cdpn <cmd> all` instead (yes/No, defaulting to `No`).
+- **Helpful fallback:** running `cdpn pull` (or `status`, `push`, `sync`, `delete`, `unlink`) interactively in a non-Pen directory with subdirectories immediately offers to run `cdpn <cmd> all` instead (yes/No, defaulting to `No`) without prescanning the tree first.
 - Subdirectory walking enforces strict root containment, skips symlinks, hidden folders (`.git`, etc.), `node_modules`, `.cdpnignore`d paths, and built static outputs, and treats each Pen folder as a leaf.
 - For batch `delete all` and `unlink all`, an upfront **yes/No** confirmation lists every targeted Pen (declining aborts immediately), followed by a second **"Are you really sure?"** confirmation before proceeding with all discovered Pens (pass `--yes` for non-interactive scripts, or `--dry-run` for a safe preview).
 
