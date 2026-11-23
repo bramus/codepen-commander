@@ -21,12 +21,16 @@ export const MAX_VERSION_LABEL_LENGTH = 80;
 /** CodePen's documented minimum password length for Protected Pens. */
 export const MIN_PROTECTED_PASSWORD_LENGTH = 8;
 
-export const VALID_PEN_ACCESS_LOWER = new Set<string>([
-  'public',
-  'private',
-  'protected',
-  'collaborators',
+export const ALL_PEN_ACCESS_LEVELS: readonly PenAccess[] = Object.freeze([
+  'Public',
+  'Private',
+  'Protected',
+  'Collaborators',
 ]);
+
+export const VALID_PEN_ACCESS_LOWER = new Set<string>(
+  ALL_PEN_ACCESS_LEVELS.map((level) => level.toLowerCase()),
+);
 
 export interface PenAccessChoice {
   value: PenAccess;

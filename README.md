@@ -155,9 +155,11 @@ cdpn fork https://codepen.io/username/pen/abcde my-fork      # Forks directly in
 cdpn serve
 cdpn serve my-demos --port 8080 --open
 
-# Build a Pen (prompts for destination, defaults to ./build, updates .cdpnignore & offers .gitignore)
+# Build a Pen or directory of Pens (defaults to ./build; collection builds include Public Pens only by default)
 cdpn build
 cdpn build --out dist --yes --watch
+cdpn build --out dist --access Public,Private
+cdpn build --out dist --access all
 
 # Customize the demo index shell used for multi-Pen directories
 cdpn shell show                         # Show active shell (built-in or custom ~/.cdpn path)
@@ -171,7 +173,7 @@ cdpn build --out dist --shell ./my-shell --title "CSS Demos"
 ```
 
 - **Pen folder** (contains `.cdpn.json`): serves or builds the Pen directly (if `.codepen/` is missing, `cdpn serve` serves it as plain static files with a helpful tip). When building a Pen into a subfolder of itself, `cdpn build` automatically adds that subfolder to `.cdpnignore` and offers to create/update `.gitignore`.
-- **Directory of Pens** (no `.cdpn.json` at the root): recursively discovers subdirectories containing `.cdpn.json` and generates an in-memory `demos.json` (on `serve`) or static `demos.json` (on `build`) with the index shell—preserving an existing root `index.html` if present. Subdirectories without a `.cdpn.json` file are not indexed or served; during `cdpn serve`, the shell displays a hint to run `cdpn init` in any missing demo folder to mark it as a CodePen demo (omitted from static `cdpn build` output).
+- **Directory of Pens** (no `.cdpn.json` at the root): recursively discovers subdirectories containing `.cdpn.json` and generates an in-memory `demos.json` (on `serve`) or static `demos.json` (on `build`) with the index shell—preserving an existing root `index.html` if present. Subdirectories without a `.cdpn.json` file are not indexed or served; during `cdpn serve`, the shell displays a hint to run `cdpn init` in any missing demo folder to mark it as a CodePen demo (omitted from static `cdpn build` output). By default, `cdpn build` only includes Pens with `"access": "Public"` in `.cdpn.json`; pass `--access <levels>` (or `--visibility <levels>`) with comma-separated levels (`Public`, `Private`, `Protected`, `Collaborators`) or `all` to control which Pens are included.
 
 ## Batch Operations Across Multiple Pens (`all`)
 
@@ -242,7 +244,7 @@ All commands accept the global `--profile <name>` flag to override the active pr
 | `cdpn info [--title ...] [--tags ...] [--access ...] [--template true\|false] [--json]` | View or update Pen metadata |
 | `cdpn settings [--auto-deploy ...] [--indent-with ...] [--json]` | View or update Pen editor & deployment settings |
 | `cdpn serve [dir] [-p <port>] [-o] [--shell <dir>] [--title ...] [--subtitle ...] [--footer ...]` | Serve a local Pen (`.cdpn.json`) or directory of `.cdpn.json` Pens on `127.0.0.1` with live in-memory `demos.json` and `classic`/`packages` Blocks support |
-| `cdpn build [dir] [-o <dir>] [-y\|-f] [-w] [--shell <dir>] [--title ...] [--subtitle ...] [--footer ...] [--json]` | Build a local Pen or directory of `.cdpn.json` Pens into a static deployable folder (auto-updates `.cdpnignore` and offers `.gitignore` when building inside a Pen) |
+| `cdpn build [dir] [-o <dir>] [-y\|-f] [-w] [--access\|--visibility <levels>] [--shell <dir>] [--title ...] [--subtitle ...] [--footer ...] [--json]` | Build a local Pen or directory of `.cdpn.json` Pens into a static deployable folder (collection builds include `Public` Pens only by default; pass `--access Public,Private` or `--access all` to include others; auto-updates `.cdpnignore` and offers `.gitignore` when building inside a Pen) |
 | `cdpn shell [show] [--json]` | Show the active demo index shell (custom `~/.cdpn` path or built-in) |
 | `cdpn shell export [dir] [--set] [-y\|-f] [--json]` | Copy the built-in shell files into a local directory for customization (aliases: `eject`, `init`) |
 | `cdpn shell set <dir> [--json]` | Set a custom default shell directory in `~/.cdpn` |

@@ -1,7 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { PenAccess } from '../api/types.js';
 import { CODEPEN_DIR, PROJECT_CONFIG_FILENAME } from '../constants.js';
 import { isIgnoredPath, loadIgnoreMatchers } from '../sync/fs.js';
+import {
+  matchesAccessFilter,
+  parseAccessValue,
+  type AccessFilter,
+} from '../utils/cli-options.js';
 import { sanitizeCodePenUrl } from '../utils/codepen-url.js';
 import { readPartialUtf8, resolveSafeDir, resolveSafeFile } from '../utils/fs-safe.js';
 import { extractHtmlTitle, extractMetaDescription } from '../utils/html.js';
@@ -42,10 +48,27 @@ export interface DemoManifest {
   standalone: DemoEntry[];
 }
 
+export interface ExcludedDemoReport {
+  path: string;
+  access: PenAccess | null;
+}
+
+export interface ScanDemosResult {
+  manifest: DemoManifest;
+  excludedDemos: ExcludedDemoReport[];
+}
+
 export interface ScanDemosOptions {
   /** Absolute realpaths of directories to skip (e.g. active build output directory). */
   excludeDirs?: ReadonlySet<string>;
+  /** Optional Pen access filter; when omitted, all Pens are included (used by `cdpn serve`). */
+  accessFilter?: AccessFilter;
 }
+
+type DemoReadResult =
+  | { kind: 'none' }
+  | { kind: 'excluded'; demo: ExcludedDemoReport }
+  | { kind: 'included'; entry: DemoEntry };
 
 function extractCdpnTags(rawTags: unknown): string[] {
   if (!Array.isArray(rawTags)) return [];
@@ -86,7 +109,8 @@ async function readDemoEntry(
   demoRealpath: string,
   rootDir: string,
   rootRealpath: string,
-): Promise<DemoEntry | null> {
+  accessFilter?: AccessFilter,
+): Promise<DemoReadResult> {
   const demoDir = path.resolve(rootDir, ...segments);
   const cdpnFile = await resolveSafeFile(
     path.join(demoDir, PROJECT_CONFIG_FILENAME),
@@ -94,7 +118,48 @@ async function readDemoEntry(
     rootDir,
   );
   if (!cdpnFile) {
-    return null;
+    return { kind: 'none' };
+  }
+
+  let codepenUrl: string | null = null;
+  let cdpnTitle: string | null = null;
+  let cdpnDescription: string | null = null;
+  let cdpnAccess: PenAccess | null = null;
+  let tags: string[] = [];
+  if (cdpnFile.size <= MAX_CDPN_JSON_BYTES) {
+    try {
+      const rawJson = await fs.readFile(cdpnFile.realPath, 'utf8');
+      const parsed: unknown = JSON.parse(rawJson);
+      if (isPlainObject(parsed)) {
+        codepenUrl = sanitizeCodePenUrl(parsed.url);
+        const info = isPlainObject(parsed.info) ? parsed.info : null;
+        if (typeof info?.title === 'string') {
+          cdpnTitle = normalizePlainText(info.title, 160);
+        }
+        if (typeof info?.description === 'string') {
+          cdpnDescription = normalizePlainText(info.description, 320);
+        }
+        if (typeof info?.access === 'string') {
+          cdpnAccess = parseAccessValue(info.access);
+        }
+        tags = extractCdpnTags(info?.tags);
+      }
+    } catch {
+      codepenUrl = null;
+      cdpnAccess = null;
+      tags = [];
+    }
+  }
+
+  const demoPath = `${segments.join('/')}/`;
+  if (accessFilter && !matchesAccessFilter(cdpnAccess, accessFilter)) {
+    return {
+      kind: 'excluded',
+      demo: {
+        path: demoPath,
+        access: cdpnAccess,
+      },
+    };
   }
 
   const codepenDir = await resolveSafeDir(path.join(demoDir, CODEPEN_DIR), rootRealpath, rootDir);
@@ -136,40 +201,18 @@ async function readDemoEntry(
     }
   }
 
-  let codepenUrl: string | null = null;
-  let cdpnTitle: string | null = null;
-  let cdpnDescription: string | null = null;
-  let tags: string[] = [];
-  if (cdpnFile && cdpnFile.size <= MAX_CDPN_JSON_BYTES) {
-    try {
-      const rawJson = await fs.readFile(cdpnFile.realPath, 'utf8');
-      const parsed: unknown = JSON.parse(rawJson);
-      if (isPlainObject(parsed)) {
-        codepenUrl = sanitizeCodePenUrl(parsed.url);
-        const info = isPlainObject(parsed.info) ? parsed.info : null;
-        if (typeof info?.title === 'string') {
-          cdpnTitle = normalizePlainText(info.title, 160);
-        }
-        if (typeof info?.description === 'string') {
-          cdpnDescription = normalizePlainText(info.description, 320);
-        }
-        tags = extractCdpnTags(info?.tags);
-      }
-    } catch {
-      codepenUrl = null;
-      tags = [];
-    }
-  }
-
   const lastSegment = segments.at(-1) ?? 'demo';
 
   return {
-    title: cdpnTitle ?? htmlTitle ?? formatFolderTitle(lastSegment),
-    description: cdpnDescription ?? htmlDescription,
-    tags,
-    path: `${segments.join('/')}/`,
-    href: `./${segments.map(encodeURIComponent).join('/')}/`,
-    codepenUrl,
+    kind: 'included',
+    entry: {
+      title: cdpnTitle ?? htmlTitle ?? formatFolderTitle(lastSegment),
+      description: cdpnDescription ?? htmlDescription,
+      tags,
+      path: demoPath,
+      href: `./${segments.map(encodeURIComponent).join('/')}/`,
+      codepenUrl,
+    },
   };
 }
 
@@ -182,6 +225,8 @@ async function scanGroupNode(
   rootRealpath: string,
   excludeDirs: ReadonlySet<string>,
   ignoreMatchers: RegExp[],
+  accessFilter: AccessFilter | undefined,
+  excludedDemos: ExcludedDemoReport[],
 ): Promise<{ demos: DemoEntry[]; groups: DemoGroup[] }> {
   if (depth > MAX_SCAN_DEPTH) return { demos: [], groups: [] };
 
@@ -214,9 +259,20 @@ async function scanGroupNode(
       continue;
     }
 
-    const demoEntry = await readDemoEntry(childSegments, childRealDir, rootDir, rootRealpath);
-    if (demoEntry) {
-      demos.push(demoEntry);
+    const demoResult = await readDemoEntry(
+      childSegments,
+      childRealDir,
+      rootDir,
+      rootRealpath,
+      accessFilter,
+    );
+    if (demoResult.kind === 'included') {
+      demos.push(demoResult.entry);
+      continue;
+    }
+    if (demoResult.kind === 'excluded') {
+      // Never recurse into an excluded Pen folder (Pen folders are always leaves).
+      excludedDemos.push(demoResult.demo);
       continue;
     }
 
@@ -229,6 +285,8 @@ async function scanGroupNode(
       rootRealpath,
       excludeDirs,
       ignoreMatchers,
+      accessFilter,
+      excludedDemos,
     );
     if (subNode.demos.length > 0 || subNode.groups.length > 0) {
       groups.push({
@@ -247,16 +305,18 @@ async function scanGroupNode(
 }
 
 /**
- * Recursively scans `rootDir` subdirectories for Pens/demos (folders containing `.cdpn.json`).
+ * Recursively scans `rootDir` subdirectories for Pens/demos (folders containing `.cdpn.json`),
+ * returning both the filtered manifest and any Pens excluded by `options.accessFilter`.
  */
-export async function scanDemos(
+export async function scanDemosDetailed(
   rootDir: string,
   options: ScanDemosOptions = {},
-): Promise<DemoManifest> {
+): Promise<ScanDemosResult> {
   const resolvedRoot = path.resolve(rootDir);
   const rootRealpath = await fs.realpath(resolvedRoot);
   const excludeDirs = options.excludeDirs ?? new Set<string>();
   const ignoreMatchers = await loadIgnoreMatchers(rootRealpath);
+  const excludedDemos: ExcludedDemoReport[] = [];
 
   const visitedRealpaths = new Set<string>([rootRealpath]);
   const root = await scanGroupNode(
@@ -268,11 +328,27 @@ export async function scanDemos(
     rootRealpath,
     excludeDirs,
     ignoreMatchers,
+    options.accessFilter,
+    excludedDemos,
   );
   return {
-    groups: root.groups,
-    standalone: root.demos,
+    manifest: {
+      groups: root.groups,
+      standalone: root.demos,
+    },
+    excludedDemos: [...excludedDemos].sort((a, b) => compareNatural(a.path, b.path)),
   };
+}
+
+/**
+ * Recursively scans `rootDir` subdirectories for Pens/demos (folders containing `.cdpn.json`).
+ */
+export async function scanDemos(
+  rootDir: string,
+  options: ScanDemosOptions = {},
+): Promise<DemoManifest> {
+  const { manifest } = await scanDemosDetailed(rootDir, options);
+  return manifest;
 }
 
 function countGroupDemos(groups: DemoGroup[]): number {

@@ -175,6 +175,8 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     assert.ok(buildHelp.includes('--yes'));
     assert.ok(buildHelp.includes('--force'));
     assert.ok(buildHelp.includes('--watch'));
+    assert.ok(buildHelp.includes('--access'));
+    assert.ok(buildHelp.includes('--visibility'));
     assert.ok(buildHelp.includes('--shell'));
     assert.ok(buildHelp.includes('--title'));
     assert.ok(buildHelp.includes('--json'));
@@ -374,7 +376,7 @@ describe('dist subfolder packaging & CLI smoke tests', () => {
     }
 
     // Verify --visibility alias is exposed consistently alongside --access
-    for (const cmd of ['init', 'new', 'push', 'sync', 'deploy', 'fork', 'info']) {
+    for (const cmd of ['init', 'new', 'push', 'sync', 'deploy', 'fork', 'info', 'build']) {
       const { stdout: cmdHelp } = await execFileAsync(process.execPath, [
         path.join(distDir, 'cli.js'),
         cmd,

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { PEN_HTML_SUFFIX } from '../constants.js';
 import { CliError } from '../errors.js';
 import { isIgnoredPath, loadIgnoreMatchers } from '../sync/fs.js';
+import { DEFAULT_BUILD_ACCESS_FILTER, type AccessFilter } from '../utils/cli-options.js';
 import { isWithinRoot } from '../utils/fs-safe.js';
 import { hasControlChars } from '../utils/strings.js';
 import { createDebouncedWatcher } from '../utils/watcher.js';
@@ -23,9 +24,10 @@ import {
 import {
   countDemos,
   isBuiltCollectionOutputDir,
-  scanDemos,
+  scanDemosDetailed,
   serializeManifest,
   type DemoManifest,
+  type ExcludedDemoReport,
 } from './manifest.js';
 import {
   CORE_SHELL_FILES,
@@ -85,6 +87,8 @@ export interface BuildProjectOptions {
   sourceDir: string;
   outDir: string;
   explicitShell?: string;
+  /** Access filter applied when building a collection directory (defaults to Public only). */
+  accessFilter?: AccessFilter;
   site?: SiteMetadataOverrides;
   homeDir?: string;
   cwd?: string;
@@ -102,6 +106,8 @@ export interface BuildProjectResult {
   demoCount: number;
   manifest: DemoManifest | null;
   shell: ResolvedShell | null;
+  accessFilter: AccessFilter;
+  excludedDemos: ExcludedDemoReport[];
   unsupportedDemos: UnsupportedDemoReport[];
   inspection: DirectoryInspection;
 }
@@ -479,14 +485,19 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
   const { outDir, canonicalOutDir } = target;
   const excludedRealpaths = new Set<string>([canonicalOutDir]);
   const mode = classifyDirectoryMode(inspection);
+  const accessFilter = options.accessFilter ?? DEFAULT_BUILD_ACCESS_FILTER;
 
   let preScannedManifest: DemoManifest | null = null;
+  let excludedDemos: ExcludedDemoReport[] = [];
   let allowedDemoDirs: Set<string> | null = null;
   let allowedGroupDirs: Set<string> | null = null;
   if (mode === 'collection') {
-    preScannedManifest = await scanDemos(inspection.rootRealpath, {
+    const scanned = await scanDemosDetailed(inspection.rootRealpath, {
       excludeDirs: excludedRealpaths,
+      accessFilter,
     });
+    preScannedManifest = scanned.manifest;
+    excludedDemos = scanned.excludedDemos;
     const sets = collectManifestDirSets(preScannedManifest, inspection.rootRealpath);
     allowedDemoDirs = sets.demoDirs;
     allowedGroupDirs = sets.groupDirs;
@@ -592,7 +603,12 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
     // Generate fresh demos.json in outDir
     finalManifest =
       preScannedManifest ??
-      (await scanDemos(inspection.rootRealpath, { excludeDirs: excludedRealpaths }));
+      (
+        await scanDemosDetailed(inspection.rootRealpath, {
+          excludeDirs: excludedRealpaths,
+          accessFilter,
+        })
+      ).manifest;
     demoCount = countDemos(finalManifest);
     await fs.writeFile(path.join(realOutDir, 'demos.json'), serializeManifest(finalManifest), 'utf8');
   }
@@ -604,6 +620,8 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
     demoCount,
     manifest: finalManifest,
     shell: activeShell,
+    accessFilter,
+    excludedDemos,
     unsupportedDemos,
     inspection,
   };

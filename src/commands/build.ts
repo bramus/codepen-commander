@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
+import { ALL_PEN_ACCESS_LEVELS } from '../constants.js';
 import { CliError } from '../errors.js';
 import {
   DEFAULT_BUILD_DIR,
@@ -16,6 +17,12 @@ import {
   inspectGitIgnoreStatus,
   updateGitIgnore,
 } from '../site/ignore-files.js';
+import type { ExcludedDemoReport } from '../site/manifest.js';
+import {
+  DEFAULT_BUILD_ACCESS_FILTER,
+  formatAccessFilter,
+  resolveAccessFilterOrVisibility,
+} from '../utils/cli-options.js';
 import { fmt } from '../utils/format.js';
 import { printJsonResponse } from '../utils/json.js';
 import { defaultOutput, type CommandOutput } from '../utils/output.js';
@@ -31,6 +38,8 @@ export interface BuildCliOptions {
   yes?: boolean;
   force?: boolean;
   watch?: boolean;
+  access?: string | readonly string[];
+  visibility?: string | readonly string[];
   shell?: string;
   title?: string;
   subtitle?: string;
@@ -69,6 +78,23 @@ export interface BuildCommandOutcome {
   watcher: { close: () => void } | null;
 }
 
+function formatExcludedAccessBreakdown(excludedDemos: readonly ExcludedDemoReport[]): string {
+  const counts = new Map<string, number>();
+  for (const demo of excludedDemos) {
+    const key = demo.access ?? 'unknown';
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const order: string[] = [...ALL_PEN_ACCESS_LEVELS, 'unknown'];
+  return order
+    .filter((key) => counts.has(key))
+    .map((key) => `${counts.get(key)} ${key}`)
+    .join(', ');
+}
+
+function collectOptionValues(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
 export async function runBuildCommand(
   options: RunBuildCommandOptions = {},
 ): Promise<BuildCommandOutcome> {
@@ -78,6 +104,9 @@ export async function runBuildCommand(
   if (watchMode && jsonMode) {
     throw new CliError(400, 'Cannot combine --watch with --json.');
   }
+
+  const explicitAccessFilter = resolveAccessFilterOrVisibility(options.access, options.visibility);
+  const accessFilter = explicitAccessFilter ?? DEFAULT_BUILD_ACCESS_FILTER;
 
   const cwd = path.resolve(options.cwd ?? process.cwd());
   const sourceDirArg = options.dirArg ?? '.';
@@ -180,6 +209,7 @@ export async function runBuildCommand(
     sourceDir: inspection.rootRealpath,
     outDir: target.outDir,
     explicitShell: options.shell,
+    accessFilter,
     site: {
       title: options.title,
       subtitle: options.subtitle,
@@ -265,6 +295,10 @@ export async function runBuildCommand(
         source_dir: result.sourceDir,
         out_dir: result.outDir,
         demo_count: result.demoCount,
+        access_levels: [...result.accessFilter.levels],
+        include_all_access: result.accessFilter.includeAll,
+        excluded_demo_count: result.excludedDemos.length,
+        excluded_demos: result.excludedDemos,
         shell_source: result.shell?.source ?? null,
         shell_dir: result.shell?.dir ?? null,
         unsupported_demos: result.unsupportedDemos,
@@ -283,6 +317,20 @@ export async function runBuildCommand(
       output.log(
         `${fmt.boldGreen('✓')} ${fmt.bold('Built')} ${fmt.magenta(relOutDisplay)} ${fmt.dim(`(${countLabel})`)}`,
       );
+      if (explicitAccessFilter) {
+        output.log(`  ${fmt.dim('Access:')} ${fmt.cyan(formatAccessFilter(result.accessFilter))}`);
+      }
+      if (result.excludedDemos.length > 0) {
+        const skippedCount = result.excludedDemos.length;
+        const penWord = skippedCount === 1 ? 'Pen' : 'Pens';
+        const breakdown = formatExcludedAccessBreakdown(result.excludedDemos);
+        const hint = explicitAccessFilter
+          ? ''
+          : ' (pass --access <levels> or --access all to include)';
+        output.log(
+          `  ${fmt.dim('Skipped:')} ${fmt.dim(`${skippedCount} ${penWord} excluded by access filter (${breakdown})${hint}`)}`,
+        );
+      }
       if (result.shell && result.shell.source !== 'builtin') {
         const sourceLabel = result.shell.source === 'flag' ? '--shell' : '~/.cdpn';
         output.log(
@@ -303,6 +351,9 @@ export async function runBuildCommand(
       output.log(
         `${fmt.boldGreen('✓')} ${fmt.bold('Built Pen into')} ${fmt.magenta(relOutDisplay)}`,
       );
+      if (explicitAccessFilter) {
+        output.log(`  ${fmt.dim('Note: --access is only used when building a directory of Pens.')}`);
+      }
     }
   }
 
@@ -315,8 +366,10 @@ export async function runBuildCommand(
       canonicalOutDir: target.canonicalOutDir,
       onRebuild(updated) {
         if (updated.mode === 'collection') {
+          const skippedSuffix =
+            updated.excludedDemos.length > 0 ? `, ${updated.excludedDemos.length} skipped` : '';
           output.log(
-            `${fmt.cyan('↻')} Rebuilt ${fmt.magenta(relOutDisplay)} ${fmt.dim(`(${updated.demoCount} ${updated.demoCount === 1 ? 'demo' : 'demos'})`)}`,
+            `${fmt.cyan('↻')} Rebuilt ${fmt.magenta(relOutDisplay)} ${fmt.dim(`(${updated.demoCount} ${updated.demoCount === 1 ? 'demo' : 'demos'}${skippedSuffix})`)}`,
           );
         } else {
           output.log(`${fmt.cyan('↻')} Rebuilt ${fmt.magenta(relOutDisplay)}`);
@@ -356,6 +409,12 @@ export function registerBuildCommand(program: Command): void {
       'Alias for --yes (overwrite existing output directory without confirmation)',
     )
     .option('-w, --watch', 'Watch source files and rebuild on changes')
+    .option(
+      '--access <levels>',
+      'Comma-separated Pen access levels to include: Public, Private, Protected, Collaborators, or all (default: Public)',
+      collectOptionValues,
+    )
+    .option('--visibility <levels>', 'Alias for --access', collectOptionValues)
     .option('--shell <dir>', 'Custom shell directory for the demo index page (overrides ~/.cdpn)')
     .option('--title <text>', 'Custom title for the demo index page (defaults to folder name)')
     .option('--subtitle <text>', 'Custom subtitle for the demo index page')

@@ -1,12 +1,25 @@
 import type { Command } from 'commander';
 import type { PenAccess } from '../api/types.js';
 import {
+  ALL_PEN_ACCESS_LEVELS,
   MAX_PEN_TAGS,
   MAX_VERSION_LABEL_LENGTH,
   MIN_PROTECTED_PASSWORD_LENGTH,
   VALID_PEN_ACCESS_LOWER,
 } from '../constants.js';
 import { CliError } from '../errors.js';
+
+export interface AccessFilter {
+  /** Normalized access levels included by this filter (ordered canonically). */
+  levels: readonly PenAccess[];
+  /** True when `all` was requested (includes all PenAccess values as well as Pens with unspecified/unknown access). */
+  includeAll: boolean;
+}
+
+export const DEFAULT_BUILD_ACCESS_FILTER: AccessFilter = Object.freeze({
+  levels: Object.freeze(['Public'] as const),
+  includeAll: false,
+});
 
 export function parseAccessValue(raw: string): PenAccess | null {
   const lower = raw.trim().toLowerCase();
@@ -41,6 +54,80 @@ export function resolveAccessOrVisibility(
     );
   }
   return access ?? visibility;
+}
+
+export function formatAccessFilter(filter: AccessFilter): string {
+  return filter.includeAll ? 'all' : filter.levels.join(', ');
+}
+
+function areAccessFiltersEqual(a: AccessFilter, b: AccessFilter): boolean {
+  if (a.includeAll !== b.includeAll) return false;
+  if (a.levels.length !== b.levels.length) return false;
+  return a.levels.every((level, index) => level === b.levels[index]);
+}
+
+export function parseAccessFilter(raw: string | readonly string[]): AccessFilter {
+  const entries = typeof raw === 'string' ? [raw] : raw;
+  const tokens = entries
+    .flatMap((entry) => entry.split(','))
+    .map((token) => token.trim())
+    .filter(Boolean);
+
+  if (tokens.length === 0) {
+    throw new CliError(
+      400,
+      'Invalid access filter: specify one or more of Public, Private, Protected, Collaborators, or all.',
+    );
+  }
+
+  let includeAll = false;
+  const selected = new Set<PenAccess>();
+
+  for (const token of tokens) {
+    if (token.toLowerCase() === 'all') {
+      includeAll = true;
+      continue;
+    }
+    const parsed = parseAccessValue(token);
+    if (!parsed) {
+      throw new CliError(
+        400,
+        `Invalid access level "${token}". Use: Public, Private, Protected, Collaborators, or all.`,
+      );
+    }
+    selected.add(parsed);
+  }
+
+  const levels = includeAll
+    ? [...ALL_PEN_ACCESS_LEVELS]
+    : ALL_PEN_ACCESS_LEVELS.filter((level) => selected.has(level));
+
+  return { levels, includeAll };
+}
+
+export function resolveAccessFilterOrVisibility(
+  rawAccess?: string | readonly string[],
+  rawVisibility?: string | readonly string[],
+): AccessFilter | undefined {
+  const access = rawAccess !== undefined ? parseAccessFilter(rawAccess) : undefined;
+  const visibility = rawVisibility !== undefined ? parseAccessFilter(rawVisibility) : undefined;
+
+  if (access && visibility && !areAccessFiltersEqual(access, visibility)) {
+    throw new CliError(
+      400,
+      `Conflicting --access ("${formatAccessFilter(access)}") and --visibility ("${formatAccessFilter(visibility)}") values.`,
+    );
+  }
+  return access ?? visibility;
+}
+
+export function matchesAccessFilter(
+  access: PenAccess | null | undefined,
+  filter: AccessFilter,
+): boolean {
+  if (filter.includeAll) return true;
+  if (!access) return false;
+  return filter.levels.includes(access);
 }
 
 export function parseTagsOption(raw?: string): string[] | undefined {

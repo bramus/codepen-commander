@@ -3,8 +3,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
+import { createProgram } from '../../src/cli.js';
 import { runBuildCommand } from '../../src/commands/build.js';
 import { CliError } from '../../src/errors.js';
+import type { DemoManifest } from '../../src/site/manifest.js';
+import { startDevServer } from '../../src/site/server.js';
+import { stripAnsi } from '../../src/utils/format.js';
+import { createBufferedOutput, parseJsonOutput } from '../helpers/output.js';
 
 describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite, safety guards)', () => {
   it('builds a single Pen into a subfolder, strips dotfiles, updates .cdpnignore without duplicates, and creates/appends .gitignore', async () => {
@@ -36,6 +41,7 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
       const first = await runBuildCommand({
         cwd: tmpDir,
         interactive: true,
+        output: createBufferedOutput(),
         prompts: {
           askOutDir: async (_q, def, validate) => {
             const res = await validate(def);
@@ -72,7 +78,13 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
 
       // Non-interactive rebuild without --yes/--force fails with 409 Conflict
       await assert.rejects(
-        () => runBuildCommand({ cwd: tmpDir, out: 'build', interactive: false }),
+        () =>
+          runBuildCommand({
+            cwd: tmpDir,
+            out: 'build',
+            interactive: false,
+            output: createBufferedOutput(),
+          }),
         (err: unknown) => err instanceof CliError && err.statusCode === 409,
       );
 
@@ -81,6 +93,7 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
         cwd: tmpDir,
         out: 'build',
         interactive: true,
+        output: createBufferedOutput(),
         prompts: { confirm: async () => false },
       });
       assert.equal(aborted.built, false);
@@ -92,6 +105,7 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
         out: 'build',
         yes: true,
         interactive: false,
+        output: createBufferedOutput(),
       });
       assert.equal(second.built, true);
       assert.equal(second.cdpnIgnoreUpdated, false);
@@ -102,6 +116,7 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
         cwd: tmpDir,
         out: 'dist',
         interactive: true,
+        output: createBufferedOutput(),
         prompts: { confirm: async () => true },
       });
       assert.equal(third.built, true);
@@ -132,11 +147,23 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
 
       // Rejects building into "." or ".."
       await assert.rejects(
-        () => runBuildCommand({ cwd: penDir, out: '.', interactive: false }),
+        () =>
+          runBuildCommand({
+            cwd: penDir,
+            out: '.',
+            interactive: false,
+            output: createBufferedOutput(),
+          }),
         (err: unknown) => err instanceof CliError && err.statusCode === 400,
       );
       await assert.rejects(
-        () => runBuildCommand({ cwd: penDir, out: '..', interactive: false }),
+        () =>
+          runBuildCommand({
+            cwd: penDir,
+            out: '..',
+            interactive: false,
+            output: createBufferedOutput(),
+          }),
         (err: unknown) => err instanceof CliError && err.statusCode === 400,
       );
 
@@ -145,6 +172,7 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
         cwd: penDir,
         out: '../exported-pen',
         interactive: false,
+        output: createBufferedOutput(),
       });
       assert.equal(res.built, true);
       assert.equal(res.cdpnIgnoreUpdated, false);
@@ -172,7 +200,13 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
       await fs.writeFile(path.join(tmpDir, 'index.html'), '<h1>Hi</h1>');
 
       await assert.rejects(
-        () => runBuildCommand({ cwd: tmpDir, out: 'build', interactive: false }),
+        () =>
+          runBuildCommand({
+            cwd: tmpDir,
+            out: 'build',
+            interactive: false,
+            output: createBufferedOutput(),
+          }),
         (err: unknown) => err instanceof CliError && err.statusCode === 422 && /sass-1/.test(err.message),
       );
     } finally {
@@ -233,6 +267,7 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
         subtitle: 'Custom build subtitle',
         homeDir: tmpHome,
         interactive: false,
+        output: createBufferedOutput(),
       });
 
       assert.equal(out.built, true);
@@ -263,6 +298,7 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
         out: 'build',
         homeDir: tmpHome,
         interactive: false,
+        output: createBufferedOutput(),
       });
       assert.equal(out2.result?.demoCount, 2);
       await assert.rejects(() => fs.stat(path.join(srcDir, 'build', 'dist')));
@@ -288,6 +324,7 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
         shell: exportedShellDir,
         homeDir: tmpHome,
         interactive: false,
+        output: createBufferedOutput(),
       });
       assert.equal(out3.built, true);
       const exportedBuiltIndex = await fs.readFile(
@@ -300,6 +337,374 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
     } finally {
       await fs.rm(tmpRoot, { recursive: true, force: true });
       await fs.rm(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  it('includes only Public Pens by default in collection builds and supports --access / --visibility filtering', async () => {
+    const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-build-access-'));
+    const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-build-access-home-'));
+    const srcDir = path.join(tmpRoot, 'mixed-demos');
+
+    const writePen = async (
+      relPath: string,
+      cdpnJson: Record<string, unknown>,
+      htmlBody: string,
+      extra?: { unsupportedBlock?: string },
+    ) => {
+      const dir = path.join(srcDir, ...relPath.split('/'));
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, '.cdpn.json'), JSON.stringify(cdpnJson));
+      await fs.writeFile(
+        path.join(dir, 'index.html'),
+        `<!DOCTYPE html><html><head><title>${relPath}</title></head><body>${htmlBody}</body></html>`,
+      );
+      if (extra?.unsupportedBlock) {
+        await fs.mkdir(path.join(dir, '.codepen'), { recursive: true });
+        await fs.writeFile(
+          path.join(dir, '.codepen', 'pen.config.json'),
+          JSON.stringify({
+            blocks: {
+              [extra.unsupportedBlock]: { name: extra.unsupportedBlock, disabled: false },
+            },
+          }),
+        );
+      }
+    };
+
+    try {
+      // 1. Standalone Public Pen (case-insensitive access value)
+      await writePen('public-demo', { info: { title: 'Public Demo', access: 'public' } }, 'Public');
+
+      // 2. Private Pen (with unsupported block & a nested Public .cdpn.json that MUST NEVER leak!)
+      await writePen(
+        'private-demo',
+        { info: { title: 'Private Draft', access: 'Private' } },
+        'Secret Private',
+        { unsupportedBlock: 'sass-1' },
+      );
+      await writePen(
+        'private-demo/nested-public',
+        { info: { title: 'Nested Trap', access: 'Public' } },
+        'Must Not Leak',
+      );
+
+      // 3. Group containing ONLY non-Public Pens (Protected + Collaborators) -> group folder must not be created by default
+      await writePen(
+        'secret-group/protected-demo',
+        { info: { title: 'Protected Talk', access: 'Protected' } },
+        'Protected',
+      );
+      await writePen(
+        'secret-group/collab-demo',
+        { info: { title: 'Collab WIP', access: 'Collaborators' } },
+        'Collab',
+      );
+
+      // 4. Legacy Pen without info.access & Pen with invalid access (fail-safe: excluded unless --access all)
+      await writePen(
+        'legacy-demo',
+        { url: 'https://codepen.io/bramus/pen/leg1', pen_id: 'leg1', last_synced_version_id: 'v1' },
+        'Legacy',
+      );
+      await writePen('invalid-access-demo', { info: { title: 'Weird', access: 'Secret' } }, 'Weird');
+
+      // 5. Group with a mix of Public and Private Pens
+      await writePen(
+        'mixed-group/public-child',
+        { info: { title: 'Public Child', access: 'Public' } },
+        'Public Child',
+      );
+      await writePen(
+        'mixed-group/private-child',
+        { info: { title: 'Private Child', access: 'Private' } },
+        'Private Child',
+      );
+
+      const collectPaths = (manifest: DemoManifest): string[] => {
+        const paths: string[] = [];
+        const walk = (groups: DemoManifest['groups']) => {
+          for (const g of groups) {
+            for (const d of g.demos) paths.push(d.path);
+            walk(g.groups);
+          }
+        };
+        for (const d of manifest.standalone) paths.push(d.path);
+        walk(manifest.groups);
+        return paths.sort();
+      };
+
+      // A. Default build (no --access): ONLY Public Pens included
+      const defaultOut = createBufferedOutput();
+      const defaultRes = await runBuildCommand({
+        cwd: srcDir,
+        out: 'out-default',
+        homeDir: tmpHome,
+        interactive: false,
+        output: defaultOut,
+      });
+
+      assert.equal(defaultRes.built, true);
+      assert.equal(defaultRes.result?.demoCount, 2);
+      assert.deepEqual(defaultRes.result?.accessFilter, { levels: ['Public'], includeAll: false });
+      assert.deepEqual(defaultRes.result?.unsupportedDemos, []);
+      assert.equal(defaultRes.result?.excludedDemos.length, 6);
+
+      const defaultManifest = JSON.parse(
+        await fs.readFile(path.join(srcDir, 'out-default', 'demos.json'), 'utf8'),
+      ) as DemoManifest;
+      assert.deepEqual(collectPaths(defaultManifest), [
+        'mixed-group/public-child/',
+        'public-demo/',
+      ]);
+      // Excluded Pens and empty non-Public groups must NOT exist on disk in outDir
+      assert.ok((await fs.stat(path.join(srcDir, 'out-default', 'public-demo', 'index.html'))).isFile());
+      assert.ok(
+        (await fs.stat(path.join(srcDir, 'out-default', 'mixed-group', 'public-child', 'index.html'))).isFile(),
+      );
+      await assert.rejects(() => fs.stat(path.join(srcDir, 'out-default', 'private-demo')));
+      await assert.rejects(() => fs.stat(path.join(srcDir, 'out-default', 'secret-group')));
+      await assert.rejects(() => fs.stat(path.join(srcDir, 'out-default', 'legacy-demo')));
+      await assert.rejects(() => fs.stat(path.join(srcDir, 'out-default', 'invalid-access-demo')));
+      await assert.rejects(() => fs.stat(path.join(srcDir, 'out-default', 'mixed-group', 'private-child')));
+
+      const defaultLog = stripAnsi(defaultOut.stdout());
+      assert.match(defaultLog, /Skipped:\s+6 Pens excluded by access filter/);
+      assert.match(defaultLog, /2 Private, 1 Protected, 1 Collaborators, 2 unknown/);
+      assert.match(defaultLog, /--access <levels> or --access all/);
+
+      // B. --access Public,Private (case-insensitive & spaces around commas)
+      const pubPrivOut = createBufferedOutput();
+      const pubPrivRes = await runBuildCommand({
+        cwd: srcDir,
+        out: 'out-pub-priv',
+        access: 'private, PUBLIC',
+        homeDir: tmpHome,
+        interactive: false,
+        output: pubPrivOut,
+      });
+
+      assert.equal(pubPrivRes.result?.demoCount, 4);
+      assert.deepEqual(pubPrivRes.result?.accessFilter, {
+        levels: ['Public', 'Private'],
+        includeAll: false,
+      });
+      // Now that private-demo is included, its unsupported block IS detected & rendered
+      assert.deepEqual(pubPrivRes.result?.unsupportedDemos, [
+        { path: 'private-demo/', blocks: ['sass-1'] },
+      ]);
+      const pubPrivManifest = JSON.parse(
+        await fs.readFile(path.join(srcDir, 'out-pub-priv', 'demos.json'), 'utf8'),
+      ) as DemoManifest;
+      assert.deepEqual(collectPaths(pubPrivManifest), [
+        'mixed-group/private-child/',
+        'mixed-group/public-child/',
+        'private-demo/',
+        'public-demo/',
+      ]);
+      await assert.rejects(() => fs.stat(path.join(srcDir, 'out-pub-priv', 'secret-group')));
+      await assert.rejects(() => fs.stat(path.join(srcDir, 'out-pub-priv', 'legacy-demo')));
+      const pubPrivLog = stripAnsi(pubPrivOut.stdout());
+      assert.match(pubPrivLog, /Access:\s+Public, Private/);
+      assert.match(pubPrivLog, /Skipped:\s+4 Pens excluded by access filter/);
+
+      // C. --access Private only (excludes Public!)
+      const privOnlyRes = await runBuildCommand({
+        cwd: srcDir,
+        out: 'out-priv-only',
+        access: 'Private',
+        homeDir: tmpHome,
+        interactive: false,
+        output: createBufferedOutput(),
+      });
+      assert.equal(privOnlyRes.result?.demoCount, 2);
+      const privOnlyManifest = JSON.parse(
+        await fs.readFile(path.join(srcDir, 'out-priv-only', 'demos.json'), 'utf8'),
+      ) as DemoManifest;
+      assert.deepEqual(collectPaths(privOnlyManifest), [
+        'mixed-group/private-child/',
+        'private-demo/',
+      ]);
+      await assert.rejects(() => fs.stat(path.join(srcDir, 'out-priv-only', 'public-demo')));
+
+      // D. --visibility alias + repeated flag array values
+      const visRes = await runBuildCommand({
+        cwd: srcDir,
+        out: 'out-vis',
+        visibility: ['Protected', 'Collaborators'],
+        homeDir: tmpHome,
+        interactive: false,
+        output: createBufferedOutput(),
+      });
+      assert.equal(visRes.result?.demoCount, 2);
+      const visManifest = JSON.parse(
+        await fs.readFile(path.join(srcDir, 'out-vis', 'demos.json'), 'utf8'),
+      ) as DemoManifest;
+      assert.deepEqual(collectPaths(visManifest), [
+        'secret-group/collab-demo/',
+        'secret-group/protected-demo/',
+      ]);
+
+      // E. --access all includes all access levels AND legacy/unknown-access Pens (while still treating Pens as leaves)
+      const allJsonOut = createBufferedOutput();
+      const allRes = await runBuildCommand({
+        cwd: srcDir,
+        out: 'out-all',
+        access: 'all',
+        json: true,
+        homeDir: tmpHome,
+        interactive: false,
+        output: allJsonOut,
+      });
+      assert.equal(allRes.result?.demoCount, 8);
+      assert.deepEqual(allRes.result?.excludedDemos, []);
+      assert.deepEqual(allRes.result?.accessFilter, {
+        levels: ['Public', 'Private', 'Protected', 'Collaborators'],
+        includeAll: true,
+      });
+      const allEnvelope = parseJsonOutput<{
+        demo_count: number;
+        access_levels: string[];
+        include_all_access: boolean;
+        excluded_demo_count: number;
+        excluded_demos: Array<{ path: string; access: string | null }>;
+      }>(allJsonOut);
+      assert.equal(allEnvelope.status.code, 200);
+      assert.equal(allEnvelope.contents.demo_count, 8);
+      assert.deepEqual(allEnvelope.contents.access_levels, [
+        'Public',
+        'Private',
+        'Protected',
+        'Collaborators',
+      ]);
+      assert.equal(allEnvelope.contents.include_all_access, true);
+      assert.equal(allEnvelope.contents.excluded_demo_count, 0);
+      assert.deepEqual(allEnvelope.contents.excluded_demos, []);
+
+      // F. --json envelope on default build reports excluded demos & access_levels accurately
+      const defaultJsonOut = createBufferedOutput();
+      await runBuildCommand({
+        cwd: srcDir,
+        out: 'out-default-json',
+        json: true,
+        homeDir: tmpHome,
+        interactive: false,
+        output: defaultJsonOut,
+      });
+      const defaultEnvelope = parseJsonOutput<{
+        demo_count: number;
+        access_levels: string[];
+        include_all_access: boolean;
+        excluded_demo_count: number;
+        excluded_demos: Array<{ path: string; access: string | null }>;
+      }>(defaultJsonOut);
+      assert.equal(defaultEnvelope.status.code, 200);
+      assert.equal(defaultEnvelope.contents.demo_count, 2);
+      assert.deepEqual(defaultEnvelope.contents.access_levels, ['Public']);
+      assert.equal(defaultEnvelope.contents.include_all_access, false);
+      assert.equal(defaultEnvelope.contents.excluded_demo_count, 6);
+      assert.deepEqual(defaultEnvelope.contents.excluded_demos, [
+        { path: 'invalid-access-demo/', access: null },
+        { path: 'legacy-demo/', access: null },
+        { path: 'mixed-group/private-child/', access: 'Private' },
+        { path: 'private-demo/', access: 'Private' },
+        { path: 'secret-group/collab-demo/', access: 'Collaborators' },
+        { path: 'secret-group/protected-demo/', access: 'Protected' },
+      ]);
+
+      // G. Commander CLI parsing supports repeated --access flags
+      const program = createProgram();
+      const buildCmd = program.commands.find((c) => c.name() === 'build');
+      assert.ok(buildCmd);
+      let capturedAccess: unknown;
+      buildCmd.action((_dirArg: string | undefined, opts: { access?: unknown }) => {
+        capturedAccess = opts.access;
+      });
+      await program.parseAsync([
+        'node',
+        'cdpn',
+        'build',
+        '--access',
+        'Public',
+        '--access',
+        'Private,Protected',
+      ]);
+      assert.deepEqual(capturedAccess, ['Public', 'Private,Protected']);
+
+      // H. Verify `cdpn serve` still serves ALL Pens (including Private/Protected/legacy) by default
+      const server = await startDevServer({
+        targetDir: srcDir,
+        port: 0,
+        allowEphemeralPort: true,
+        homeDir: tmpHome,
+      });
+      try {
+        assert.equal(server.mode, 'collection');
+        assert.equal(server.demoCount, 8);
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await fs.rm(tmpRoot, { recursive: true, force: true });
+      await fs.rm(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects invalid or conflicting --access / --visibility flags with CliError(400) and allows single-Pen builds regardless of access', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-build-access-validation-'));
+    try {
+      await fs.writeFile(
+        path.join(tmpDir, '.cdpn.json'),
+        JSON.stringify({ info: { title: 'Private Pen', access: 'Private' } }),
+      );
+      await fs.writeFile(path.join(tmpDir, 'index.html'), '<h1>Private Single Pen</h1>');
+
+      // Invalid values fail fast with 400
+      for (const badOpts of [
+        { access: '' },
+        { access: ' , ' },
+        { access: 'Secret' },
+        { access: 'Public,Secret' },
+        { access: '*' },
+        { visibility: 'Unknown' },
+        { access: 'Public', visibility: 'Private' },
+        { access: 'all', visibility: 'Public,Private,Protected,Collaborators' },
+      ]) {
+        await assert.rejects(
+          () =>
+            runBuildCommand({
+              cwd: tmpDir,
+              out: 'out',
+              interactive: false,
+              output: createBufferedOutput(),
+              ...badOpts,
+            }),
+          (err: unknown) => err instanceof CliError && err.statusCode === 400,
+        );
+      }
+
+      // Matching --access and --visibility in different order/casing are accepted without conflict,
+      // and single-Pen mode still builds the Private Pen while noting --access only applies to collections
+      const out = createBufferedOutput();
+      const res = await runBuildCommand({
+        cwd: tmpDir,
+        out: 'out',
+        access: 'Public,Private',
+        visibility: 'private,public',
+        interactive: false,
+        output: out,
+      });
+      assert.equal(res.built, true);
+      assert.equal(res.result?.mode, 'pen');
+      assert.equal(
+        await fs.readFile(path.join(tmpDir, 'out', 'index.html'), 'utf8'),
+        '<h1>Private Single Pen</h1>',
+      );
+      assert.match(
+        stripAnsi(out.stdout()),
+        /--access is only used when building a directory of Pens/,
+      );
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
 });
