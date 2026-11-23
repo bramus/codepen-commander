@@ -707,4 +707,87 @@ describe('cdpn build (single Pen, collection, .cdpnignore/.gitignore, overwrite,
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it('resolves --out (and default/prompted output paths) relative to cwd rather than the source directory', async () => {
+    const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-build-rel-cwd-'));
+    const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-build-rel-cwd-home-'));
+    try {
+      const blocksDir = path.join(tmpRoot, 'testdata', 'blocks');
+      await fs.mkdir(path.join(blocksDir, 'demo-a'), { recursive: true });
+      await fs.writeFile(
+        path.join(blocksDir, 'demo-a', '.cdpn.json'),
+        JSON.stringify({ info: { title: 'Demo A', access: 'Public' } }),
+      );
+      await fs.writeFile(path.join(blocksDir, 'demo-a', 'index.html'), '<h1>Demo A</h1>');
+
+      // 1. `cdpn build testdata/blocks --out testdata-build` -> ./testdata-build (NOT testdata/blocks/testdata-build)
+      const out = createBufferedOutput();
+      const res = await runBuildCommand({
+        cwd: tmpRoot,
+        dirArg: 'testdata/blocks',
+        out: 'testdata-build',
+        homeDir: tmpHome,
+        interactive: false,
+        output: out,
+      });
+
+      const realRoot = await fs.realpath(tmpRoot);
+      assert.equal(res.built, true);
+      assert.equal(res.result?.mode, 'collection');
+      assert.equal(res.result?.demoCount, 1);
+      assert.equal(res.result?.outDir, path.join(realRoot, 'testdata-build'));
+      assert.ok((await fs.stat(path.join(tmpRoot, 'testdata-build', 'demos.json'))).isFile());
+      assert.ok((await fs.stat(path.join(tmpRoot, 'testdata-build', 'demo-a', 'index.html'))).isFile());
+      await assert.rejects(() => fs.stat(path.join(blocksDir, 'testdata-build')));
+      assert.match(stripAnsi(out.stdout()), /Built testdata-build \(1 demo\)/);
+
+      // 2. Rejects `--out .` (ancestor of source dir) and `--out testdata/blocks` (same as source dir)
+      await assert.rejects(
+        () =>
+          runBuildCommand({
+            cwd: tmpRoot,
+            dirArg: 'testdata/blocks',
+            out: '.',
+            homeDir: tmpHome,
+            interactive: false,
+            output: createBufferedOutput(),
+          }),
+        (err: unknown) => err instanceof CliError && err.statusCode === 400 && /ancestor/i.test(err.message),
+      );
+      await assert.rejects(
+        () =>
+          runBuildCommand({
+            cwd: tmpRoot,
+            dirArg: 'testdata/blocks',
+            out: 'testdata/blocks',
+            homeDir: tmpHome,
+            interactive: false,
+            output: createBufferedOutput(),
+          }),
+        (err: unknown) => err instanceof CliError && err.statusCode === 400 && /same as/i.test(err.message),
+      );
+
+      // 3. Explicit --out targeting a subfolder inside a single Pen (`testdata/blocks/demo-a/dist`) still updates its .cdpnignore
+      const penRes = await runBuildCommand({
+        cwd: tmpRoot,
+        dirArg: 'testdata/blocks/demo-a',
+        out: 'testdata/blocks/demo-a/dist',
+        homeDir: tmpHome,
+        interactive: false,
+        output: createBufferedOutput(),
+      });
+      assert.equal(penRes.built, true);
+      assert.equal(penRes.result?.mode, 'pen');
+      assert.equal(penRes.result?.outDir, path.join(realRoot, 'testdata', 'blocks', 'demo-a', 'dist'));
+      assert.equal(penRes.cdpnIgnoreUpdated, true);
+      assert.equal(penRes.cdpnIgnoreEntry, 'dist/');
+      assert.equal(
+        await fs.readFile(path.join(blocksDir, 'demo-a', '.cdpnignore'), 'utf8'),
+        'dist/\n',
+      );
+    } finally {
+      await fs.rm(tmpRoot, { recursive: true, force: true });
+      await fs.rm(tmpHome, { recursive: true, force: true });
+    }
+  });
 });

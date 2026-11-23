@@ -136,10 +136,11 @@ export async function runBuildCommand(
         validate,
       }));
 
-  // 1. Resolve output directory (explicit --out, interactive prompt, or default "build")
+  // 1. Resolve output directory (explicit --out, interactive prompt, or default "build") relative to cwd
   let target: ResolvedBuildTarget;
   if (options.out !== undefined) {
     const validated = await resolveBuildTargetDir(options.out, inspection.rootRealpath, {
+      cwd,
       homeDir: options.homeDir,
     });
     if (!validated.ok) {
@@ -154,6 +155,7 @@ export async function runBuildCommand(
       async (raw) => {
         const candidate = raw.trim() || DEFAULT_BUILD_DIR;
         const validated = await resolveBuildTargetDir(candidate, inspection.rootRealpath, {
+          cwd,
           homeDir: options.homeDir,
         });
         if (!validated.ok) {
@@ -164,6 +166,7 @@ export async function runBuildCommand(
     );
   } else {
     const validated = await resolveBuildTargetDir(DEFAULT_BUILD_DIR, inspection.rootRealpath, {
+      cwd,
       homeDir: options.homeDir,
     });
     if (!validated.ok) {
@@ -280,7 +283,8 @@ export async function runBuildCommand(
   }
 
   // 5. Output summary
-  const relOutDisplay = path.relative(cwd, result.outDir) || result.outDir;
+  const cwdRealpath = await fs.realpath(cwd).catch(() => cwd);
+  const relOutDisplay = path.relative(cwdRealpath, result.outDir) || result.outDir;
 
   if (jsonMode) {
     const message =

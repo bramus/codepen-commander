@@ -139,14 +139,14 @@ async function resolveCanonicalPathThroughExistingAncestor(targetPath: string): 
 }
 
 /**
- * Validates and resolves a build target directory relative to `sourceDir` (allowing
- * targets both inside and outside `sourceDir`, while forbidding `.`, ancestor dirs,
- * files, and symlinks).
+ * Validates and resolves a build target directory relative to `options.cwd` (defaulting
+ * to `sourceRealpath` when omitted), allowing targets both inside and outside `sourceRealpath`
+ * while forbidding the source directory itself, ancestor dirs, files, and symlinks.
  */
 export async function resolveBuildTargetDir(
   rawTarget: string,
   sourceRealpath: string,
-  options: { homeDir?: string } = {},
+  options: { cwd?: string; homeDir?: string } = {},
 ): Promise<{ ok: true; target: ResolvedBuildTarget } | { ok: false; error: string }> {
   const trimmed = rawTarget.trim();
   if (!trimmed) {
@@ -156,8 +156,9 @@ export async function resolveBuildTargetDir(
     return { ok: false, error: 'Output directory cannot contain control characters.' };
   }
 
+  const baseDir = path.resolve(options.cwd ?? sourceRealpath);
   const expanded = expandHomePath(trimmed, options.homeDir);
-  const resolvedOut = path.resolve(sourceRealpath, expanded);
+  const resolvedOut = path.resolve(baseDir, expanded);
 
   let exists = false;
   try {
@@ -474,6 +475,7 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
 
     inspection = await inspectTargetDirectory(resolvedSource);
     const targetValidation = await resolveBuildTargetDir(options.outDir, inspection.rootRealpath, {
+      cwd: baseCwd,
       homeDir: options.homeDir,
     });
     if (!targetValidation.ok) {
