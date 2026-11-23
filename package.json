@@ -1,6 +1,6 @@
 {
   "name": "codepen-commander",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Sync, serve, and build local CodePen 2.0 Pens — powered by the CodePen API v2",
   "license": "MIT",
   "type": "module",
