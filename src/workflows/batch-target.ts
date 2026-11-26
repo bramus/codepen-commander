@@ -23,7 +23,7 @@ export type ResolvedCommandTarget =
   | { mode: 'batch'; rootDir: string; discovered: DiscoveredPen[] };
 
 export type BatchFallbackResolution =
-  | { action: 'none' }
+  | { action: 'none'; hasSubdirs?: boolean }
   | { action: 'batch'; discovered: DiscoveredPen[] }
   | { action: 'canceled' };
 
@@ -199,7 +199,9 @@ export async function resolveBatchCommandTarget(options: {
  * - Only inspects direct entries of `targetDir` (single non-recursive `readdir`).
  * - If no subdirectories exist (or for `push`, if `index.html` exists directly for a first-time push),
  *   returns `{ action: 'none' }` so the caller preserves its normal non-Pen behavior.
- * - Non-interactively returns early with `404` advising `cdpn <cmd> all` (zero tree traversal).
+ * - Non-interactively returns early with `404` advising `cdpn <cmd> all` (zero tree traversal),
+ *   except for `status`, which returns `{ action: 'none', hasSubdirs: true }` so `cdpn status`
+ *   can display a non-error informative notice.
  * - Interactively offers `cdpn <cmd> all` (yes/No, default No); only walks the directory tree
  *   if the user confirms `Yes`.
  */
@@ -229,22 +231,37 @@ export async function offerBatchAllFallback(options: {
   const whereSuffix = options.fromExplicitDir ? ` inside ${options.displayDir}` : '';
 
   if (!options.interactive) {
-    const actionHint =
-      options.commandName === 'status'
-        ? `Run \`cdpn init\` to initialize this folder as a CodePen demo, \`cdpn status all\`${whereSuffix} to check Pens in subdirectories, or \`cdpn status <directory>\` for a specific Pen.`
-        : `Run \`cdpn ${options.commandName} all${dryRunSuffix}\`${whereSuffix} to ${options.commandName} Pens in subdirectories, or \`cdpn ${options.commandName} <directory>\` for a specific Pen.`;
+    if (options.commandName === 'status') {
+      return { action: 'none', hasSubdirs: true };
+    }
+    const actionHint = `Run \`cdpn ${options.commandName} all${dryRunSuffix}\`${whereSuffix} to ${options.commandName} Pens in subdirectories, or \`cdpn ${options.commandName} <directory>\` for a specific Pen.`;
     throw new CliError(404, `No ${PROJECT_CONFIG_FILENAME} found in ${options.targetDir}.\n${actionHint}`);
   }
 
   const confirmImpl = options.prompts?.confirm ?? promptConfirm;
   const dirLabel = options.fromExplicitDir ? `"${options.displayDir}"` : 'this directory';
-  output.log(fmt.dim(`No ${PROJECT_CONFIG_FILENAME} found in ${dirLabel}.`));
+  if (options.commandName === 'status') {
+    const capDirLabel = options.fromExplicitDir ? `"${options.displayDir}"` : 'This directory';
+    output.log(
+      `${fmt.cyan('ℹ')} ${capDirLabel} is not a CodePen Pen ${fmt.dim(`(no ${PROJECT_CONFIG_FILENAME} found)`)}.`,
+    );
+  } else {
+    output.log(fmt.dim(`No ${PROJECT_CONFIG_FILENAME} found in ${dirLabel}.`));
+  }
   const ok = await confirmImpl(
     `Run \`cdpn ${options.commandName} all${dryRunSuffix}\`${whereSuffix} across subdirectories instead?`,
     false,
   );
   if (!ok) {
-    output.log('Aborted.');
+    if (options.commandName === 'status') {
+      output.log(
+        fmt.dim(
+          'Run `cdpn init` to initialize this folder as a CodePen demo, or `cdpn status <directory>` for a specific Pen.',
+        ),
+      );
+    } else {
+      output.log('Aborted.');
+    }
     return { action: 'canceled' };
   }
 

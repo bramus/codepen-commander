@@ -86,77 +86,204 @@ async function materializeLinkedPen(dir: string, state: RemotePenState): Promise
   });
 }
 
-describe('cdpn status command (unlinked directory guidance)', () => {
-  it('offers cdpn clone / cdpn new in an empty directory without .cdpn.json', async () => {
+describe('cdpn status command (unlinked & non-Pen directory guidance)', () => {
+  it('informs user and offers cdpn clone / cdpn new in an empty directory without .cdpn.json (not an error)', async () => {
     await withTempDir(async (emptyDir) => {
-      await assert.rejects(
-        () =>
-          runStatusCommand({
-            cwd: emptyDir,
-            interactive: false,
-            env: {},
-            output: createBufferedOutput(),
-          }),
-        (err: unknown) => {
-          assert.ok(err instanceof CliError);
-          assert.equal(err.statusCode, 404);
-          assert.match(err.message, /No \.cdpn\.json found/);
-          assert.match(err.message, /`cdpn clone <url>`/);
-          assert.match(err.message, /`cdpn new`/);
-          assert.doesNotMatch(err.message, /`cdpn init`/);
-          return true;
-        },
-      );
+      const out = createBufferedOutput();
+      const res = await runStatusCommand({
+        cwd: emptyDir,
+        interactive: false,
+        env: {},
+        output: out,
+      });
+
+      assert.ok(res);
+      assert.equal(res.state, 'not-a-pen');
+      assert.equal(res.exitCode, undefined);
+      assert.equal(res.upToDate, false);
+      assert.equal(res.remoteMoved, false);
+      assert.equal(out.stderr(), '');
+
+      const text = stripAnsi(out.stdout());
+      assert.doesNotMatch(text, /^Error:/m);
+      assert.match(text, /not a CodePen Pen/i);
+      assert.match(text, /no \.cdpn\.json found/i);
+      assert.match(text, /`cdpn clone <url>`/);
+      assert.match(text, /`cdpn new`/);
+      assert.doesNotMatch(text, /`cdpn init`/);
+
+      const jsonOut = createBufferedOutput();
+      const jsonRes = await runStatusCommand({
+        cwd: emptyDir,
+        json: true,
+        interactive: false,
+        env: {},
+        output: jsonOut,
+      });
+      assert.equal(jsonRes?.exitCode, undefined);
+      const env = parseJsonOutput<{
+        state: string;
+        initialized: boolean;
+        linked: boolean;
+        has_files: boolean;
+        has_subdirectories: boolean;
+      }>(jsonOut);
+      assert.equal(env.status.code, 204);
+      assert.match(env.status.message, /not a CodePen Pen/i);
+      assert.match(env.status.message, /`cdpn clone <url>`/);
+      assert.equal(env.contents.state, 'not-a-pen');
+      assert.equal(env.contents.initialized, false);
+      assert.equal(env.contents.linked, false);
+      assert.equal(env.contents.has_files, false);
+      assert.equal(env.contents.has_subdirectories, false);
     }, 'cdpn-status-empty-');
   });
 
-  it('offers cdpn init (and not cdpn clone) in a non-empty directory without .cdpn.json', async () => {
+  it('informs user and offers cdpn init (not cdpn clone) in a non-empty directory without .cdpn.json (not an error)', async () => {
     await withTempDir(async (nonEmptyDir) => {
       await fs.writeFile(path.join(nonEmptyDir, 'index.html'), '<h1>Hello</h1>\n', 'utf8');
 
-      await assert.rejects(
-        () =>
-          runStatusCommand({
-            cwd: nonEmptyDir,
-            interactive: false,
-            env: {},
-            output: createBufferedOutput(),
-          }),
-        (err: unknown) => {
-          assert.ok(err instanceof CliError);
-          assert.equal(err.statusCode, 404);
-          assert.match(err.message, /No \.cdpn\.json found/);
-          assert.match(err.message, /`cdpn init`/);
-          assert.doesNotMatch(err.message, /cdpn clone/);
-          assert.doesNotMatch(err.message, /cdpn new/);
-          return true;
-        },
-      );
+      const out = createBufferedOutput();
+      const res = await runStatusCommand({
+        cwd: nonEmptyDir,
+        interactive: false,
+        env: {},
+        output: out,
+      });
+
+      assert.ok(res);
+      assert.equal(res.state, 'not-a-pen');
+      assert.equal(res.exitCode, undefined);
+      assert.equal(res.upToDate, false);
+      assert.equal(res.remoteMoved, false);
+      assert.equal(out.stderr(), '');
+
+      const text = stripAnsi(out.stdout());
+      assert.doesNotMatch(text, /^Error:/m);
+      assert.match(text, /not a CodePen Pen/i);
+      assert.match(text, /no \.cdpn\.json found/i);
+      assert.match(text, /`cdpn init`/);
+      assert.doesNotMatch(text, /cdpn clone/);
+      assert.doesNotMatch(text, /cdpn new/);
+
+      const jsonOut = createBufferedOutput();
+      const jsonRes = await runStatusCommand({
+        cwd: nonEmptyDir,
+        json: true,
+        interactive: false,
+        env: {},
+        output: jsonOut,
+      });
+      assert.equal(jsonRes?.exitCode, undefined);
+      const env = parseJsonOutput<{
+        state: string;
+        initialized: boolean;
+        linked: boolean;
+        has_files: boolean;
+        has_subdirectories: boolean;
+      }>(jsonOut);
+      assert.equal(env.status.code, 204);
+      assert.match(env.status.message, /`cdpn init`/);
+      assert.equal(env.contents.state, 'not-a-pen');
+      assert.equal(env.contents.initialized, false);
+      assert.equal(env.contents.linked, false);
+      assert.equal(env.contents.has_files, true);
+      assert.equal(env.contents.has_subdirectories, false);
     }, 'cdpn-status-nonempty-');
   });
 
-  it('offers cdpn push when directory has an unlinked info-only .cdpn.json', async () => {
+  it('informs user and offers cdpn push when directory has an unlinked info-only .cdpn.json (not an error)', async () => {
     await withTempDir(async (initDir) => {
       await fs.writeFile(path.join(initDir, 'index.html'), '<h1>Initialized</h1>\n', 'utf8');
-      await writeUnlinkedProjectInfo(initDir, { title: 'Initialized Demo', access: 'Public' });
+      await fs.mkdir(path.join(initDir, 'src'), { recursive: true });
+      await fs.writeFile(path.join(initDir, 'src', 'app.js'), 'console.log("hi");\n', 'utf8');
+      await writeUnlinkedProjectInfo(initDir, {
+        title: 'Initialized Demo',
+        access: 'Public',
+        tags: ['css', 'demo'],
+      });
 
+      const out = createBufferedOutput();
+      const res = await runStatusCommand({
+        cwd: initDir,
+        interactive: false,
+        env: {},
+        output: out,
+      });
+
+      assert.ok(res);
+      assert.equal(res.state, 'unlinked');
+      assert.equal(res.exitCode, undefined);
+      assert.equal(res.upToDate, false);
+      assert.equal(res.remoteMoved, false);
+      assert.equal(res.unlinkedProject?.rootDir, initDir);
+      assert.equal(out.stderr(), '');
+
+      const text = stripAnsi(out.stdout());
+      assert.doesNotMatch(text, /^Error:/m);
+      assert.match(text, /Initialized Demo \(unlinked\)/);
+      assert.match(text, /Access:\s+Public/);
+      assert.match(text, /Tags:\s+css, demo/);
+      assert.match(text, /Files:\s+2 local file\(s\)/);
+      assert.match(text, /not linked to an online Pen on CodePen yet/i);
+      assert.match(text, /`cdpn push`/);
+
+      // From a nested subdirectory, also displays the resolved Pen root folder
+      const subOut = createBufferedOutput();
+      const subRes = await runStatusCommand({
+        cwd: path.join(initDir, 'src'),
+        interactive: false,
+        env: {},
+        output: subOut,
+      });
+      assert.equal(subRes?.state, 'unlinked');
+      assert.equal(subRes?.exitCode, undefined);
+      assert.match(stripAnsi(subOut.stdout()), new RegExp(`Folder:\\s+${initDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+
+      const jsonOut = createBufferedOutput();
+      const jsonRes = await runStatusCommand({
+        cwd: initDir,
+        json: true,
+        interactive: false,
+        env: {},
+        output: jsonOut,
+      });
+      assert.equal(jsonRes?.exitCode, undefined);
+      const env = parseJsonOutput<{
+        state: string;
+        initialized: boolean;
+        linked: boolean;
+        title: string;
+        file_count: number;
+        info: { title?: string; access?: string; tags?: string[] };
+      }>(jsonOut);
+      assert.equal(env.status.code, 200);
+      assert.match(env.status.message, /not linked to an online Pen/i);
+      assert.match(env.status.message, /`cdpn push`/);
+      assert.equal(env.contents.state, 'unlinked');
+      assert.equal(env.contents.initialized, true);
+      assert.equal(env.contents.linked, false);
+      assert.equal(env.contents.title, 'Initialized Demo');
+      assert.equal(env.contents.file_count, 2);
+      assert.equal(env.contents.info.access, 'Public');
+      assert.deepEqual(env.contents.info.tags, ['css', 'demo']);
+    }, 'cdpn-status-unlinked-info-');
+  });
+
+  it('still throws a 400 CliError when .cdpn.json is malformed JSON', async () => {
+    await withTempDir(async (brokenDir) => {
+      await fs.writeFile(path.join(brokenDir, PROJECT_CONFIG_FILENAME), '{ invalid', 'utf8');
       await assert.rejects(
         () =>
           runStatusCommand({
-            cwd: initDir,
+            cwd: brokenDir,
             interactive: false,
             env: {},
             output: createBufferedOutput(),
           }),
-        (err: unknown) => {
-          assert.ok(err instanceof CliError);
-          assert.equal(err.statusCode, 404);
-          assert.match(err.message, /not linked to an online Pen yet/);
-          assert.match(err.message, /`cdpn push`/);
-          return true;
-        },
+        (err: unknown) => err instanceof CliError && err.statusCode === 400,
       );
-    }, 'cdpn-status-unlinked-info-');
+    }, 'cdpn-status-broken-');
   });
 });
 
@@ -261,22 +388,51 @@ describe('cdpn status command (batch tree-walk mode)', () => {
           st.pen = { ...st.pen, saved_version: v2 };
         }
 
-        // 0. Without "all", non-interactive `cdpn status` refuses to auto-walk and advises `cdpn status all`
-        await assert.rejects(
-          () =>
-            runStatusCommand({
-              cwd: col,
-              baseUrl: server.baseUrl,
-              interactive: false,
-              env: {},
-              homeDir: tmpHome,
-              output: createBufferedOutput(),
-            }),
-          (err: unknown) =>
-            err instanceof CliError &&
-            err.statusCode === 404 &&
-            /cdpn status all/i.test(err.message),
-        );
+        // 0. Without "all", non-interactive `cdpn status` does not auto-walk and informs the user (not an error)
+        const noAllOut = createBufferedOutput();
+        const noAllRes = await runStatusCommand({
+          cwd: col,
+          baseUrl: server.baseUrl,
+          interactive: false,
+          env: {},
+          homeDir: tmpHome,
+          output: noAllOut,
+        });
+        assert.ok(noAllRes);
+        assert.equal(noAllRes.state, 'not-a-pen');
+        assert.equal(noAllRes.batch, undefined);
+        assert.equal(noAllRes.exitCode, undefined);
+        assert.equal(noAllOut.stderr(), '');
+        assert.equal(server.requests.length, 0);
+        const noAllText = stripAnsi(noAllOut.stdout());
+        assert.doesNotMatch(noAllText, /^Error:/m);
+        assert.match(noAllText, /not a CodePen Pen/i);
+        assert.match(noAllText, /`cdpn init`/);
+        assert.match(noAllText, /`cdpn status all`/);
+
+        const noAllJsonOut = createBufferedOutput();
+        const noAllJsonRes = await runStatusCommand({
+          cwd: col,
+          json: true,
+          baseUrl: server.baseUrl,
+          interactive: false,
+          env: {},
+          homeDir: tmpHome,
+          output: noAllJsonOut,
+        });
+        assert.equal(noAllJsonRes?.exitCode, undefined);
+        assert.equal(server.requests.length, 0);
+        const noAllEnv = parseJsonOutput<{
+          state: string;
+          initialized: boolean;
+          linked: boolean;
+          has_subdirectories: boolean;
+        }>(noAllJsonOut);
+        assert.equal(noAllEnv.status.code, 204);
+        assert.equal(noAllEnv.contents.state, 'not-a-pen');
+        assert.equal(noAllEnv.contents.initialized, false);
+        assert.equal(noAllEnv.contents.linked, false);
+        assert.equal(noAllEnv.contents.has_subdirectories, true);
 
         // 0b. Explicit directory target `cdpn status 02-local` inspects only that single Pen
         const singleDirStatus = await runStatusCommand({
@@ -289,19 +445,21 @@ describe('cdpn status command (batch tree-walk mode)', () => {
           output: createBufferedOutput(),
         });
         assert.ok(singleDirStatus);
+        assert.equal(singleDirStatus.state, 'linked');
         assert.equal(singleDirStatus.batch, undefined);
         assert.equal(singleDirStatus.pen?.id, 'pen_st_local');
         assert.equal(singleDirStatus.upToDate, false);
 
-        // 0c. Interactive `cdpn status` without "all" offers `cdpn status all` (defaults to No)
+        // 0c. Interactive `cdpn status` without "all" informs user, offers `cdpn status all` (defaults to No), and suggests `cdpn init` on decline
         const declinePrompts: Array<{ q: string; def?: boolean }> = [];
+        const declineOut = createBufferedOutput();
         const declined = await runStatusCommand({
           cwd: col,
           baseUrl: server.baseUrl,
           interactive: true,
           env: {},
           homeDir: tmpHome,
-          output: createBufferedOutput(),
+          output: declineOut,
           prompts: {
             confirm: async (q, def) => {
               declinePrompts.push({ q, def });
@@ -313,6 +471,8 @@ describe('cdpn status command (batch tree-walk mode)', () => {
         assert.equal(declinePrompts.length, 1);
         assert.equal(declinePrompts[0]!.def, false);
         assert.match(declinePrompts[0]!.q, /cdpn status all/);
+        assert.match(stripAnsi(declineOut.stdout()), /not a CodePen Pen/i);
+        assert.match(stripAnsi(declineOut.stdout()), /`cdpn init`/);
 
         // 1. Human-readable `cdpn status all` (no errors -> exitCode undefined)
         const out = createBufferedOutput();

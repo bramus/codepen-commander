@@ -4,12 +4,11 @@ import { CodePenClient } from '../api/client.js';
 import type { Pen } from '../api/types.js';
 import { API_KEY_ENV_VAR, type ResolvedAuth } from '../config/auth.js';
 import {
-  createUnlinkedProjectError,
   findNearestConfig,
   type ProjectLocation,
+  type UnlinkedProjectLocation,
 } from '../config/project.js';
 import { PROJECT_CONFIG_FILENAME } from '../constants.js';
-import { CliError } from '../errors.js';
 import {
   computeSyncDiff,
   detectLocalChangesFromBaseline,
@@ -19,6 +18,7 @@ import {
 import { isDirectoryNonEmpty, scanLocalFiles } from '../sync/fs.js';
 import { analyzeInfoSync, formatInfoValue, type InfoSyncAnalysis } from '../sync/info.js';
 import { fmt, shortId } from '../utils/format.js';
+import { extractHtmlTitle } from '../utils/html.js';
 import { printJsonResponse } from '../utils/json.js';
 import { defaultOutput, type CommandOutput } from '../utils/output.js';
 import { isInteractive, type SelectOption } from '../utils/prompts/index.js';
@@ -53,10 +53,14 @@ export interface RunStatusCommandOptions {
   prompts?: MissingPenPrompts;
 }
 
+export type SingleStatusState = 'linked' | 'unlinked' | 'not-a-pen';
+
 export interface StatusCommandResult {
+  state?: SingleStatusState;
   pen?: Pen;
   auth?: ResolvedAuth;
   project?: ProjectLocation;
+  unlinkedProject?: UnlinkedProjectLocation;
   diff?: SyncDiff;
   infoAnalysis?: InfoSyncAnalysis;
   remoteMoved: boolean;
@@ -131,16 +135,122 @@ export async function runStatusCommand(
       return null;
     }
 
-    const hint = (await isDirectoryNonEmpty(resolvedTarget.targetDir))
-      ? 'Run `cdpn init` to initialize this folder as a CodePen demo.'
-      : 'Run `cdpn clone <url>` to clone a Pen or `cdpn new` to create one.';
-    throw new CliError(
-      404,
-      `No ${PROJECT_CONFIG_FILENAME} found in this directory or any parent directory.\n${hint}`,
+    const hasSubdirs = Boolean(fallback.hasSubdirs);
+    const nonEmpty = hasSubdirs || (await isDirectoryNonEmpty(resolvedTarget.targetDir));
+    const whereSuffix = resolvedTarget.fromExplicitDir
+      ? ` inside ${resolvedTarget.displayDir}`
+      : '';
+    const dirLabel = resolvedTarget.fromExplicitDir
+      ? `"${resolvedTarget.displayDir}"`
+      : 'This directory';
+    const hint = hasSubdirs
+      ? `Run \`cdpn init\` to initialize this folder as a CodePen demo, \`cdpn status all\`${whereSuffix} to check Pens in subdirectories, or \`cdpn status <directory>\` for a specific Pen.`
+      : nonEmpty
+        ? 'Run `cdpn init` to initialize this folder as a CodePen demo.'
+        : 'Run `cdpn clone <url>` to clone a Pen or `cdpn new` to create one.';
+
+    if (options.json) {
+      printJsonResponse(
+        204,
+        `${dirLabel} is not a CodePen Pen (no ${PROJECT_CONFIG_FILENAME} found). ${hint}`,
+        {
+          state: 'not-a-pen',
+          initialized: false,
+          linked: false,
+          target_dir: resolvedTarget.targetDir,
+          has_files: nonEmpty,
+          has_subdirectories: hasSubdirs,
+          pen_id: null,
+          url: null,
+          remote_ahead: false,
+          up_to_date: false,
+        },
+        output,
+      );
+      return {
+        state: 'not-a-pen',
+        remoteMoved: false,
+        upToDate: false,
+      };
+    }
+
+    output.log(
+      `${fmt.cyan('ℹ')} ${dirLabel} is not a CodePen Pen ${fmt.dim(`(no ${PROJECT_CONFIG_FILENAME} found)`)}.`,
     );
+    output.log(fmt.dim(hint));
+
+    return {
+      state: 'not-a-pen',
+      remoteMoved: false,
+      upToDate: false,
+    };
   }
   if (!nearest.linked) {
-    throw createUnlinkedProjectError(nearest.rootDir);
+    const unlinkedProject: UnlinkedProjectLocation = {
+      rootDir: nearest.rootDir,
+      configPath: nearest.configPath,
+      config: nearest.config,
+    };
+    const info = nearest.config.info;
+    const localFiles = await scanLocalFiles(nearest.rootDir);
+    const indexFile = localFiles.get('/index.html');
+    const htmlTitle =
+      indexFile && !indexFile.isBinary && indexFile.textContent
+        ? extractHtmlTitle(indexFile.textContent)
+        : null;
+    const title = info.title?.trim() || htmlTitle || path.basename(nearest.rootDir) || 'Untitled';
+
+    if (options.json) {
+      printJsonResponse(
+        200,
+        'This folder is not linked to an online Pen on CodePen yet. Run `cdpn push` to push this folder as a new Pen on CodePen.',
+        {
+          state: 'unlinked',
+          initialized: true,
+          linked: false,
+          root_dir: nearest.rootDir,
+          config_path: nearest.configPath,
+          title,
+          info,
+          file_count: localFiles.size,
+          pen_id: null,
+          url: null,
+          remote_ahead: false,
+          up_to_date: false,
+        },
+        output,
+      );
+      return {
+        state: 'unlinked',
+        unlinkedProject,
+        remoteMoved: false,
+        upToDate: false,
+      };
+    }
+
+    output.log(`${fmt.bold(title)} ${fmt.dim('(unlinked)')}`);
+    if (nearest.rootDir !== resolvedTarget.targetDir) {
+      output.log(`Folder:   ${fmt.dim(nearest.rootDir)}`);
+    }
+    if (info.access) {
+      output.log(`Access:   ${info.access}${info.template ? fmt.dim(' · Template') : ''}`);
+    } else if (info.template) {
+      output.log('Template: yes');
+    }
+    if (info.tags && info.tags.length > 0) {
+      output.log(`Tags:     ${info.tags.join(', ')}`);
+    }
+    output.log(`Files:    ${localFiles.size} local file(s)`);
+    output.log('');
+    output.log(`${fmt.cyan('ℹ')} This folder is not linked to an online Pen on CodePen yet.`);
+    output.log(fmt.dim('Run `cdpn push` to push this folder as a new Pen on CodePen.'));
+
+    return {
+      state: 'unlinked',
+      unlinkedProject,
+      remoteMoved: false,
+      upToDate: false,
+    };
   }
   const project: ProjectLocation = {
     rootDir: nearest.rootDir,
@@ -220,6 +330,9 @@ export async function runStatusCommand(
       200,
       message,
       {
+        state: 'linked',
+        initialized: true,
+        linked: true,
         pen_id: pen.id,
         title: pen.title,
         editor: pen.editor,
@@ -245,7 +358,7 @@ export async function runStatusCommand(
       },
       output,
     );
-    return { pen, auth, project, diff, infoAnalysis, remoteMoved, upToDate };
+    return { state: 'linked', pen, auth, project, diff, infoAnalysis, remoteMoved, upToDate };
   }
 
   output.log(`${fmt.bold(pen.title || 'Untitled')} ${fmt.dim(`(${pen.id}, ${pen.editor})`)}`);
@@ -303,7 +416,7 @@ export async function runStatusCommand(
         ),
       );
     }
-    return { pen, auth, project, diff, infoAnalysis, remoteMoved, upToDate };
+    return { state: 'linked', pen, auth, project, diff, infoAnalysis, remoteMoved, upToDate };
   }
 
   if (hasFileChanges) {
@@ -372,7 +485,7 @@ export async function runStatusCommand(
     );
   }
 
-  return { pen, auth, project, diff, infoAnalysis, remoteMoved, upToDate };
+  return { state: 'linked', pen, auth, project, diff, infoAnalysis, remoteMoved, upToDate };
 }
 
 export function registerStatusCommand(program: Command): void {

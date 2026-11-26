@@ -727,14 +727,25 @@ describe('end-to-end compiled CLI --json envelopes', () => {
       assert.equal(logoutAll.json.status.code, 200);
       assert.equal((logoutAll.json.contents as { file_deleted: boolean }).file_deleted, true);
 
-      // 4. Missing .cdpn.json -> 404
-      const noProj = await runCliJson(['status', '--json'], {
+      // 4. Missing .cdpn.json -> `status --json` reports informative 204 (not-a-pen); linked commands return 404
+      const noProjStatus = await runCliJson(['status', '--json'], {
         cwd: tmpWork,
         homeDir: tmpHome,
       });
-      assert.equal(noProj.exitCode, 1);
-      assert.equal(noProj.stderr, '');
-      assert.equal(noProj.json.status.code, 404);
+      assert.equal(noProjStatus.exitCode, 0);
+      assert.equal(noProjStatus.stderr, '');
+      assert.equal(noProjStatus.json.status.code, 204);
+      assert.equal((noProjStatus.json.contents as { state: string }).state, 'not-a-pen');
+      assert.equal((noProjStatus.json.contents as { initialized: boolean }).initialized, false);
+      assert.equal((noProjStatus.json.contents as { linked: boolean }).linked, false);
+
+      const noProjInfo = await runCliJson(['info', '--json'], {
+        cwd: tmpWork,
+        homeDir: tmpHome,
+      });
+      assert.equal(noProjInfo.exitCode, 1);
+      assert.equal(noProjInfo.stderr, '');
+      assert.equal(noProjInfo.json.status.code, 404);
 
       // 5. Validation errors -> 400 / 404
       const badLimit = await runCliJson(['list', '--limit', 'abc', '--json'], {
@@ -778,7 +789,7 @@ describe('end-to-end compiled CLI --json envelopes', () => {
       assert.equal(openJson.json.status.code, 400);
       assert.match(openJson.json.status.message, /unknown option '--json'/i);
 
-      // 7. Unlinked info-only .cdpn.json -> linked commands return 404, push --dry-run returns 400, auth status returns 200 with project_profile null
+      // 7. Unlinked info-only .cdpn.json -> status returns informative 200 (unlinked), linked commands return 404, push --dry-run returns 400
       const unlinkedInfoDir = path.join(tmpWork, 'retained-info');
       await fs.mkdir(unlinkedInfoDir, { recursive: true });
       await writeUnlinkedProjectInfo(unlinkedInfoDir, {
@@ -793,10 +804,15 @@ describe('end-to-end compiled CLI --json envelopes', () => {
         cwd: unlinkedInfoDir,
         homeDir: tmpHome,
       });
-      assert.equal(unlinkedStatus.exitCode, 1);
+      assert.equal(unlinkedStatus.exitCode, 0);
       assert.equal(unlinkedStatus.stderr, '');
-      assert.equal(unlinkedStatus.json.status.code, 404);
+      assert.equal(unlinkedStatus.json.status.code, 200);
       assert.match(unlinkedStatus.json.status.message, /not linked to an online Pen/i);
+      assert.match(unlinkedStatus.json.status.message, /`cdpn push`/);
+      assert.equal((unlinkedStatus.json.contents as { state: string }).state, 'unlinked');
+      assert.equal((unlinkedStatus.json.contents as { initialized: boolean }).initialized, true);
+      assert.equal((unlinkedStatus.json.contents as { linked: boolean }).linked, false);
+      assert.equal((unlinkedStatus.json.contents as { title: string }).title, 'Saved Title');
 
       const unlinkedDelete = await runCliJson(['delete', '--yes', '--json'], {
         cwd: unlinkedInfoDir,
