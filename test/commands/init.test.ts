@@ -77,7 +77,11 @@ describe('cdpn init command', () => {
         { question: 'Do you want to push this to CodePen right now?', defaultYes: false },
       ]);
 
-      // Verify validate & fingerprint are locked and checked, packages was auto-checked due to package.json dependencies, and classic is exclusive
+      // Verify validate & fingerprint are locked and checked, packages is last and auto-checked due to package.json dependencies, and classic is not exclusive
+      assert.deepEqual(
+        receivedBlockOptions.map((o) => o.value),
+        ['validate-1', 'fingerprint-1', 'classic-1', 'packages-1'],
+      );
       const validateOpt = receivedBlockOptions.find((o) => o.value === 'validate-1');
       const fingerprintOpt = receivedBlockOptions.find((o) => o.value === 'fingerprint-1');
       const packagesOpt = receivedBlockOptions.find((o) => o.value === 'packages-1');
@@ -91,7 +95,7 @@ describe('cdpn init command', () => {
       assert.equal(packagesOpt?.exclusive, undefined);
       assert.equal(classicOpt?.locked, false);
       assert.equal(classicOpt?.checked, false);
-      assert.equal(classicOpt?.exclusive, true);
+      assert.equal(classicOpt?.exclusive, undefined);
 
       // Verify unlinked .cdpn.json contents
       const parsedCdpn = await readProjectConfigFile(demoDir);
@@ -464,7 +468,7 @@ describe('cdpn init command', () => {
     }
   });
 
-  it('auto-checks packages only when package.json has dependencies, auto-checks classic for index.pen.html, and enforces classic exclusivity', async () => {
+  it('auto-checks packages only when package.json has dependencies, auto-checks classic for index.pen.html, and allows combining classic and packages', async () => {
     const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-init-blocks-rules-'));
     try {
       const inspectInteractiveOptions = async (dir: string): Promise<MultiSelectOption<string>[]> => {
@@ -531,13 +535,13 @@ describe('cdpn init command', () => {
       assert.equal(withDepsOpts.find((o) => o.value === 'packages-1')?.checked, true);
       assert.equal(withDepsOpts.find((o) => o.value === 'classic-1')?.checked, false);
 
-      // 4. index.pen.html present -> classic auto-checked (interactive & non-interactive) + classic.config.json created
+      // 4. index.pen.html present -> classic auto-checked (non-exclusive) + classic.config.json created
       const classicDir = path.join(tmpRoot, 'classic-pen');
       await fs.mkdir(classicDir, { recursive: true });
       await fs.writeFile(path.join(classicDir, 'index.pen.html'), '<h1>Classic</h1>\n');
       const classicOpts = await inspectInteractiveOptions(classicDir);
       assert.equal(classicOpts.find((o) => o.value === 'classic-1')?.checked, true);
-      assert.equal(classicOpts.find((o) => o.value === 'classic-1')?.exclusive, true);
+      assert.equal(classicOpts.find((o) => o.value === 'classic-1')?.exclusive, undefined);
       assert.equal(classicOpts.find((o) => o.value === 'packages-1')?.checked, false);
       const classicNonInt = await runInitCommand({
         cwd: classicDir,
@@ -548,7 +552,7 @@ describe('cdpn init command', () => {
       assert.deepEqual(classicNonInt.blocks, ['classic-1', 'fingerprint-1', 'validate-1']);
       assert.ok((await fs.stat(path.join(classicDir, '.codepen', 'classic.config.json'))).isFile());
 
-      // 5. Both index.pen.html AND package.json with dependencies -> classic wins; never starts with conflicting defaults
+      // 5. Both index.pen.html AND package.json with dependencies -> BOTH classic and packages auto-checked!
       const bothDir = path.join(tmpRoot, 'both-classic-and-pkg');
       await fs.mkdir(bothDir, { recursive: true });
       await fs.writeFile(path.join(bothDir, 'index.pen.html'), '<h1>Classic</h1>\n');
@@ -558,39 +562,39 @@ describe('cdpn init command', () => {
       );
       const bothOpts = await inspectInteractiveOptions(bothDir);
       assert.equal(bothOpts.find((o) => o.value === 'classic-1')?.checked, true);
-      assert.equal(bothOpts.find((o) => o.value === 'packages-1')?.checked, false);
+      assert.equal(bothOpts.find((o) => o.value === 'packages-1')?.checked, true);
+      const bothNonInt = await runInitCommand({
+        cwd: bothDir,
+        interactive: false,
+        force: true,
+        output: createSilentOutput(),
+      });
+      assert.deepEqual(bothNonInt.blocks, [
+        'classic-1',
+        'fingerprint-1',
+        'packages-1',
+        'validate-1',
+      ]);
 
-      // 6. Disallows combining classic with other optional blocks via --blocks or interactive return value
-      await assert.rejects(
-        () =>
-          runInitCommand({
-            cwd: tmpRoot,
-            dirArg: 'conflict-flag-1',
-            blocks: 'classic,packages',
-            interactive: false,
-            output: createSilentOutput(),
-          }),
-        (err: unknown) =>
-          err instanceof CliError &&
-          err.statusCode === 400 &&
-          /Cannot combine the "classic" block/i.test(err.message),
-      );
-      await assert.rejects(
-        () =>
-          runInitCommand({
-            cwd: tmpRoot,
-            dirArg: 'conflict-flag-2',
-            blocks: 'sass,classic',
-            interactive: false,
-            output: createSilentOutput(),
-          }),
-        (err: unknown) =>
-          err instanceof CliError &&
-          err.statusCode === 400 &&
-          /Cannot combine the "classic" block.*sass/i.test(err.message),
+      // 6. Allows combining classic with packages and other optional blocks via --blocks
+      const combined = await runInitCommand({
+        cwd: tmpRoot,
+        dirArg: 'combined-blocks',
+        blocks: 'classic,packages',
+        interactive: false,
+        output: createSilentOutput(),
+      });
+      assert.deepEqual(combined.blocks, [
+        'classic-1',
+        'fingerprint-1',
+        'packages-1',
+        'validate-1',
+      ]);
+      assert.ok(
+        (await fs.stat(path.join(tmpRoot, 'combined-blocks', '.codepen', 'classic.config.json'))).isFile(),
       );
 
-      // 7. Re-initializing with --force switching from packages -> classic prunes packages-1 from pen.config.json
+      // 7. Re-initializing with --force switching from packages -> classic prunes unselected packages-1
       const switchDir = path.join(tmpRoot, 'switch-blocks');
       await runInitCommand({
         cwd: tmpRoot,

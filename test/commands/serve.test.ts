@@ -10,10 +10,11 @@ import { createBufferedOutput, createSilentOutput } from '../helpers/output.js';
 import { withTempDir } from '../helpers/temp-dir.js';
 
 describe('cdpn serve command (pre-serve block checks)', () => {
-  it('suggests adding the classic block when index.pen.html is present, and serves compiled Classic HTML right away', async () => {
-    await withTempDir(async (penDir) => {
-      await writeUnlinkedProjectInfo(penDir, { title: 'Missing Classic Block', access: 'Public' });
+  it('suggests adding the classic block first and the packages block last, allowing both simultaneously and serving compiled Classic HTML with importmap', async () => {
+    await withTempDir(async (tmpRoot) => {
+      const penDir = path.join(tmpRoot, 'classic-and-packages');
       await fs.mkdir(path.join(penDir, '.codepen'), { recursive: true });
+      await writeUnlinkedProjectInfo(penDir, { title: 'Missing Classic & Packages', access: 'Public' });
       await fs.writeFile(
         path.join(penDir, '.codepen', 'pen.config.json'),
         JSON.stringify({
@@ -25,13 +26,13 @@ describe('cdpn serve command (pre-serve block checks)', () => {
       );
       await fs.writeFile(path.join(penDir, 'index.pen.html'), '<main>Hello Classic</main>\n');
       await fs.writeFile(path.join(penDir, 'style.css'), 'main { color: tomato; }\n');
-      // Also include package.json with deps -> once classic is added, packages must NOT be suggested
+      await fs.writeFile(path.join(penDir, 'script.js'), "import gsap from 'gsap';\nconsole.log(gsap);\n");
       await fs.writeFile(
         path.join(penDir, 'package.json'),
         JSON.stringify({ dependencies: { gsap: '3.12.5' } }),
       );
 
-      // 1. Non-interactive warns without modifying .codepen/pen.config.json
+      // 1. Non-interactive warns for both classic (first) and packages (last) without modifying .codepen/pen.config.json
       const nonIntOut = createBufferedOutput();
       const nonIntServer = await runServeCommand({
         cwd: penDir,
@@ -42,13 +43,18 @@ describe('cdpn serve command (pre-serve block checks)', () => {
       });
       try {
         const plain = stripAnsi(nonIntOut.stdout());
-        assert.match(plain, /Found `index\.pen\.html`.*`classic` block is not enabled/);
+        const classicIdx = plain.indexOf('Found `index.pen.html`');
+        const packagesIdx = plain.indexOf('Found `package.json` with dependencies');
+        assert.ok(classicIdx !== -1, plain);
+        assert.ok(packagesIdx !== -1, plain);
+        assert.ok(classicIdx < packagesIdx, 'classic warning must appear before packages warning');
         assert.equal(nonIntServer.inspection.penBlocks?.hasClassic, false);
+        assert.equal(nonIntServer.inspection.penBlocks?.hasPackages, false);
       } finally {
         await nonIntServer.close();
       }
 
-      // 2. Interactive Yes adds classic block, creates classic.config.json, skips packages prompt, and serves compiled HTML
+      // 2. Interactive Yes to both adds classic first, then packages last, and serves compiled Classic HTML with importmap
       const confirms: Array<{ q: string; def?: boolean }> = [];
       const out = createBufferedOutput();
       const running = await runServeCommand({
@@ -66,9 +72,12 @@ describe('cdpn serve command (pre-serve block checks)', () => {
       });
 
       try {
-        assert.deepEqual(confirms, [{ q: 'Add the `classic` block before serving?', def: true }]);
+        assert.deepEqual(confirms, [
+          { q: 'Add the `classic` block before serving?', def: true },
+          { q: 'Add the `packages` block before serving?', def: true },
+        ]);
         assert.equal(running.inspection.penBlocks?.hasClassic, true);
-        assert.equal(running.inspection.penBlocks?.hasPackages, false);
+        assert.equal(running.inspection.penBlocks?.hasPackages, true);
 
         const penCfg = JSON.parse(
           await fs.readFile(path.join(penDir, '.codepen', 'pen.config.json'), 'utf8'),
@@ -76,26 +85,82 @@ describe('cdpn serve command (pre-serve block checks)', () => {
         assert.deepEqual(Object.keys(penCfg.blocks).sort(), [
           'classic-1',
           'fingerprint-1',
+          'packages-1',
           'validate-1',
         ]);
 
         const classicCfg = JSON.parse(
           await fs.readFile(path.join(penDir, '.codepen', 'classic.config.json'), 'utf8'),
-        ) as { styles: string[] };
+        ) as { styles: string[]; scripts: string[] };
         assert.deepEqual(classicCfg.styles, ['/style.css']);
+        assert.deepEqual(classicCfg.scripts, ['/script.js']);
 
         const res = await fetch(`${running.url}/`);
         assert.equal(res.status, 200);
         const html = await res.text();
         assert.ok(html.includes('<main>Hello Classic</main>'), html);
         assert.ok(html.includes('href="./style.css"'), html);
+        assert.ok(html.includes('<script type="module" src="./script.js"></script>'), html);
+        assert.ok(html.includes('<script type="importmap">'), html);
+        assert.ok(html.includes('https://esm.sh/gsap@3.12.5'), html);
       } finally {
         await running.close();
+      }
+
+      // 3. Adding classic when packages is ALREADY enabled preserves packages without re-prompting for packages
+      const existingPkgDir = path.join(tmpRoot, 'existing-packages');
+      await fs.mkdir(path.join(existingPkgDir, '.codepen'), { recursive: true });
+      await writeUnlinkedProjectInfo(existingPkgDir, { title: 'Existing Packages', access: 'Public' });
+      await fs.writeFile(
+        path.join(existingPkgDir, '.codepen', 'pen.config.json'),
+        JSON.stringify({
+          blocks: {
+            'fingerprint-1': { name: 'fingerprint-1', disabled: false, version: 'latest' },
+            'packages-1': { name: 'packages-1', disabled: false, version: 'latest' },
+            'validate-1': { name: 'validate-1', disabled: false, version: 'latest' },
+          },
+        }),
+      );
+      await fs.writeFile(path.join(existingPkgDir, 'index.pen.html'), '<p>Keep Packages</p>\n');
+      await fs.writeFile(
+        path.join(existingPkgDir, 'package.json'),
+        JSON.stringify({ dependencies: { gsap: '3.12.5' } }),
+      );
+
+      const existingPkgConfirms: string[] = [];
+      const existingPkgServer = await runServeCommand({
+        cwd: existingPkgDir,
+        port: '0',
+        allowEphemeralPort: true,
+        interactive: true,
+        output: createSilentOutput(),
+        prompts: {
+          confirm: async (q) => {
+            existingPkgConfirms.push(q);
+            return true;
+          },
+        },
+      });
+      try {
+        assert.deepEqual(existingPkgConfirms, ['Add the `classic` block before serving?']);
+        assert.equal(existingPkgServer.inspection.penBlocks?.hasClassic, true);
+        assert.equal(existingPkgServer.inspection.penBlocks?.hasPackages, true);
+        const penCfg = JSON.parse(
+          await fs.readFile(path.join(existingPkgDir, '.codepen', 'pen.config.json'), 'utf8'),
+        ) as { blocks: Record<string, unknown> };
+        assert.deepEqual(Object.keys(penCfg.blocks).sort(), [
+          'classic-1',
+          'fingerprint-1',
+          'packages-1',
+          'validate-1',
+        ]);
+      } finally {
+        await existingPkgServer.close();
       }
     }, 'cdpn-serve-add-classic-');
   });
 
-  it('when classic is enabled and index.html exists, offers to rename to index.pen.html or remove classic (then runs packages check)', async () => {
+  it('when classic is enabled and index.html exists, offers to rename to index.pen.html or remove classic (and always runs packages check last)', async () => {
     await withTempDir(async (tmpRoot) => {
       const setupClassicWithIndexHtml = async (name: string, withPkgDeps: boolean) => {
         const dir = path.join(tmpRoot, name);
@@ -124,10 +189,10 @@ describe('cdpn serve command (pre-serve block checks)', () => {
         return dir;
       };
 
-      // 1. Choice: rename index.html -> index.pen.html (keeps classic, skips packages check)
+      // 1. Choice: rename index.html -> index.pen.html (keeps classic AND still runs packages check last)
       const renameDir = await setupClassicWithIndexHtml('rename-flow', true);
       let seenSelectOpts: SelectOption<string>[] = [];
-      const renameConfirms: string[] = [];
+      const renameSteps: string[] = [];
       const renameServer = await runServeCommand({
         cwd: renameDir,
         port: '0',
@@ -135,12 +200,13 @@ describe('cdpn serve command (pre-serve block checks)', () => {
         interactive: true,
         output: createSilentOutput(),
         prompts: {
-          select: async (_q, opts) => {
+          select: async (q, opts) => {
             seenSelectOpts = opts;
+            renameSteps.push(`select:${q}`);
             return 'rename' as never;
           },
           confirm: async (q) => {
-            renameConfirms.push(q);
+            renameSteps.push(`confirm:${q}`);
             return true;
           },
         },
@@ -150,21 +216,26 @@ describe('cdpn serve command (pre-serve block checks)', () => {
           seenSelectOpts.map((o) => o.value),
           ['rename', 'remove-classic', 'skip'],
         );
-        assert.deepEqual(renameConfirms, []);
+        assert.deepEqual(renameSteps, [
+          'select:How would you like to proceed?',
+          'confirm:Add the `packages` block before serving?',
+        ]);
         await assert.rejects(() => fs.lstat(path.join(renameDir, 'index.html')));
         assert.ok((await fs.stat(path.join(renameDir, 'index.pen.html'))).isFile());
         assert.equal(renameServer.inspection.penBlocks?.hasClassic, true);
-        assert.equal(renameServer.inspection.penBlocks?.hasPackages, false);
+        assert.equal(renameServer.inspection.penBlocks?.hasPackages, true);
 
         const res = await fetch(`${renameServer.url}/`);
         assert.equal(res.status, 200);
         const body = await res.text();
         assert.ok(body.includes('<h1>Body</h1>'), body);
+        assert.ok(body.includes('<script type="importmap">'), body);
+        assert.ok(body.includes('https://esm.sh/gsap@3.12.5'), body);
       } finally {
         await renameServer.close();
       }
 
-      // 2. Choice: remove-classic -> removes classic block AND THEN prompts to add packages block!
+      // 2. Choice: remove-classic -> removes classic block AND THEN prompts to add packages block
       const removeDir = await setupClassicWithIndexHtml('remove-then-packages', true);
       const stepOrder: string[] = [];
       const removeServer = await runServeCommand({

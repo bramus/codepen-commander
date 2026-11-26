@@ -115,7 +115,7 @@ async function runPreServeBlockChecks(options: {
   let hasClassicPenHtml = inspection.hasClassicPenHtml;
   let skipClassicConfigGeneration = false;
 
-  // 1. Classic checks run first so removing `classic` allows the `packages` check to run afterwards
+  // 1. Classic block checks (run before `packages`)
   if (!hasClassic && hasClassicPenHtml) {
     const notice = `Found \`index.pen.html\`, but the \`classic\` block is not enabled in \`${CODEPEN_DIR}/${PEN_CONFIG_FILENAME}\`.`;
     if (!interactive) {
@@ -123,25 +123,16 @@ async function runPreServeBlockChecks(options: {
     } else {
       output.log('');
       output.log(`${fmt.boldYellow('⚠')} ${fmt.boldYellow(notice)}`);
-      if (hasPackages) {
-        output.log(
-          fmt.dim(
-            `  Note: enabling \`classic\` will replace the \`packages\` block in \`${CODEPEN_DIR}/${PEN_CONFIG_FILENAME}\`.`,
-          ),
-        );
-      }
       output.log('');
       const shouldAddClassic = await confirmImpl('Add the `classic` block before serving?', true);
       if (shouldAddClassic) {
         const existingPenConfig = await readExistingPenConfigSafe(rootRealpath);
         const penConfigPayload = buildPenConfigObject(['classic-1'], {
           existing: existingPenConfig,
-          pruneUnselected: true,
         });
         await writePenConfigSafe(rootRealpath, penConfigPayload);
         const createdClassicConfig = await ensureStarterClassicConfigSafe(rootRealpath);
         hasClassic = true;
-        hasPackages = false;
         output.log(
           `${fmt.boldGreen('✓')} Added ${fmt.cyan('classic')} block to ${fmt.dim(`${CODEPEN_DIR}/${PEN_CONFIG_FILENAME}`)}` +
             (createdClassicConfig
@@ -266,8 +257,8 @@ async function runPreServeBlockChecks(options: {
     }
   }
 
-  // 2. Packages check runs after classic checks (skipped when classic is enabled)
-  if (!hasClassic && !hasPackages) {
+  // 2. Packages check always runs last (after `classic` and any future block checks)
+  if (!hasPackages) {
     const hasPackageDeps = await hasPackageJsonDependencies(rootRealpath);
     if (hasPackageDeps) {
       const notice = `Found \`package.json\` with dependencies, but the \`packages\` block is not enabled in \`${CODEPEN_DIR}/${PEN_CONFIG_FILENAME}\`.`;

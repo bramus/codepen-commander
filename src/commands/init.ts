@@ -4,7 +4,6 @@ import type { Command } from 'commander';
 import type { PenAccess } from '../api/types.js';
 import {
   INIT_BLOCK_CHOICES,
-  assertNoClassicBlockConflict,
   buildPenConfigObject,
   buildStarterClassicConfig,
   hasPackageJsonDependencies,
@@ -154,7 +153,6 @@ export async function runInitCommand(
       typeof options.blocks === 'string'
         ? parseBlocksOption(options.blocks)
         : normalizePenBlocksList(options.blocks);
-    assertNoClassicBlockConflict(explicitBlocks);
   }
 
   assertValidTagCount(options.tags);
@@ -314,7 +312,7 @@ export async function runInitCommand(
     access = existingInfo?.access ?? 'Public';
   }
 
-  // 3. Blocks multi-select (validate & fingerprint are locked; classic is mutually exclusive with other optional blocks)
+  // 3. Blocks multi-select (validate & fingerprint are locked)
   let selectedBlocks: string[];
   if (explicitBlocks !== undefined) {
     selectedBlocks = explicitBlocks;
@@ -326,8 +324,7 @@ export async function runInitCommand(
     ]);
 
     const autoCheckClassic = Boolean(existingPenBlocks?.hasClassic) || hasPenHtml;
-    const autoCheckPackages =
-      !autoCheckClassic && (Boolean(existingPenBlocks?.hasPackages) || hasPackageDeps);
+    const autoCheckPackages = Boolean(existingPenBlocks?.hasPackages) || hasPackageDeps;
 
     if (interactive) {
       const blockOptions: MultiSelectOption<string>[] = INIT_BLOCK_CHOICES.map((choice) => ({
@@ -335,17 +332,15 @@ export async function runInitCommand(
         label: choice.label,
         description: choice.description,
         locked: choice.locked,
-        ...(choice.exclusive ? { exclusive: true } : {}),
         checked:
           choice.locked ||
-          (choice.id === 'packages' && autoCheckPackages) ||
-          (choice.id === 'classic' && autoCheckClassic),
+          (choice.id === 'classic' && autoCheckClassic) ||
+          (choice.id === 'packages' && autoCheckPackages),
       }));
 
       output.log('');
       const picked = await multiSelectImpl('Blocks to add', blockOptions);
       selectedBlocks = normalizePenBlocksList(picked);
-      assertNoClassicBlockConflict(selectedBlocks);
     } else {
       const defaults: string[] = [];
       if (autoCheckClassic) defaults.push('classic-1');

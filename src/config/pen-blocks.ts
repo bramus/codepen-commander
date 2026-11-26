@@ -14,12 +14,11 @@ export { CLASSIC_CONFIG_FILENAME, CODEPEN_DIR, PEN_CONFIG_FILENAME };
 export const REQUIRED_PEN_BLOCKS = ['validate-1', 'fingerprint-1'] as const;
 
 export interface InitBlockChoice {
-  id: 'validate' | 'fingerprint' | 'packages' | 'classic';
+  id: 'validate' | 'fingerprint' | 'classic' | 'packages';
   blockName: string;
   label: string;
   description: string;
   locked: boolean;
-  exclusive?: boolean;
 }
 
 export const INIT_BLOCK_CHOICES: readonly InitBlockChoice[] = Object.freeze([
@@ -38,19 +37,18 @@ export const INIT_BLOCK_CHOICES: readonly InitBlockChoice[] = Object.freeze([
     locked: true,
   },
   {
-    id: 'packages',
-    blockName: 'packages-1',
-    label: 'packages',
-    description: 'npm packages via package.json importmap',
-    locked: false,
-  },
-  {
     id: 'classic',
     blockName: 'classic-1',
     label: 'classic',
     description: 'CodePen Classic mode (.pen.html + classic.config.json)',
     locked: false,
-    exclusive: true,
+  },
+  {
+    id: 'packages',
+    blockName: 'packages-1',
+    label: 'packages',
+    description: 'npm packages via package.json importmap',
+    locked: false,
   },
 ]);
 
@@ -125,35 +123,6 @@ export function parseBlocksOption(raw: string): string[] {
     .map((p) => p.trim())
     .filter(Boolean);
   return normalizePenBlocksList(parts);
-}
-
-const REQUIRED_BLOCK_TYPES = new Set(REQUIRED_PEN_BLOCKS.map((b) => normalizeBlockType(b)));
-
-/**
- * Validates that the `classic` block is not combined with any other non-required block.
- * Throws a `400 CliError` when `classic` appears alongside other optional blocks.
- */
-export function assertNoClassicBlockConflict(rawBlocks: readonly string[]): void {
-  const normalized = normalizePenBlocksList(rawBlocks);
-  let hasClassic = false;
-  const otherOptional: string[] = [];
-
-  for (const block of normalized) {
-    const blockType = normalizeBlockType(block);
-    if (REQUIRED_BLOCK_TYPES.has(blockType)) continue;
-    if (blockType === 'classic') {
-      hasClassic = true;
-    } else {
-      otherOptional.push(blockType);
-    }
-  }
-
-  if (hasClassic && otherOptional.length > 0) {
-    throw new CliError(
-      400,
-      `Cannot combine the "classic" block with other optional blocks (${otherOptional.join(', ')}).`,
-    );
-  }
 }
 
 /**
