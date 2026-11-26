@@ -3,8 +3,10 @@ import path from 'node:path';
 import type { Command } from 'commander';
 import {
   buildPenConfigObject,
+  ensureRequiredPenConfigSafe,
   ensureStarterClassicConfigSafe,
   hasPackageJsonDependencies,
+  normalizeBlockType,
   readExistingPenConfigSafe,
   removeBlocksFromPenConfig,
   writePenConfigSafe,
@@ -109,6 +111,28 @@ async function runPreServeBlockChecks(options: {
   }
 
   const rootRealpath = inspection.rootRealpath;
+
+  // 0. Ensure `.codepen/pen.config.json` exists and contains required mandatory blocks (`validate`, `fingerprint`)
+  const penConfigResult = await ensureRequiredPenConfigSafe(rootRealpath);
+  if (penConfigResult.action === 'invalid') {
+    warnings.push(
+      `Could not parse \`${CODEPEN_DIR}/${PEN_CONFIG_FILENAME}\` — fix the JSON syntax to enable block checks.`,
+    );
+    return warnings;
+  }
+  if (penConfigResult.action === 'created') {
+    const names = penConfigResult.addedBlocks.map((b) => normalizeBlockType(b)).join(', ');
+    output.log(
+      `${fmt.boldGreen('✓')} Generated missing ${fmt.cyan(`${CODEPEN_DIR}/${PEN_CONFIG_FILENAME}`)} ${fmt.dim(`(${names})`)}.`,
+    );
+  } else if (penConfigResult.action === 'amended') {
+    const names = penConfigResult.addedBlocks.map((b) => normalizeBlockType(b)).join(', ');
+    const noun = penConfigResult.addedBlocks.length === 1 ? 'block' : 'blocks';
+    output.log(
+      `${fmt.boldGreen('✓')} Added missing required ${noun} to ${fmt.cyan(`${CODEPEN_DIR}/${PEN_CONFIG_FILENAME}`)}: ${fmt.cyan(names)}.`,
+    );
+  }
+
   let hasClassic = Boolean(inspection.penBlocks?.hasClassic);
   let hasPackages = Boolean(inspection.penBlocks?.hasPackages);
   let hasIndexHtml = inspection.hasIndexHtml;

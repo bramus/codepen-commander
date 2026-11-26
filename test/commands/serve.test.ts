@@ -334,12 +334,13 @@ describe('cdpn serve command (pre-serve block checks)', () => {
       });
       try {
         assert.equal(noDepsPrompted, false);
-        assert.equal(noDepsServer.inspection.hasCodepenDir, false);
+        assert.equal(noDepsServer.inspection.hasPenConfig, true);
+        assert.equal(noDepsServer.inspection.penBlocks?.hasPackages, false);
       } finally {
         await noDepsServer.close();
       }
 
-      // 2. package.json WITH dependencies (even with missing .codepen/ dir) -> offers adding packages block
+      // 2. package.json WITH dependencies (even with missing .codepen/ dir) -> generates pen.config.json and offers adding packages block
       const withDepsDir = path.join(tmpRoot, 'with-deps');
       await fs.mkdir(withDepsDir, { recursive: true });
       await writeUnlinkedProjectInfo(withDepsDir, { title: 'With Deps', access: 'Public' });
@@ -520,5 +521,207 @@ describe('cdpn serve command (pre-serve block checks)', () => {
         await running2.close();
       }
     }, 'cdpn-serve-missing-classic-cfg-');
+  });
+
+  it('generates missing .codepen/pen.config.json and amends missing or disabled required blocks while preserving existing blocks', async () => {
+    await withTempDir(async (tmpRoot) => {
+      // 1. Empty `.codepen/` dir (like `new-demo`) -> generates `.codepen/pen.config.json` with validate & fingerprint
+      const emptyCodepenDir = path.join(tmpRoot, 'empty-codepen');
+      await fs.mkdir(path.join(emptyCodepenDir, '.codepen'), { recursive: true });
+      await writeUnlinkedProjectInfo(emptyCodepenDir, { title: 'Empty CodePen Dir', access: 'Private' });
+      await fs.writeFile(path.join(emptyCodepenDir, 'index.html'), '<h1>Hello</h1>');
+
+      const out1 = createBufferedOutput();
+      const srv1 = await runServeCommand({
+        cwd: emptyCodepenDir,
+        port: '0',
+        allowEphemeralPort: true,
+        interactive: false,
+        output: out1,
+      });
+      try {
+        assert.match(
+          stripAnsi(out1.stdout()),
+          /Generated missing \.codepen\/pen\.config\.json \(validate, fingerprint\)/,
+        );
+        assert.equal(srv1.inspection.hasPenConfig, true);
+        const penCfg = JSON.parse(
+          await fs.readFile(path.join(emptyCodepenDir, '.codepen', 'pen.config.json'), 'utf8'),
+        ) as { blocks: Record<string, { disabled: boolean; name: string; version: string }> };
+        assert.deepEqual(Object.keys(penCfg.blocks).sort(), ['fingerprint-1', 'validate-1']);
+        assert.equal(penCfg.blocks['validate-1']?.disabled, false);
+        assert.equal(penCfg.blocks['fingerprint-1']?.disabled, false);
+      } finally {
+        await srv1.close();
+      }
+
+      // Re-serving now that required blocks exist leaves pen.config.json untouched
+      const out1Again = createBufferedOutput();
+      const srv1Again = await runServeCommand({
+        cwd: emptyCodepenDir,
+        port: '0',
+        allowEphemeralPort: true,
+        interactive: false,
+        output: out1Again,
+      });
+      try {
+        assert.doesNotMatch(
+          stripAnsi(out1Again.stdout()),
+          /Generated missing|Added missing required/,
+        );
+      } finally {
+        await srv1Again.close();
+      }
+
+      // 2. Existing pen.config.json missing both required blocks -> amends while preserving existing blocks & metadata
+      const missingReqDir = path.join(tmpRoot, 'missing-required');
+      await fs.mkdir(path.join(missingReqDir, '.codepen'), { recursive: true });
+      await writeUnlinkedProjectInfo(missingReqDir, { title: 'Missing Required', access: 'Public' });
+      await fs.writeFile(path.join(missingReqDir, 'index.html'), '<h1>Pkg</h1>');
+      await fs.writeFile(
+        path.join(missingReqDir, '.codepen', 'pen.config.json'),
+        JSON.stringify({
+          blocks: {
+            'packages-1': {
+              createdAt: '2026-01-01T00:00:00.000Z',
+              disabled: false,
+              name: 'packages-1',
+              version: '1.2.3',
+            },
+          },
+        }),
+      );
+
+      const out2 = createBufferedOutput();
+      const srv2 = await runServeCommand({
+        cwd: missingReqDir,
+        port: '0',
+        allowEphemeralPort: true,
+        interactive: false,
+        output: out2,
+      });
+      try {
+        assert.match(
+          stripAnsi(out2.stdout()),
+          /Added missing required blocks to \.codepen\/pen\.config\.json: validate, fingerprint\./,
+        );
+        const penCfg = JSON.parse(
+          await fs.readFile(path.join(missingReqDir, '.codepen', 'pen.config.json'), 'utf8'),
+        ) as { blocks: Record<string, { createdAt: string; disabled: boolean; version: string }> };
+        assert.deepEqual(Object.keys(penCfg.blocks).sort(), [
+          'fingerprint-1',
+          'packages-1',
+          'validate-1',
+        ]);
+        assert.equal(penCfg.blocks['packages-1']?.createdAt, '2026-01-01T00:00:00.000Z');
+        assert.equal(penCfg.blocks['packages-1']?.version, '1.2.3');
+        assert.equal(penCfg.blocks['validate-1']?.disabled, false);
+        assert.equal(penCfg.blocks['fingerprint-1']?.disabled, false);
+      } finally {
+        await srv2.close();
+      }
+
+      // 3. Disabled required block -> re-enables in place while preserving createdAt
+      const disabledReqDir = path.join(tmpRoot, 'disabled-required');
+      await fs.mkdir(path.join(disabledReqDir, '.codepen'), { recursive: true });
+      await writeUnlinkedProjectInfo(disabledReqDir, { title: 'Disabled Required', access: 'Public' });
+      await fs.writeFile(path.join(disabledReqDir, 'index.html'), '<h1>Disabled</h1>');
+      await fs.writeFile(
+        path.join(disabledReqDir, '.codepen', 'pen.config.json'),
+        JSON.stringify({
+          blocks: {
+            'fingerprint-1': {
+              createdAt: '2026-02-02T00:00:00.000Z',
+              disabled: false,
+              name: 'fingerprint-1',
+              version: 'latest',
+            },
+            'validate-1': {
+              createdAt: '2026-02-01T00:00:00.000Z',
+              disabled: true,
+              name: 'validate-1',
+              version: 'latest',
+            },
+          },
+        }),
+      );
+
+      const out3 = createBufferedOutput();
+      const srv3 = await runServeCommand({
+        cwd: disabledReqDir,
+        port: '0',
+        allowEphemeralPort: true,
+        interactive: false,
+        output: out3,
+      });
+      try {
+        assert.match(
+          stripAnsi(out3.stdout()),
+          /Added missing required block to \.codepen\/pen\.config\.json: validate\./,
+        );
+        const penCfg = JSON.parse(
+          await fs.readFile(path.join(disabledReqDir, '.codepen', 'pen.config.json'), 'utf8'),
+        ) as { blocks: Record<string, { createdAt: string; disabled: boolean }> };
+        assert.equal(penCfg.blocks['validate-1']?.disabled, false);
+        assert.equal(penCfg.blocks['validate-1']?.createdAt, '2026-02-01T00:00:00.000Z');
+      } finally {
+        await srv3.close();
+      }
+
+      // 4. Malformed JSON in pen.config.json -> warns without overwriting broken file
+      const badJsonDir = path.join(tmpRoot, 'bad-json');
+      await fs.mkdir(path.join(badJsonDir, '.codepen'), { recursive: true });
+      await writeUnlinkedProjectInfo(badJsonDir, { title: 'Bad JSON', access: 'Public' });
+      await fs.writeFile(path.join(badJsonDir, 'index.html'), '<h1>Bad</h1>');
+      await fs.writeFile(path.join(badJsonDir, '.codepen', 'pen.config.json'), '{ not valid json');
+
+      const out4 = createBufferedOutput();
+      const srv4 = await runServeCommand({
+        cwd: badJsonDir,
+        port: '0',
+        allowEphemeralPort: true,
+        interactive: false,
+        output: out4,
+      });
+      try {
+        assert.match(stripAnsi(out4.stdout()), /Could not parse `\.codepen\/pen\.config\.json`/);
+        assert.equal(
+          await fs.readFile(path.join(badJsonDir, '.codepen', 'pen.config.json'), 'utf8'),
+          '{ not valid json',
+        );
+      } finally {
+        await srv4.close();
+      }
+
+      // 5. Linked Classic Pen (editor: 'Classic', no .codepen/) -> does NOT create .codepen/pen.config.json
+      const linkedClassicDir = path.join(tmpRoot, 'linked-classic');
+      await fs.mkdir(linkedClassicDir, { recursive: true });
+      await fs.writeFile(
+        path.join(linkedClassicDir, '.cdpn.json'),
+        JSON.stringify({
+          url: 'https://codepen.io/bramus/pen/abc123',
+          pen_id: 'abc123',
+          last_synced_version_id: 'v1',
+          editor: 'Classic',
+          info: { title: 'Classic 1.0 Pen' },
+          files: {},
+        }),
+      );
+      await fs.writeFile(path.join(linkedClassicDir, 'index.html'), '<h1>Old Classic</h1>');
+
+      const srv5 = await runServeCommand({
+        cwd: linkedClassicDir,
+        port: '0',
+        allowEphemeralPort: true,
+        interactive: false,
+        output: createSilentOutput(),
+      });
+      try {
+        assert.equal(srv5.inspection.hasCodepenDir, false);
+        await assert.rejects(() => fs.lstat(path.join(linkedClassicDir, '.codepen')));
+      } finally {
+        await srv5.close();
+      }
+    }, 'cdpn-serve-pen-config-');
   });
 });

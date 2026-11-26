@@ -355,7 +355,7 @@ export async function readExistingPenConfigSafe(
  */
 export async function writePenConfigSafe(
   rootRealpath: string,
-  payload: { blocks: Record<string, { createdAt: string; disabled: boolean; name: string; version: string }> },
+  payload: { blocks: Record<string, unknown>; [key: string]: unknown },
 ): Promise<string> {
   const realCodepenDir = await ensureCodepenDirSafe(rootRealpath);
   const penConfigPath = path.join(realCodepenDir, PEN_CONFIG_FILENAME);
@@ -374,6 +374,167 @@ export async function writePenConfigSafe(
   }
   await fs.writeFile(penConfigPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
   return penConfigPath;
+}
+
+export interface EnsurePenConfigResult {
+  action: 'created' | 'amended' | 'unchanged' | 'invalid';
+  addedBlocks: string[];
+}
+
+const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * Ensures `<rootRealpath>/.codepen/pen.config.json` exists and has all required mandatory
+ * blocks (`validate-1`, `fingerprint-1`) enabled (`disabled !== true`).
+ * - Creates `.codepen/pen.config.json` with the required blocks when missing.
+ * - Amends an existing `pen.config.json` when any required block is missing or disabled,
+ *   preserving all other blocks and fields.
+ * - Leaves valid configs that already have all required blocks enabled untouched.
+ * - Returns `{ action: 'invalid' }` without overwriting if an existing file is malformed JSON.
+ */
+export async function ensureRequiredPenConfigSafe(
+  rootRealpath: string,
+  options: { nowIso?: string } = {},
+): Promise<EnsurePenConfigResult> {
+  const realCodepenDir = await ensureCodepenDirSafe(rootRealpath);
+  const penConfigPath = path.join(realCodepenDir, PEN_CONFIG_FILENAME);
+  if (!isWithinRoot(penConfigPath, rootRealpath)) {
+    throw new CliError(
+      400,
+      `${CODEPEN_DIR}/${PEN_CONFIG_FILENAME} resolves outside the target directory.`,
+    );
+  }
+
+  let exists = false;
+  try {
+    const stat = await fs.lstat(penConfigPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new CliError(400, `${CODEPEN_DIR}/${PEN_CONFIG_FILENAME} must be a regular file.`);
+    }
+    exists = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const nowIso = options.nowIso ?? new Date().toISOString();
+
+  if (!exists) {
+    const starter = buildPenConfigObject([], { nowIso });
+    await fs.writeFile(penConfigPath, `${JSON.stringify(starter, null, 2)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+    });
+    return {
+      action: 'created',
+      addedBlocks: [...REQUIRED_PEN_BLOCKS],
+    };
+  }
+
+  const realPath = await fs.realpath(penConfigPath);
+  if (!isWithinRoot(realPath, rootRealpath)) {
+    throw new CliError(
+      400,
+      `${CODEPEN_DIR}/${PEN_CONFIG_FILENAME} resolves outside the target directory.`,
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    const raw = await fs.readFile(realPath, 'utf8');
+    parsed = JSON.parse(raw);
+  } catch {
+    return { action: 'invalid', addedBlocks: [] };
+  }
+
+  if (!isPlainObject(parsed)) {
+    return { action: 'invalid', addedBlocks: [] };
+  }
+
+  const existingBlocks = isPlainObject(parsed.blocks) ? parsed.blocks : null;
+  const enabledTypes = new Set<string>();
+  const existingKeyByType = new Map<string, string>();
+
+  if (existingBlocks) {
+    for (const [key, entry] of Object.entries(existingBlocks)) {
+      if (UNSAFE_OBJECT_KEYS.has(key) || !isPlainObject(entry)) continue;
+      const rawName =
+        typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : key;
+      const blockType = normalizeBlockType(rawName);
+      if (!blockType) continue;
+      if (!existingKeyByType.has(blockType) || key === `${blockType}-1`) {
+        existingKeyByType.set(blockType, key);
+      }
+      if (entry.disabled !== true) {
+        enabledTypes.add(blockType);
+      }
+    }
+  }
+
+  const missingRequired = REQUIRED_PEN_BLOCKS.filter(
+    (req) => !enabledTypes.has(normalizeBlockType(req)),
+  );
+  if (missingRequired.length === 0 && existingBlocks !== null) {
+    return { action: 'unchanged', addedBlocks: [] };
+  }
+
+  const mergedBlocks: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  if (existingBlocks) {
+    for (const [key, entry] of Object.entries(existingBlocks)) {
+      if (UNSAFE_OBJECT_KEYS.has(key)) continue;
+      mergedBlocks[key] = entry;
+    }
+  }
+
+  for (const req of missingRequired) {
+    const reqType = normalizeBlockType(req);
+    const existingKey = existingKeyByType.get(reqType);
+    const prevEntry = existingKey ? mergedBlocks[existingKey] : undefined;
+    if (existingKey && isPlainObject(prevEntry)) {
+      mergedBlocks[existingKey] = {
+        ...prevEntry,
+        createdAt:
+          typeof prevEntry.createdAt === 'string' && prevEntry.createdAt.trim()
+            ? prevEntry.createdAt.trim()
+            : nowIso,
+        disabled: false,
+        name:
+          typeof prevEntry.name === 'string' && prevEntry.name.trim()
+            ? prevEntry.name.trim()
+            : existingKey,
+        version:
+          typeof prevEntry.version === 'string' && prevEntry.version.trim()
+            ? prevEntry.version.trim()
+            : 'latest',
+      };
+    } else {
+      mergedBlocks[req] = {
+        createdAt: nowIso,
+        disabled: false,
+        name: req,
+        version: 'latest',
+      };
+    }
+  }
+
+  const sortedBlocks: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of Object.keys(mergedBlocks).sort((a, b) => a.localeCompare(b))) {
+    sortedBlocks[key] = mergedBlocks[key];
+  }
+
+  const amendedPayload: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(parsed)) {
+    if (UNSAFE_OBJECT_KEYS.has(key)) continue;
+    amendedPayload[key] = value;
+  }
+  amendedPayload.blocks = sortedBlocks;
+
+  await writePenConfigSafe(rootRealpath, amendedPayload as { blocks: Record<string, unknown> });
+  return {
+    action: 'amended',
+    addedBlocks: [...missingRequired],
+  };
 }
 
 /**
