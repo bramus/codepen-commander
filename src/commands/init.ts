@@ -7,6 +7,7 @@ import {
   assertNoClassicBlockConflict,
   buildPenConfigObject,
   buildStarterClassicConfig,
+  hasPackageJsonDependencies,
   normalizePenBlocksList,
   parseBlocksOption,
 } from '../config/pen-blocks.js';
@@ -35,7 +36,6 @@ import { fmt } from '../utils/format.js';
 import {
   fileExistsRegular,
   isWithinRoot,
-  readSafeJsonObject,
   resolveSafeFile,
 } from '../utils/fs-safe.js';
 import { extractHtmlTitle } from '../utils/html.js';
@@ -130,20 +130,6 @@ async function pathExists(filePath: string): Promise<boolean> {
     }
     throw error;
   }
-}
-
-async function hasPackageJsonDependencies(dirRealpath: string): Promise<boolean> {
-  const pkgJson = await readSafeJsonObject(path.join(dirRealpath, 'package.json'), dirRealpath);
-  if (!pkgJson || !isPlainObject(pkgJson.dependencies)) {
-    return false;
-  }
-  return Object.entries(pkgJson.dependencies).some(
-    ([name, version]) =>
-      typeof name === 'string' &&
-      name.trim().length > 0 &&
-      typeof version === 'string' &&
-      version.trim().length > 0,
-  );
 }
 
 export async function runInitCommand(

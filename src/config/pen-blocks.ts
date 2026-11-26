@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   CLASSIC_CONFIG_FILENAME,
@@ -5,7 +6,7 @@ import {
   PEN_CONFIG_FILENAME,
 } from '../constants.js';
 import { CliError } from '../errors.js';
-import { fileExistsRegular } from '../utils/fs-safe.js';
+import { fileExistsRegular, isWithinRoot, readSafeJsonObject } from '../utils/fs-safe.js';
 import { hasControlChars, isPlainObject } from '../utils/strings.js';
 
 export { CLASSIC_CONFIG_FILENAME, CODEPEN_DIR, PEN_CONFIG_FILENAME };
@@ -247,4 +248,191 @@ export async function buildStarterClassicConfig(penDir: string): Promise<Starter
     scripts: hasScriptJs ? ['/script.js'] : [],
     styles: hasStyleCss ? ['/style.css'] : [],
   };
+}
+
+/**
+ * Removes blocks whose normalized type matches any entry in `blockTypesToRemove` from an existing
+ * `pen.config.json` object, while preserving remaining blocks and guaranteeing required blocks.
+ */
+export function removeBlocksFromPenConfig(
+  existing: Record<string, unknown> | null | undefined,
+  blockTypesToRemove: readonly string[],
+  options: { nowIso?: string } = {},
+): { blocks: Record<string, { createdAt: string; disabled: boolean; name: string; version: string }> } {
+  const removeSet = new Set(blockTypesToRemove.map((b) => normalizeBlockType(b)));
+  const nowIso = options.nowIso ?? new Date().toISOString();
+  const existingBlocks = existing && isPlainObject(existing.blocks) ? existing.blocks : {};
+
+  type BlockEntry = { createdAt: string; disabled: boolean; name: string; version: string };
+  const remaining: Record<string, BlockEntry> = {};
+
+  for (const [key, entry] of Object.entries(existingBlocks)) {
+    if (!isPlainObject(entry)) continue;
+    const name = typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : key;
+    if (removeSet.has(normalizeBlockType(name)) || removeSet.has(normalizeBlockType(key))) {
+      continue;
+    }
+    const createdAt =
+      typeof entry.createdAt === 'string' && entry.createdAt.trim() ? entry.createdAt.trim() : nowIso;
+    const version =
+      typeof entry.version === 'string' && entry.version.trim() ? entry.version.trim() : 'latest';
+    remaining[key] = {
+      createdAt,
+      disabled: Boolean(entry.disabled),
+      name,
+      version,
+    };
+  }
+
+  for (const required of REQUIRED_PEN_BLOCKS) {
+    const prev = remaining[required];
+    remaining[required] = {
+      createdAt: prev?.createdAt ?? nowIso,
+      disabled: false,
+      name: required,
+      version: prev?.version ?? 'latest',
+    };
+  }
+
+  const sortedBlocks: Record<string, BlockEntry> = {};
+  for (const key of Object.keys(remaining).sort((a, b) => a.localeCompare(b))) {
+    sortedBlocks[key] = remaining[key]!;
+  }
+
+  return { blocks: sortedBlocks };
+}
+
+/**
+ * Checks whether `<dirRealpath>/package.json` exists as a regular, root-contained JSON file
+ * containing at least one non-empty entry in `dependencies`.
+ */
+export async function hasPackageJsonDependencies(dirRealpath: string): Promise<boolean> {
+  const pkgJson = await readSafeJsonObject(path.join(dirRealpath, 'package.json'), dirRealpath);
+  if (!pkgJson || !isPlainObject(pkgJson.dependencies)) {
+    return false;
+  }
+  return Object.entries(pkgJson.dependencies).some(
+    ([name, version]) =>
+      typeof name === 'string' &&
+      name.trim().length > 0 &&
+      typeof version === 'string' &&
+      version.trim().length > 0,
+  );
+}
+
+/**
+ * Ensures `<rootRealpath>/.codepen` exists as a regular directory strictly inside `rootRealpath`
+ * (refusing symlinks or escapes).
+ */
+export async function ensureCodepenDirSafe(rootRealpath: string): Promise<string> {
+  const codepenDir = path.join(rootRealpath, CODEPEN_DIR);
+  try {
+    const stat = await fs.lstat(codepenDir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new CliError(
+        400,
+        `${CODEPEN_DIR} must be a regular directory (symlinks are not allowed).`,
+      );
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      await fs.mkdir(codepenDir, { recursive: true });
+    } else {
+      throw error;
+    }
+  }
+
+  const realCodepenDir = await fs.realpath(codepenDir);
+  if (!isWithinRoot(realCodepenDir, rootRealpath)) {
+    throw new CliError(400, `${CODEPEN_DIR} resolves outside the target directory.`);
+  }
+  return realCodepenDir;
+}
+
+/**
+ * Safely reads `<rootRealpath>/.codepen/pen.config.json` as a plain JSON object if it exists.
+ * Rejects symlinked or non-regular `.codepen/pen.config.json`.
+ */
+export async function readExistingPenConfigSafe(
+  rootRealpath: string,
+): Promise<Record<string, unknown> | null> {
+  const penConfigPath = path.join(rootRealpath, CODEPEN_DIR, PEN_CONFIG_FILENAME);
+  try {
+    const stat = await fs.lstat(penConfigPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new CliError(400, `${CODEPEN_DIR}/${PEN_CONFIG_FILENAME} must be a regular file.`);
+    }
+    const realPath = await fs.realpath(penConfigPath);
+    if (!isWithinRoot(realPath, rootRealpath)) {
+      throw new CliError(400, `${CODEPEN_DIR}/${PEN_CONFIG_FILENAME} resolves outside the target directory.`);
+    }
+    const raw = await fs.readFile(realPath, 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    return isPlainObject(parsed) ? parsed : null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    if (error instanceof CliError) {
+      throw error;
+    }
+    return null;
+  }
+}
+
+/**
+ * Safely writes `<rootRealpath>/.codepen/pen.config.json`, ensuring `.codepen/` is a regular
+ * root-contained directory and `pen.config.json` is not a symlink.
+ */
+export async function writePenConfigSafe(
+  rootRealpath: string,
+  payload: { blocks: Record<string, { createdAt: string; disabled: boolean; name: string; version: string }> },
+): Promise<string> {
+  const realCodepenDir = await ensureCodepenDirSafe(rootRealpath);
+  const penConfigPath = path.join(realCodepenDir, PEN_CONFIG_FILENAME);
+  if (!isWithinRoot(penConfigPath, rootRealpath)) {
+    throw new CliError(400, `${CODEPEN_DIR}/${PEN_CONFIG_FILENAME} resolves outside the target directory.`);
+  }
+  try {
+    const stat = await fs.lstat(penConfigPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new CliError(400, `${CODEPEN_DIR}/${PEN_CONFIG_FILENAME} must be a regular file.`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  await fs.writeFile(penConfigPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  return penConfigPath;
+}
+
+/**
+ * Creates a starter `<rootRealpath>/.codepen/classic.config.json` if it does not already exist.
+ * Returns `true` when created, `false` when already present.
+ */
+export async function ensureStarterClassicConfigSafe(rootRealpath: string): Promise<boolean> {
+  const realCodepenDir = await ensureCodepenDirSafe(rootRealpath);
+  const classicConfigPath = path.join(realCodepenDir, CLASSIC_CONFIG_FILENAME);
+  if (!isWithinRoot(classicConfigPath, rootRealpath)) {
+    throw new CliError(400, `${CODEPEN_DIR}/${CLASSIC_CONFIG_FILENAME} resolves outside the target directory.`);
+  }
+  try {
+    const stat = await fs.lstat(classicConfigPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new CliError(400, `${CODEPEN_DIR}/${CLASSIC_CONFIG_FILENAME} must be a regular file.`);
+    }
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const starter = await buildStarterClassicConfig(rootRealpath);
+  await fs.writeFile(classicConfigPath, `${JSON.stringify(starter, null, 2)}\n`, {
+    encoding: 'utf8',
+    flag: 'wx',
+  });
+  return true;
 }
