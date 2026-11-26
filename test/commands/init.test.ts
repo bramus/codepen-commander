@@ -10,8 +10,9 @@ import { readProjectConfigFile, writeProjectConfig } from '../../src/config/proj
 import { saveProfileToFile } from '../../src/config/user-store.js';
 import { CliError } from '../../src/errors.js';
 import { startDevServer } from '../../src/site/server.js';
+import { stripAnsi } from '../../src/utils/format.js';
 import type { MultiSelectOption } from '../../src/utils/prompts/index.js';
-import { createSilentOutput } from '../helpers/output.js';
+import { createBufferedOutput, createSilentOutput } from '../helpers/output.js';
 
 describe('cdpn init command', () => {
   it('asks interactively only for title, visibility, blocks (with validate & fingerprint locked), and push confirmation (default No)', async () => {
@@ -66,12 +67,13 @@ describe('cdpn init command', () => {
       assert.equal(res.aborted, false);
       assert.equal(res.pushed, false);
       assert.equal(res.pushResult, null);
-      // Verify ONLY title, visibility, blocks, and post-init push offer (default No) were prompted
+      // Verify title, visibility, blocks, Classic rename offer (default Yes), and post-init push offer (default No) were prompted
       assert.equal(askedText.length, 1);
       assert.equal(askedText[0]?.question, 'Pen title');
       assert.equal(askedText[0]?.defaultValue, 'Scroll Cards HTML Title');
       assert.deepEqual(askedSelect, ['Pen visibility']);
       assert.deepEqual(askedConfirm, [
+        { question: 'Rename index.html to index.pen.html?', defaultYes: true },
         { question: 'Do you want to push this to CodePen right now?', defaultYes: false },
       ]);
 
@@ -612,6 +614,165 @@ describe('cdpn init command', () => {
         'fingerprint-1',
         'validate-1',
       ]);
+    } finally {
+      await fs.rm(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('offers to rename index.html or create index.pen.html after choosing classic, and skips when index.pen.html already exists', async () => {
+    const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cdpn-init-classic-html-'));
+    try {
+      // 1. index.html exists (no index.pen.html) -> offers rename; accepting renames file and keeps content
+      const renameDir = path.join(tmpRoot, 'rename-yes');
+      await fs.mkdir(renameDir, { recursive: true });
+      await fs.writeFile(path.join(renameDir, 'index.html'), '<main>Hello Classic</main>\n', 'utf8');
+
+      const renameConfirms: Array<{ q: string; def?: boolean }> = [];
+      const renameOut = createBufferedOutput();
+      const renameRes = await runInitCommand({
+        cwd: renameDir,
+        interactive: true,
+        output: renameOut,
+        prompts: {
+          text: async () => 'Renamed Classic',
+          select: async () => 'Public' as never,
+          multiSelect: async () => ['classic-1'] as never,
+          confirm: async (q, def) => {
+            renameConfirms.push({ q, def });
+            return q.startsWith('Rename index.html');
+          },
+        },
+      });
+      assert.deepEqual(renameConfirms, [
+        { q: 'Rename index.html to index.pen.html?', def: true },
+        { q: 'Do you want to push this to CodePen right now?', def: false },
+      ]);
+      assert.ok(renameRes.writtenFiles.includes('index.pen.html'));
+      await assert.rejects(() => fs.lstat(path.join(renameDir, 'index.html')));
+      assert.equal(
+        await fs.readFile(path.join(renameDir, 'index.pen.html'), 'utf8'),
+        '<main>Hello Classic</main>\n',
+      );
+      const renameStdout = stripAnsi(renameOut.stdout());
+      assert.ok(
+        renameStdout.includes(
+          '\n⚠ The classic block requires an `index.pen.html` file, which was not found in this folder.\n\n',
+        ),
+        renameStdout,
+      );
+      assert.match(renameStdout, /index\.html → index\.pen\.html/);
+
+      // 1b. Declining rename leaves index.html intact and does not create index.pen.html
+      const renameDeclineDir = path.join(tmpRoot, 'rename-no');
+      await fs.mkdir(renameDeclineDir, { recursive: true });
+      await fs.writeFile(path.join(renameDeclineDir, 'index.html'), '<p>Keep me</p>\n', 'utf8');
+      const renameNoRes = await runInitCommand({
+        cwd: renameDeclineDir,
+        interactive: true,
+        output: createSilentOutput(),
+        prompts: {
+          text: async () => 'Keep HTML',
+          select: async () => 'Public' as never,
+          multiSelect: async () => ['classic-1'] as never,
+          confirm: async () => false,
+        },
+      });
+      assert.equal(renameNoRes.writtenFiles.includes('index.pen.html'), false);
+      assert.equal(
+        await fs.readFile(path.join(renameDeclineDir, 'index.html'), 'utf8'),
+        '<p>Keep me</p>\n',
+      );
+      await assert.rejects(() => fs.lstat(path.join(renameDeclineDir, 'index.pen.html')));
+
+      // 2. Neither index.html nor index.pen.html exists -> offers creating index.pen.html
+      const createDir = path.join(tmpRoot, 'create-yes');
+      await fs.mkdir(createDir, { recursive: true });
+      const createConfirms: Array<{ q: string; def?: boolean }> = [];
+      const createOut = createBufferedOutput();
+      const createRes = await runInitCommand({
+        cwd: createDir,
+        interactive: true,
+        output: createOut,
+        prompts: {
+          text: async () => 'Fresh Classic',
+          select: async () => 'Public' as never,
+          multiSelect: async () => ['classic-1'] as never,
+          confirm: async (q, def) => {
+            createConfirms.push({ q, def });
+            return q.startsWith('Create an index.pen.html');
+          },
+        },
+      });
+      assert.deepEqual(createConfirms, [
+        { q: 'Create an index.pen.html file?', def: true },
+        { q: 'Do you want to push this to CodePen right now?', def: false },
+      ]);
+      assert.ok(createRes.writtenFiles.includes('index.pen.html'));
+      assert.equal(await fs.readFile(path.join(createDir, 'index.pen.html'), 'utf8'), '');
+      const createStdout = stripAnsi(createOut.stdout());
+      assert.ok(
+        createStdout.includes(
+          '\n⚠ The classic block requires an `index.pen.html` file, which was not found in this folder.\n\n',
+        ),
+        createStdout,
+      );
+      assert.match(createStdout, /\+\s+index\.pen\.html/);
+
+      // 2b. Declining create does not create index.pen.html
+      const createDeclineDir = path.join(tmpRoot, 'create-no');
+      await fs.mkdir(createDeclineDir, { recursive: true });
+      const createNoRes = await runInitCommand({
+        cwd: createDeclineDir,
+        interactive: true,
+        output: createSilentOutput(),
+        prompts: {
+          text: async () => 'No Pen HTML',
+          select: async () => 'Public' as never,
+          multiSelect: async () => ['classic-1'] as never,
+          confirm: async () => false,
+        },
+      });
+      assert.equal(createNoRes.writtenFiles.includes('index.pen.html'), false);
+      await assert.rejects(() => fs.lstat(path.join(createDeclineDir, 'index.pen.html')));
+
+      // 3. index.pen.html already exists -> skips the prompt completely (even if index.html also exists)
+      const existingPenHtmlDir = path.join(tmpRoot, 'already-has-pen-html');
+      await fs.mkdir(existingPenHtmlDir, { recursive: true });
+      await fs.writeFile(path.join(existingPenHtmlDir, 'index.html'), '<h1>Other</h1>\n', 'utf8');
+      await fs.writeFile(
+        path.join(existingPenHtmlDir, 'index.pen.html'),
+        '<h1>Existing Classic</h1>\n',
+        'utf8',
+      );
+      const skipConfirms: Array<{ q: string; def?: boolean }> = [];
+      const skipOut = createBufferedOutput();
+      const skipRes = await runInitCommand({
+        cwd: existingPenHtmlDir,
+        interactive: true,
+        output: skipOut,
+        prompts: {
+          text: async () => 'Existing Classic',
+          select: async () => 'Public' as never,
+          multiSelect: async () => ['classic-1'] as never,
+          confirm: async (q, def) => {
+            skipConfirms.push({ q, def });
+            return false;
+          },
+        },
+      });
+      assert.deepEqual(skipConfirms, [
+        { q: 'Do you want to push this to CodePen right now?', def: false },
+      ]);
+      assert.equal(skipRes.writtenFiles.includes('index.pen.html'), false);
+      assert.doesNotMatch(stripAnsi(skipOut.stdout()), /requires an `index\.pen\.html`/);
+      assert.equal(
+        await fs.readFile(path.join(existingPenHtmlDir, 'index.pen.html'), 'utf8'),
+        '<h1>Existing Classic</h1>\n',
+      );
+      assert.equal(
+        await fs.readFile(path.join(existingPenHtmlDir, 'index.html'), 'utf8'),
+        '<h1>Other</h1>\n',
+      );
     } finally {
       await fs.rm(tmpRoot, { recursive: true, force: true });
     }

@@ -32,7 +32,12 @@ import {
   resolveAccessOrVisibility,
 } from '../utils/cli-options.js';
 import { fmt } from '../utils/format.js';
-import { fileExistsRegular, isWithinRoot, readSafeJsonObject } from '../utils/fs-safe.js';
+import {
+  fileExistsRegular,
+  isWithinRoot,
+  readSafeJsonObject,
+  resolveSafeFile,
+} from '../utils/fs-safe.js';
 import { extractHtmlTitle } from '../utils/html.js';
 import { printJsonResponse } from '../utils/json.js';
 import { defaultOutput, type CommandOutput } from '../utils/output.js';
@@ -113,6 +118,18 @@ export interface InitCommandResult {
   blocks: string[];
   writtenFiles: string[];
   exitCode?: number;
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.lstat(filePath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function hasPackageJsonDependencies(dirRealpath: string): Promise<boolean> {
@@ -351,6 +368,31 @@ export async function runInitCommand(
     }
   }
 
+  // 4. Classic Pen HTML entrypoint: if `classic` was chosen and `index.pen.html` does not exist yet,
+  // offer to rename an existing `index.html` or create an `index.pen.html`.
+  let classicHtmlAction: 'rename' | 'create' | null = null;
+  const penHtmlPath = path.join(realTargetDir, 'index.pen.html');
+  if (interactive && selectedBlocks.includes('classic-1')) {
+    const penHtmlExists = await pathExists(penHtmlPath);
+    if (!penHtmlExists) {
+      const hasIndexHtml = await fileExistsRegular(indexPath);
+      output.log('');
+      output.log(
+        `${fmt.boldYellow('⚠')} ${fmt.boldYellow('The classic block requires an `index.pen.html` file, which was not found in this folder.')}`,
+      );
+      output.log('');
+      if (hasIndexHtml) {
+        if (await confirmImpl('Rename index.html to index.pen.html?', true)) {
+          classicHtmlAction = 'rename';
+        }
+      } else {
+        if (await confirmImpl('Create an index.pen.html file?', true)) {
+          classicHtmlAction = 'create';
+        }
+      }
+    }
+  }
+
   // Extra CLI-only metadata fields (not asked in UI)
   const description =
     options.description !== undefined ? options.description : (existingInfo?.description ?? '');
@@ -436,6 +478,19 @@ export async function runInitCommand(
     writtenFiles.push(`${CODEPEN_DIR}/${CLASSIC_CONFIG_FILENAME}`);
   }
 
+  if (classicHtmlAction === 'rename') {
+    const safeIndex = await resolveSafeFile(indexPath, realTargetDir);
+    if (safeIndex && isWithinRoot(penHtmlPath, realTargetDir) && !(await pathExists(penHtmlPath))) {
+      await fs.rename(safeIndex.realPath, penHtmlPath);
+      writtenFiles.push('index.pen.html');
+    }
+  } else if (classicHtmlAction === 'create') {
+    if (isWithinRoot(penHtmlPath, realTargetDir) && !(await pathExists(penHtmlPath))) {
+      await fs.writeFile(penHtmlPath, '', { encoding: 'utf8', flag: 'wx' });
+      writtenFiles.push('index.pen.html');
+    }
+  }
+
   const result: InitCommandResult = {
     initialized: true,
     aborted: false,
@@ -476,7 +531,11 @@ export async function runInitCommand(
   output.log(`  ${fmt.dim('Blocks:')} ${fmt.cyan(selectedBlocks.join(', '))}`);
   output.log('');
   for (const rel of writtenFiles) {
-    output.log(`  ${fmt.boldGreen('+')} ${rel}`);
+    if (rel === 'index.pen.html' && classicHtmlAction === 'rename') {
+      output.log(`  ${fmt.boldCyan('→')} index.html → index.pen.html`);
+    } else {
+      output.log(`  ${fmt.boldGreen('+')} ${rel}`);
+    }
   }
 
   if (interactive) {
