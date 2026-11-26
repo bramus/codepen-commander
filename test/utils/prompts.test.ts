@@ -469,4 +469,143 @@ describe('arrow-key promptSelect', () => {
     const fallbackSelected = await fallbackPromise;
     assert.deepEqual(fallbackSelected, ['validate-1', 'fingerprint-1', 'classic-1']);
   });
+
+  it('enforces mutual exclusivity for exclusive options in promptMultiSelect (TTY and non-TTY fallback)', async () => {
+    const exclusiveOptions: MultiSelectOption<string>[] = [
+      { value: 'validate-1', label: 'validate', description: 'required', checked: true, locked: true },
+      { value: 'fingerprint-1', label: 'fingerprint', description: 'required', checked: true, locked: true },
+      { value: 'packages-1', label: 'packages', description: 'esm.sh packages', checked: false },
+      { value: 'sass-1', label: 'sass', description: 'sass compiler', checked: false },
+      { value: 'classic-1', label: 'classic', description: 'classic mode', checked: false, exclusive: true },
+    ];
+
+    // 1. Checking a non-exclusive option (packages) disallows checking classic
+    const tty1 = createMockTty({ isTTY: true, columns: 100, rows: 24 });
+    const p1 = promptMultiSelectWithIO('Blocks to add', exclusiveOptions, {
+      input: tty1.input,
+      output: tty1.output,
+      term: 'xterm-256color',
+    });
+    await new Promise((r) => setImmediate(r));
+    const initialFrame = stripAnsi(tty1.getLastChunk()).replace(/^\x1b\[\?25l/, '');
+    assert.ok(
+      initialFrame.includes(
+        '\n\n  ℹ Use ↑/↓ to navigate, Space to select. Press Enter to confirm.',
+      ),
+      initialFrame,
+    );
+    const frameLineCount = (chunk: string) =>
+      stripAnsi(chunk)
+        .replace(/^[\x1b\[\]0-9;?AJr\r]+/, '')
+        .split('\n').length;
+    const initialLineCount = frameLineCount(tty1.getLastChunk());
+
+    // Toggle packages ON, move down twice to classic -> hover info replaces footer in-place (no jump)
+    tty1.input.write(' \x1b[B\x1b[B');
+    await new Promise((r) => setImmediate(r));
+    const hoveredBlockedClassic = stripAnsi(tty1.getLastChunk());
+    assert.ok(hoveredBlockedClassic.includes('[✓] packages'), hoveredBlockedClassic);
+    assert.ok(hoveredBlockedClassic.includes('→ [ ] classic'), hoveredBlockedClassic);
+    assert.ok(
+      hoveredBlockedClassic.includes(
+        '\n\n  ℹ "classic" cannot be selected while "packages" is selected.',
+      ),
+      hoveredBlockedClassic,
+    );
+    assert.equal(frameLineCount(tty1.getLastChunk()), initialLineCount);
+
+    // Attempt Space on blocked classic -> must stay unchecked & show prominent ⚠ warning in-place (no jump)
+    tty1.input.write(' ');
+    await new Promise((r) => setImmediate(r));
+    const blockedClassic = stripAnsi(tty1.getLastChunk());
+    assert.ok(blockedClassic.includes('[✓] packages'), blockedClassic);
+    assert.ok(blockedClassic.includes('→ [ ] classic'), blockedClassic);
+    assert.ok(
+      blockedClassic.includes('\n\n  ⚠ "classic" cannot be selected while "packages" is selected.'),
+      blockedClassic,
+    );
+    assert.equal(frameLineCount(tty1.getLastChunk()), initialLineCount);
+
+    // Move up to sass (non-exclusive) and toggle ON -> allowed alongside packages!
+    tty1.input.write('\x1b[A ');
+    await new Promise((r) => setImmediate(r));
+    const bothOptional = stripAnsi(tty1.getLastChunk());
+    assert.ok(bothOptional.includes('[✓] packages'), bothOptional);
+    assert.ok(bothOptional.includes('→ [✓] sass'), bothOptional);
+
+    // Pressing 'a' when all non-exclusive optional items are selected unselects them (classic still unchecked)
+    tty1.input.write('a');
+    await new Promise((r) => setImmediate(r));
+    const cleared = stripAnsi(tty1.getLastChunk());
+    assert.ok(cleared.includes('[ ] packages'), cleared);
+    assert.ok(cleared.includes('[ ] sass'), cleared);
+    assert.ok(cleared.includes('[ ] classic'), cleared);
+
+    // Now move down to classic and toggle ON -> succeeds!
+    tty1.input.write('\x1b[B ');
+    await new Promise((r) => setImmediate(r));
+    const classicOn = stripAnsi(tty1.getLastChunk());
+    assert.ok(classicOn.includes('→ [✓] classic'), classicOn);
+
+    // Move up twice to packages and attempt Space -> disallowed while classic is selected!
+    tty1.input.write('\x1b[A\x1b[A ');
+    await new Promise((r) => setImmediate(r));
+    const blockedPackages = stripAnsi(tty1.getLastChunk());
+    assert.ok(blockedPackages.includes('→ [ ] packages'), blockedPackages);
+    assert.ok(blockedPackages.includes('[✓] classic'), blockedPackages);
+    assert.ok(blockedPackages.includes('"packages" cannot be selected while "classic" is selected.'), blockedPackages);
+
+    // Pressing 'a' while classic is selected clears classic (never checks classic + packages together)
+    tty1.input.write('a');
+    await new Promise((r) => setImmediate(r));
+    const clearedClassic = stripAnsi(tty1.getLastChunk());
+    assert.ok(clearedClassic.includes('[ ] classic'), clearedClassic);
+    assert.ok(clearedClassic.includes('[ ] packages'), clearedClassic);
+
+    // Pressing 'a' when nothing optional is selected selects only non-exclusive optional items (packages + sass)
+    tty1.input.write('a');
+    await new Promise((r) => setImmediate(r));
+    const onlyNonExclusive = stripAnsi(tty1.getLastChunk());
+    assert.ok(onlyNonExclusive.includes('[✓] packages'), onlyNonExclusive);
+    assert.ok(onlyNonExclusive.includes('[✓] sass'), onlyNonExclusive);
+    assert.ok(onlyNonExclusive.includes('[ ] classic'), onlyNonExclusive);
+
+    tty1.input.write('\r');
+    assert.deepEqual(await p1, ['validate-1', 'fingerprint-1', 'packages-1', 'sass-1']);
+
+    // 2. When exclusive option (classic) starts auto-checked, cursor starts on classic (skipping blocked options)
+    const classicPrechecked = exclusiveOptions.map((o) =>
+      o.value === 'classic-1' ? { ...o, checked: true } : o,
+    );
+    const tty2 = createMockTty({ isTTY: true, columns: 100, rows: 24 });
+    const p2 = promptMultiSelectWithIO('Blocks to add', classicPrechecked, {
+      input: tty2.input,
+      output: tty2.output,
+      term: 'xterm-256color',
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.ok(stripAnsi(tty2.getLastChunk()).includes('→ [✓] classic'));
+    tty2.input.write('\r');
+    assert.deepEqual(await p2, ['validate-1', 'fingerprint-1', 'classic-1']);
+
+    // 3. Non-TTY fallback refuses conflicting toggles but allows unchecking exclusive then checking optional
+    const nonTtyBlocked = createMockTty({ isTTY: false });
+    const fb1 = promptMultiSelectWithIO('Blocks to add', exclusiveOptions, {
+      input: nonTtyBlocked.input,
+      output: nonTtyBlocked.output,
+    });
+    await new Promise((r) => setImmediate(r));
+    nonTtyBlocked.input.write('packages,classic\n');
+    assert.deepEqual(await fb1, ['validate-1', 'fingerprint-1', 'packages-1']);
+    assert.ok(stripAnsi(nonTtyBlocked.getRawOutput()).includes('"classic" cannot be selected while "packages" is selected.'));
+
+    const nonTtySwitch = createMockTty({ isTTY: false });
+    const fb2 = promptMultiSelectWithIO('Blocks to add', classicPrechecked, {
+      input: nonTtySwitch.input,
+      output: nonTtySwitch.output,
+    });
+    await new Promise((r) => setImmediate(r));
+    nonTtySwitch.input.write('classic,packages\n');
+    assert.deepEqual(await fb2, ['validate-1', 'fingerprint-1', 'packages-1']);
+  });
 });

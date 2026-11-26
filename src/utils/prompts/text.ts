@@ -78,7 +78,7 @@ export async function promptValidatedTextWithIO<T = string>(
       const raw = await readInteractiveLine(promptPrefix, input, output, f);
       const result = await options.validate(raw);
       if (!result.ok) {
-        output.write(`  ${f.yellow(result.error)}\n`);
+        output.write(`\n  ${f.boldYellow('⚠')} ${f.boldYellow(result.error)}\n\n`);
         continue;
       }
 
@@ -97,7 +97,7 @@ export async function promptValidatedTextWithIO<T = string>(
       const raw = await rl.question(`  ${f.boldCyan('→')} `);
       const result = await options.validate(raw);
       if (!result.ok) {
-        output.write(`  ${f.yellow(result.error)}\n`);
+        output.write(`\n  ${f.boldYellow('⚠')} ${f.boldYellow(result.error)}\n\n`);
         continue;
       }
       const displayText = result.displayValue ?? String(result.value);

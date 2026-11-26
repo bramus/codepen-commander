@@ -4,6 +4,7 @@ import type { Command } from 'commander';
 import type { PenAccess } from '../api/types.js';
 import {
   INIT_BLOCK_CHOICES,
+  assertNoClassicBlockConflict,
   buildPenConfigObject,
   buildStarterClassicConfig,
   normalizePenBlocksList,
@@ -31,7 +32,7 @@ import {
   resolveAccessOrVisibility,
 } from '../utils/cli-options.js';
 import { fmt } from '../utils/format.js';
-import { fileExistsRegular, isWithinRoot } from '../utils/fs-safe.js';
+import { fileExistsRegular, isWithinRoot, readSafeJsonObject } from '../utils/fs-safe.js';
 import { extractHtmlTitle } from '../utils/html.js';
 import { printJsonResponse } from '../utils/json.js';
 import { defaultOutput, type CommandOutput } from '../utils/output.js';
@@ -114,6 +115,20 @@ export interface InitCommandResult {
   exitCode?: number;
 }
 
+async function hasPackageJsonDependencies(dirRealpath: string): Promise<boolean> {
+  const pkgJson = await readSafeJsonObject(path.join(dirRealpath, 'package.json'), dirRealpath);
+  if (!pkgJson || !isPlainObject(pkgJson.dependencies)) {
+    return false;
+  }
+  return Object.entries(pkgJson.dependencies).some(
+    ([name, version]) =>
+      typeof name === 'string' &&
+      name.trim().length > 0 &&
+      typeof version === 'string' &&
+      version.trim().length > 0,
+  );
+}
+
 export async function runInitCommand(
   options: RunInitCommandOptions = {},
 ): Promise<InitCommandResult> {
@@ -136,6 +151,7 @@ export async function runInitCommand(
       typeof options.blocks === 'string'
         ? parseBlocksOption(options.blocks)
         : normalizePenBlocksList(options.blocks);
+    assertNoClassicBlockConflict(explicitBlocks);
   }
 
   assertValidTagCount(options.tags);
@@ -295,33 +311,44 @@ export async function runInitCommand(
     access = existingInfo?.access ?? 'Public';
   }
 
-  // 3. Blocks multi-select (validate & fingerprint are locked and cannot be unselected)
+  // 3. Blocks multi-select (validate & fingerprint are locked; classic is mutually exclusive with other optional blocks)
   let selectedBlocks: string[];
   if (explicitBlocks !== undefined) {
     selectedBlocks = explicitBlocks;
-  } else if (interactive) {
-    const [existingPenBlocks, hasPackageJson, hasPenHtml] = await Promise.all([
+  } else {
+    const [existingPenBlocks, hasPackageDeps, hasPenHtml] = await Promise.all([
       readPenBlocks(realTargetDir, realTargetDir),
-      fileExistsRegular(path.join(realTargetDir, 'package.json')),
+      hasPackageJsonDependencies(realTargetDir),
       fileExistsRegular(path.join(realTargetDir, 'index.pen.html')),
     ]);
 
-    const blockOptions: MultiSelectOption<string>[] = INIT_BLOCK_CHOICES.map((choice) => ({
-      value: choice.blockName,
-      label: choice.label,
-      description: choice.description,
-      locked: choice.locked,
-      checked:
-        choice.locked ||
-        (choice.id === 'packages' && (Boolean(existingPenBlocks?.hasPackages) || hasPackageJson)) ||
-        (choice.id === 'classic' && (Boolean(existingPenBlocks?.hasClassic) || hasPenHtml)),
-    }));
+    const autoCheckClassic = Boolean(existingPenBlocks?.hasClassic) || hasPenHtml;
+    const autoCheckPackages =
+      !autoCheckClassic && (Boolean(existingPenBlocks?.hasPackages) || hasPackageDeps);
 
-    output.log('');
-    const picked = await multiSelectImpl('Blocks to add', blockOptions);
-    selectedBlocks = normalizePenBlocksList(picked);
-  } else {
-    selectedBlocks = normalizePenBlocksList([]);
+    if (interactive) {
+      const blockOptions: MultiSelectOption<string>[] = INIT_BLOCK_CHOICES.map((choice) => ({
+        value: choice.blockName,
+        label: choice.label,
+        description: choice.description,
+        locked: choice.locked,
+        ...(choice.exclusive ? { exclusive: true } : {}),
+        checked:
+          choice.locked ||
+          (choice.id === 'packages' && autoCheckPackages) ||
+          (choice.id === 'classic' && autoCheckClassic),
+      }));
+
+      output.log('');
+      const picked = await multiSelectImpl('Blocks to add', blockOptions);
+      selectedBlocks = normalizePenBlocksList(picked);
+      assertNoClassicBlockConflict(selectedBlocks);
+    } else {
+      const defaults: string[] = [];
+      if (autoCheckClassic) defaults.push('classic-1');
+      if (autoCheckPackages) defaults.push('packages-1');
+      selectedBlocks = normalizePenBlocksList(defaults);
+    }
   }
 
   // Extra CLI-only metadata fields (not asked in UI)
@@ -394,7 +421,10 @@ export async function runInitCommand(
   await writeUnlinkedProjectInfo(realTargetDir, info);
   const writtenFiles: string[] = [PROJECT_CONFIG_FILENAME];
 
-  const penConfigPayload = buildPenConfigObject(selectedBlocks, { existing: existingPenConfig });
+  const penConfigPayload = buildPenConfigObject(selectedBlocks, {
+    existing: existingPenConfig,
+    pruneUnselected: true,
+  });
   await fs.writeFile(penConfigPath, `${JSON.stringify(penConfigPayload, null, 2)}\n`, 'utf8');
   writtenFiles.push(`${CODEPEN_DIR}/${PEN_CONFIG_FILENAME}`);
 
@@ -497,7 +527,7 @@ export function registerInitCommand(program: Command): void {
     .option('--visibility <level>', 'Alias for --access (Public, Private, Protected, or Collaborators)')
     .option(
       '--blocks <blocks>',
-      'Comma-separated CodePen blocks to enable (e.g. packages,classic; validate and fingerprint are always included)',
+      'Comma-separated CodePen blocks to enable (e.g. packages or classic; classic cannot be combined with other optional blocks; validate and fingerprint are always included)',
     )
     .option('-d, --description <text>', 'Pen description (CLI flag only)')
     .option('--tags <tags>', 'Comma-separated tags, up to 5 (CLI flag only)')

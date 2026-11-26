@@ -10,6 +10,58 @@ import {
   type PromptSelectOutputStream,
 } from './types.js';
 
+function getExclusiveBlockers<T extends string>(
+  options: readonly MultiSelectOption<T>[],
+  selected: ReadonlySet<number>,
+  targetIdx: number,
+): number[] {
+  const target = options[targetIdx];
+  if (!target || target.locked || selected.has(targetIdx)) {
+    return [];
+  }
+
+  const blockers: number[] = [];
+  for (const idx of selected) {
+    if (idx === targetIdx) continue;
+    const other = options[idx];
+    if (!other || other.locked) continue;
+    if (target.exclusive || other.exclusive) {
+      blockers.push(idx);
+    }
+  }
+  return blockers;
+}
+
+function formatExclusiveBlockedNotice<T extends string>(
+  options: readonly MultiSelectOption<T>[],
+  targetIdx: number,
+  blockerIndices: readonly number[],
+): string {
+  const targetLabel = options[targetIdx]?.label ?? '';
+  const blockerLabels = blockerIndices
+    .map((idx) => options[idx]?.label)
+    .filter((label): label is string => Boolean(label))
+    .map((label) => `"${label}"`);
+  const verb = blockerLabels.length === 1 ? 'is' : 'are';
+  return `"${targetLabel}" cannot be selected while ${blockerLabels.join(', ')} ${verb} selected.`;
+}
+
+function initSelectedIndices<T extends string>(options: readonly MultiSelectOption<T>[]): Set<number> {
+  const selected = new Set<number>();
+  options.forEach((opt, idx) => {
+    if (opt.locked) {
+      selected.add(idx);
+    }
+  });
+  options.forEach((opt, idx) => {
+    if (opt.locked || !opt.checked) return;
+    if (getExclusiveBlockers(options, selected, idx).length === 0) {
+      selected.add(idx);
+    }
+  });
+  return selected;
+}
+
 async function promptMultiSelectFallback<T extends string>(
   question: string,
   options: MultiSelectOption<T>[],
@@ -17,12 +69,7 @@ async function promptMultiSelectFallback<T extends string>(
   output: PromptSelectOutputStream,
 ): Promise<T[]> {
   const f = createFormatter(output);
-  const selected = new Set<number>();
-  options.forEach((opt, idx) => {
-    if (opt.locked || opt.checked) {
-      selected.add(idx);
-    }
-  });
+  const selected = initSelectedIndices(options);
 
   output.write(`${f.cyan('◆')} ${f.bold(question)}\n`);
   options.forEach((opt, idx) => {
@@ -61,7 +108,14 @@ async function promptMultiSelectFallback<T extends string>(
         if (selected.has(idx)) {
           selected.delete(idx);
         } else {
-          selected.add(idx);
+          const blockers = getExclusiveBlockers(options, selected, idx);
+          if (blockers.length > 0) {
+            output.write(
+              `\n  ${f.boldYellow('⚠')} ${f.boldYellow(formatExclusiveBlockedNotice(options, idx, blockers))}\n`,
+            );
+          } else {
+            selected.add(idx);
+          }
         }
       }
     }
@@ -81,31 +135,28 @@ function promptMultiSelectInteractive<T extends string>(
   input: PromptSelectInputStream,
   output: PromptSelectOutputStream,
 ): Promise<T[]> {
-  const selected = new Set<number>();
-  options.forEach((opt, idx) => {
-    if (opt.locked || opt.checked) {
-      selected.add(idx);
-    }
-  });
+  const selected = initSelectedIndices(options);
 
+  const firstSelectable = options.findIndex(
+    (opt, idx) => !opt.locked && getExclusiveBlockers(options, selected, idx).length === 0,
+  );
   const firstUnlocked = options.findIndex((opt) => !opt.locked);
-  const initialCursor = firstUnlocked !== -1 ? firstUnlocked : 0;
+  const initialCursor =
+    firstSelectable !== -1 ? firstSelectable : firstUnlocked !== -1 ? firstUnlocked : 0;
   let notice: string | null = null;
 
   return runInteractiveListPrompt<T[]>({
     question,
     itemCount: options.length,
     initialCursor,
-    reserveRows: 6,
+    reserveRows: 7,
     input,
     output,
     onBeforeNavigate() {
       notice = null;
     },
     renderActiveLines({ cursorIndex, windowStart, windowEnd, fmt: f }) {
-      const lines: string[] = [
-        `${f.cyan('◆')} ${f.bold(question)} ${f.dim('(↑/↓, Space toggle, Enter confirm)')}`,
-      ];
+      const lines: string[] = [`${f.cyan('◆')} ${f.bold(question)}`];
 
       if (windowStart > 0) {
         lines.push(`    ${f.dim(`↑ ${windowStart} more`)}`);
@@ -115,6 +166,7 @@ function promptMultiSelectInteractive<T extends string>(
         const opt = options[i]!;
         const isCursor = i === cursorIndex;
         const isChecked = selected.has(i);
+        const isBlocked = getExclusiveBlockers(options, selected, i).length > 0;
         const box = isChecked
           ? opt.locked
             ? f.dim('[✓]')
@@ -122,10 +174,15 @@ function promptMultiSelectInteractive<T extends string>(
           : f.dim('[ ]');
 
         if (isCursor) {
-          const desc = opt.description ? ` ${f.cyan(`— ${opt.description}`)}` : '';
-          lines.push(`  ${f.boldCyan('→')} ${box} ${f.boldCyan(opt.label)}${desc}`);
+          if (isBlocked) {
+            const desc = opt.description ? ` ${f.dim(`— ${opt.description}`)}` : '';
+            lines.push(`  ${f.cyan('→')} ${box} ${f.dim(opt.label)}${desc}`);
+          } else {
+            const desc = opt.description ? ` ${f.cyan(`— ${opt.description}`)}` : '';
+            lines.push(`  ${f.boldCyan('→')} ${box} ${f.boldCyan(opt.label)}${desc}`);
+          }
         } else {
-          const labelText = opt.locked ? f.dim(opt.label) : opt.label;
+          const labelText = opt.locked || isBlocked ? f.dim(opt.label) : opt.label;
           const desc = opt.description ? ` ${f.dim(`— ${opt.description}`)}` : '';
           lines.push(`    ${box} ${labelText}${desc}`);
         }
@@ -136,8 +193,25 @@ function promptMultiSelectInteractive<T extends string>(
         lines.push(`    ${f.dim(`↓ ${hiddenBelow} more`)}`);
       }
 
+      lines.push('');
       if (notice) {
-        lines.push(`  ${f.yellow(notice)}`);
+        lines.push(`  ${f.boldYellow('⚠')} ${f.boldYellow(notice)}`);
+      } else {
+        const cursorOpt = options[cursorIndex];
+        const cursorBlockers = getExclusiveBlockers(options, selected, cursorIndex);
+        if (cursorBlockers.length > 0) {
+          lines.push(
+            `  ${f.boldCyan('ℹ')} ${f.cyan(formatExclusiveBlockedNotice(options, cursorIndex, cursorBlockers))}`,
+          );
+        } else if (cursorOpt?.locked) {
+          lines.push(
+            `  ${f.boldCyan('ℹ')} ${f.cyan(`"${cursorOpt.label}" is required and cannot be unselected.`)}`,
+          );
+        } else {
+          lines.push(
+            `  ${f.boldCyan('ℹ')} ${f.cyan('Use ↑/↓ to navigate, Space to select. Press Enter to confirm.')}`,
+          );
+        }
       }
 
       return lines;
@@ -158,11 +232,15 @@ function promptMultiSelectInteractive<T extends string>(
         const opt = options[ctx.cursorIndex]!;
         if (opt.locked) {
           notice = `"${opt.label}" is required and cannot be unselected.`;
-        } else {
+        } else if (selected.has(ctx.cursorIndex)) {
           notice = null;
-          if (selected.has(ctx.cursorIndex)) {
-            selected.delete(ctx.cursorIndex);
+          selected.delete(ctx.cursorIndex);
+        } else {
+          const blockers = getExclusiveBlockers(options, selected, ctx.cursorIndex);
+          if (blockers.length > 0) {
+            notice = formatExclusiveBlockedNotice(options, ctx.cursorIndex, blockers);
           } else {
+            notice = null;
             selected.add(ctx.cursorIndex);
           }
         }
@@ -172,15 +250,42 @@ function promptMultiSelectInteractive<T extends string>(
 
       if (!key?.ctrl && !key?.meta && str && str.toLowerCase() === 'a') {
         notice = null;
-        const unlockedIndices = options
-          .map((opt, idx) => (opt.locked ? -1 : idx))
-          .filter((idx) => idx !== -1);
-        const allUnlockedSelected = unlockedIndices.every((idx) => selected.has(idx));
-        for (const idx of unlockedIndices) {
-          if (allUnlockedSelected) {
-            selected.delete(idx);
+        const hasExclusiveOptions = options.some((opt) => !opt.locked && opt.exclusive);
+        if (!hasExclusiveOptions) {
+          const unlockedIndices = options
+            .map((opt, idx) => (opt.locked ? -1 : idx))
+            .filter((idx) => idx !== -1);
+          const allUnlockedSelected = unlockedIndices.every((idx) => selected.has(idx));
+          for (const idx of unlockedIndices) {
+            if (allUnlockedSelected) {
+              selected.delete(idx);
+            } else {
+              selected.add(idx);
+            }
+          }
+        } else {
+          const selectedExclusive = [...selected].some((idx) => {
+            const opt = options[idx];
+            return Boolean(opt && !opt.locked && opt.exclusive);
+          });
+          if (selectedExclusive) {
+            for (let idx = 0; idx < options.length; idx++) {
+              if (!options[idx]!.locked) {
+                selected.delete(idx);
+              }
+            }
           } else {
-            selected.add(idx);
+            const nonExclusiveUnlocked = options
+              .map((opt, idx) => (!opt.locked && !opt.exclusive ? idx : -1))
+              .filter((idx) => idx !== -1);
+            const allSelected = nonExclusiveUnlocked.every((idx) => selected.has(idx));
+            for (const idx of nonExclusiveUnlocked) {
+              if (allSelected) {
+                selected.delete(idx);
+              } else {
+                selected.add(idx);
+              }
+            }
           }
         }
         ctx.rerender();

@@ -59,7 +59,7 @@ async function promptSelectFallback<T extends string>(
       }
 
       output.write(
-        `  ${f.yellow(`Please enter a number between 1 and ${options.length} (or an option name).`)}\n`,
+        `\n  ${f.boldYellow('⚠')} ${f.boldYellow(`Please enter a number between 1 and ${options.length} (or an option name).`)}\n\n`,
       );
     }
   } finally {

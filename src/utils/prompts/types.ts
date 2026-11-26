@@ -31,6 +31,12 @@ export interface MultiSelectOption<T extends string = string> {
   checked?: boolean;
   /** When true, the option stays checked and cannot be unselected. */
   locked?: boolean;
+  /**
+   * When true, this option is mutually exclusive with all other non-locked options:
+   * checking it disallows checking other non-locked options, and checking any other
+   * non-locked option disallows checking it.
+   */
+  exclusive?: boolean;
 }
 
 export interface PromptSelectInputStream extends NodeJS.ReadableStream {

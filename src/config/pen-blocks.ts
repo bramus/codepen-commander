@@ -18,6 +18,7 @@ export interface InitBlockChoice {
   label: string;
   description: string;
   locked: boolean;
+  exclusive?: boolean;
 }
 
 export const INIT_BLOCK_CHOICES: readonly InitBlockChoice[] = Object.freeze([
@@ -48,6 +49,7 @@ export const INIT_BLOCK_CHOICES: readonly InitBlockChoice[] = Object.freeze([
     label: 'classic',
     description: 'CodePen Classic mode (.pen.html + classic.config.json)',
     locked: false,
+    exclusive: true,
   },
 ]);
 
@@ -124,23 +126,55 @@ export function parseBlocksOption(raw: string): string[] {
   return normalizePenBlocksList(parts);
 }
 
+const REQUIRED_BLOCK_TYPES = new Set(REQUIRED_PEN_BLOCKS.map((b) => normalizeBlockType(b)));
+
+/**
+ * Validates that the `classic` block is not combined with any other non-required block.
+ * Throws a `400 CliError` when `classic` appears alongside other optional blocks.
+ */
+export function assertNoClassicBlockConflict(rawBlocks: readonly string[]): void {
+  const normalized = normalizePenBlocksList(rawBlocks);
+  let hasClassic = false;
+  const otherOptional: string[] = [];
+
+  for (const block of normalized) {
+    const blockType = normalizeBlockType(block);
+    if (REQUIRED_BLOCK_TYPES.has(blockType)) continue;
+    if (blockType === 'classic') {
+      hasClassic = true;
+    } else {
+      otherOptional.push(blockType);
+    }
+  }
+
+  if (hasClassic && otherOptional.length > 0) {
+    throw new CliError(
+      400,
+      `Cannot combine the "classic" block with other optional blocks (${otherOptional.join(', ')}).`,
+    );
+  }
+}
+
 /**
  * Builds a `.codepen/pen.config.json` object for the given block names, optionally
- * merging onto an existing `pen.config.json` object.
+ * merging onto an existing `pen.config.json` object. Pass `pruneUnselected: true`
+ * to keep `createdAt`/`version` from existing entries while only emitting `rawBlocks`.
  */
 export function buildPenConfigObject(
   rawBlocks: readonly string[],
-  options: { existing?: Record<string, unknown> | null; nowIso?: string } = {},
+  options: {
+    existing?: Record<string, unknown> | null;
+    nowIso?: string;
+    pruneUnselected?: boolean;
+  } = {},
 ): { blocks: Record<string, { createdAt: string; disabled: boolean; name: string; version: string }> } {
   const blockNames = normalizePenBlocksList(rawBlocks);
   const nowIso = options.nowIso ?? new Date().toISOString();
   const existingBlocks =
     options.existing && isPlainObject(options.existing.blocks) ? options.existing.blocks : {};
 
-  const blocks: Record<
-    string,
-    { createdAt: string; disabled: boolean; name: string; version: string }
-  > = {};
+  type BlockEntry = { createdAt: string; disabled: boolean; name: string; version: string };
+  const existingByKey: Record<string, BlockEntry> = {};
 
   if (options.existing) {
     for (const [key, entry] of Object.entries(existingBlocks)) {
@@ -150,7 +184,7 @@ export function buildPenConfigObject(
         typeof entry.createdAt === 'string' && entry.createdAt.trim() ? entry.createdAt.trim() : nowIso;
       const version =
         typeof entry.version === 'string' && entry.version.trim() ? entry.version.trim() : 'latest';
-      blocks[key] = {
+      existingByKey[key] = {
         createdAt,
         disabled: Boolean(entry.disabled),
         name,
@@ -159,8 +193,10 @@ export function buildPenConfigObject(
     }
   }
 
+  const blocks: Record<string, BlockEntry> = options.pruneUnselected ? {} : { ...existingByKey };
+
   for (const name of blockNames) {
-    const prev = blocks[name];
+    const prev = existingByKey[name];
     blocks[name] = {
       createdAt: prev?.createdAt ?? nowIso,
       disabled: false,
